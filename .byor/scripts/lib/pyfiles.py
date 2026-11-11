@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Vendored by BYOR from ~/generic/dotfiles/byor/scripts/lib/pyfiles.py. Managed by BYOR. Manual edits may be overwritten.
+# Vendored by BYOR from ~/generic/nix/config/byor/scripts/lib/pyfiles.py. Managed by BYOR. Manual edits may be overwritten.
 # /// script
 # requires-python = ">=3.12"
 # dependencies = []

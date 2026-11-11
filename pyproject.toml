@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Learn to draft, build decks and play Magic: The Gathering by self-play"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "numpy>=2",
+    "torch>=2.10",
+]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.14", "ty>=0.0.1a20"]

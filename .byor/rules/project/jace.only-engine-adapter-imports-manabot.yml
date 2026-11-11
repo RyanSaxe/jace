@@ -1,0 +1,36 @@
+id: jace.only-engine-adapter-imports-manabot
+language: Python
+severity: error
+message: Only src/jace/engine/manabot.py may import manabot or managym.
+ignores:
+  - src/jace/engine/manabot.py
+rule:
+  any:
+    - kind: import_from_statement
+      has:
+        field: module_name
+        regex: ^(manabot|managym)(\.|$)
+    - kind: import_statement
+      has:
+        any:
+          - kind: dotted_name
+            regex: ^(manabot|managym)(\.|$)
+          - kind: aliased_import
+            has:
+              kind: dotted_name
+              regex: ^(manabot|managym)(\.|$)
+metadata:
+  byor:
+    rationale: >
+      The engine sits behind jace.engine.GameBatch so that training,
+      evaluation and tests never depend on manabot, and a change in manabot
+      touches one file.
+    agent_prompt: >
+      Do not import manabot or managym here. Use the types in jace.engine
+      (GameBatch, Decisions, Finished, HiddenCards, Outcome). If you need
+      something new from the engine, add it to the GameBatch interface and
+      implement it in src/jace/engine/manabot.py.
+    tags:
+      - python
+      - jace
+      - boundaries

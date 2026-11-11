@@ -11,9 +11,9 @@ module does not generate boosters and does not choose cards.
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-type CardId = int
+from jace.cards import CardId, Pool
+
 type Pack = tuple[CardId, ...]
-type Pool = tuple[CardId, ...]
 
 
 class InvalidDraftError(ValueError):
@@ -164,7 +164,6 @@ def _passed(packs: tuple[Pack, ...], *, round_index: int) -> tuple[Pack, ...]:
 
 
 __all__ = (
-    "CardId",
     "Complete",
     "DraftFormat",
     "IllegalPickError",
@@ -172,7 +171,6 @@ __all__ = (
     "Pack",
     "Picking",
     "PodState",
-    "Pool",
     "advance",
     "open_pod",
 )
