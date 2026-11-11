@@ -1,120 +1,28 @@
 # Write a loop
 
-This guide walks through `limited_iteration`, the example limited loop in
-`src/jace/loops/limited.py`, one step at a time. It then explains how to
-change the reward, the explore rule and the other seats, and what a
-constructed loop would skip.
+A training loop in jace is a function you write from the package's pieces.
+This guide reads the limited loop, then shows where to change it.
 
-The limited loop has run only on the toy game, for one iteration, in a test.
-It shows that the pieces fit together. It has not trained anything on Magic.
+Start with the small one. It trains a player on the toy game in about
+twenty lines of loop:
 
-## A loop is a function
-
-jace has no trainer to configure. A loop is a function that calls the pieces
-in the order it wants. To change what a loop does, edit the function or write
-your own. The pieces it calls stay the same.
-
-`jace.loops` holds two examples. `jace.loops.toy` is the smallest: it calls
-`collect` and `update_player` in a `for` loop on the toy game, and you can
-run it with `uv run python -m jace.loops.toy`. `jace.loops.limited` uses
-every module, and the rest of this guide follows it.
-
-## What the limited loop takes
-
-```python
-def limited_iteration(
-    setup: LimitedSetup,
-    learners: Learners,
-    *,
-    dials: Dials,
-    opponent: Policy,
-    other_seats: Sequence[Drafter],
-    start: StartBatch,
-    rng: random.Random,
-) -> Metrics
+```sh
+uv run python -m jace.loops.toy
 ```
 
-| Argument      | Holds                                                                                                             |
-| ------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `setup`       | What stays fixed for a run: the card pool, the draft format, the booster, the deck rules and the sizes.           |
-| `learners`    | The models being trained, and one optimizer for each of them and for the embedding.                               |
-| `dials`       | This iteration's values from the schedule.                                                                        |
-| `opponent`    | The policy that plays the seat the learner does not.                                                              |
-| `other_seats` | Drafters for the last seats of every pod, such as past versions. The learner drafts the rest.                     |
-| `start`       | A function that starts a batch of games on whatever engine you use.                                               |
-| `rng`         | The source of every random choice in the iteration.                                                               |
+Its source is [`jace/loops/toy.py`](../../src/jace/loops/toy.py).
 
-It returns the metrics of every update as a mapping from a name to a number.
+## The limited loop
 
-A caller asks a schedule for the dials and calls the function once per
-iteration. The test in `tests/test_loops.py` does it for one iteration on
-the toy game:
-
-```python
-metrics = limited_iteration(
-    setup,
-    learners,
-    dials=phased_schedule(drafter_starts=0, pull_ends=10)(5),
-    opponent=policy,
-    other_seats=[],
-    start=lambda matchups: ToyBatch(matchups, games=8, seed=0),
-    rng=random.Random(0),
-)
-```
-
-## The steps
-
-### 1. Set the learning rates
-
-```python
-_set_rate(learners.optimizers["player"], dials.player_rate)
-_set_rate(learners.optimizers["drafter"], dials.drafter_rate)
-```
-
-The schedule owns the two learning rates, so the loop writes them into the
-optimizers first.
-
-### 2. Draft
+`limited_iteration` in
+[`jace/loops/limited.py`](../../src/jace/loops/limited.py) runs one round of
+draft, build, play and learn. This is its body:
 
 ```python
 drafter = model_drafter(learners.drafter, generator=generator)
 records = _draft(setup, drafter=drafter, other_seats=other_seats, rng=rng)
-```
-
-`_draft` opens a booster for every seat of every round of `setup.pods` pods,
-and `run_drafts` drafts all the pods in step. The learner's drafter fills
-every seat that `other_seats` does not, and it picks for all of them in one
-forward pass per pick.
-
-Each `DraftRecord` holds the pool every seat ended with, and every view a
-seat had when it owed a pick. The drafter's update needs those views later.
-
-### 3. Build a deck from each pool
-
-```python
 played_decks, best_decks = _build(setup, learners, records=records, dials=dials, rng=rng)
-```
-
-For each pool, `_build` calls `build_decks` with the deck builder's model as
-the proposer and the deck score as the scorer. It gets back the candidate
-decks, best first, and chooses one to play:
-
-```python
-explore = len(candidates) > 1 and rng.random() < dials.explore_share
-played.append(rng.choice(candidates[1:]) if explore else candidates[0])
-best.append(candidates[0])
-```
-
-The loop keeps both lists. The played decks go to the games, and the
-top-scored decks teach the deck builder.
-
-### 4. Play
-
-```python
-def matchup() -> tuple[Deck, Deck]:
-    first, second = rng.sample(decks, SEATS)
-    return first, second
-
+decks = [candidate.deck for candidate in played_decks]
 
 collected = collect(
     start(matchup),
@@ -127,18 +35,6 @@ collected = collect(
     decisions=setup.decisions,
     generator=generator,
 )
-```
-
-Each game is played with two decks drawn at random, without replacement,
-from the decks of the iteration. `collect` plays until the finished games hold
-`setup.decisions` learner decisions. The loop passes `None` for `pending`, so
-the games still running at that point are discarded.
-
-### 5. Learn
-
-The excerpt is abridged.
-
-```python
 wins, played = _deck_records(decks, collected.games)
 
 metrics |= _update_play_models(setup, learners, rollout=collected.rollout, dials=dials)
@@ -148,76 +44,43 @@ if dials.drafter_rate > 0:
     metrics |= _update_drafter(...)
 ```
 
-`_deck_records` counts each deck's wins and games. A draw counts as half a
-win for each deck.
+| Step  | What happens                                                              |
+| ----- | ------------------------------------------------------------------------- |
+| Draft | Every pod drafts at once. The learner fills the seats `other_seats` does not |
+| Build | Each pool gets ranked candidate decks, and one is chosen to play          |
+| Play  | Random pairs of those decks play until enough decisions are collected     |
+| Learn | The player, guess model, deck score, builder and drafter each take a step |
 
-| Update                | Learns from                                                 | Loss                                                    |
-| --------------------- | ----------------------------------------------------------- | ------------------------------------------------------- |
-| `_update_play_models` | The rollout                                                 | `update_player`, then `update_guess`                    |
-| `_update_deck_score`  | Each played deck's wins and games                           | `score_loss`                                            |
-| `_update_builder`     | The top-scored deck the search found for each pool          | `choice_loss` with weights of one, on `writing_steps`   |
-| `_update_drafter`     | The picks of the learner's seats, and each deck's win rate  | `choice_loss` with the win rate as the reward           |
+The loop has only run on the toy game, in a test. It has not trained
+anything on Magic.
 
-Every update passes the embedding's optimizer to `apply` beside the model's
-own, so the embedding moves with each of them. A deck that played no game
-teaches the deck score and the drafter nothing.
+## What you hand it
 
-## Change the reward
+| Argument      | Holds                                                         |
+| ------------- | ------------------------------------------------------------- |
+| `setup`       | What stays fixed: the card pool, draft format, deck rules, sizes |
+| `learners`    | The models and one optimizer for each                         |
+| `dials`       | This iteration's values from the schedule                     |
+| `opponent`    | The policy in the seat the learner does not play              |
+| `other_seats` | Drafters for seats the learner does not draft, such as past versions |
+| `start`       | A function that starts a batch of games on your engine        |
 
-The player's reward is the game's result, and `advantages` in `jace.train`
-turns it into a signal per decision. To reward the player differently, write
-your own update from `player_loss` and `apply` in place of `update_player`.
+The player and the guess model arrive as functions, so the same loop runs
+on manabot and on the toy game.
 
-The drafter's reward is the win rate of the deck built from its pool. It is
-set in `_update_drafter`:
+## Changing it
 
-```python
-rewards.extend([float(win_rates[deck])] * len(record.views[seat]))
-...
-loss = choice_loss(logits, torch.tensor(chosen), weights=reward - reward.mean())
-```
+| To change                        | Edit                                                    |
+| -------------------------------- | ------------------------------------------------------- |
+| How a dial moves over training   | Write another schedule function                         |
+| Which deck is played for a pool  | The two lines in `_build` that use `explore_share`      |
+| The drafter's reward             | `_update_drafter`, where the reward is the deck's win rate |
+| Who drafts the other seats       | Pass different drafters as `other_seats`                |
+| The order of updates             | Reorder the calls                                       |
 
-Every pick of a seat gets the same reward. To change it, compute another
-number per pick and pass it as `weights`. The two terms after that line are
-separate: the entropy bonus weighted by `dials.drafter_entropy`, and the pull
-toward `learners.human_drafter` weighted by `dials.human_pull`. The pull is
-skipped when `human_drafter` is `None`.
+## Constructed
 
-## Change the explore rule
-
-The deck explore rule is the two lines of `_build` shown in step 3. With
-chance `explore_share`, the loop plays a candidate other than the top-scored
-one, chosen evenly. `build_decks` returns every candidate with its score, so
-any rule that reads scores fits there, such as sampling in proportion to
-them.
-
-[Exploration](../concepts/training.md#exploration) lists the other three
-places a loop explores, and the dial for each.
-
-## Change the other seats
-
-Two arguments set who the learner faces.
-
-`other_seats` is a sequence of `Drafter` functions for the last seats of
-every pod. A `Drafter` takes seat views and returns one card per view, so a
-past version of the model, a model trained on human picks, or a plain
-function that takes the first card all fit. With an empty sequence, the
-learner drafts every seat. The drafter's update learns only from the seats
-the learner drafted.
-
-`opponent` is the `Policy` that plays the seat the learner does not. Pass the
-learner's own policy for self-play, a past version of it, or
-`random_policy(engine_to_card)` from `jace.play`.
-
-## What a constructed loop would skip
-
-No constructed loop is built yet. It would be another short function that
-leaves out two of the steps above:
-
-- It skips `_draft` and `_update_drafter`, and does not import `jace.draft`.
-- Its pools come from a collection in place of a draft. `build_decks` takes
-  a pool as a plain tuple of card ids, so the build step is unchanged.
-
-Playing, the player's and the guess model's updates, and the deck score's
-update do not depend on where a deck came from. A lint rule keeps it that
-way: only `jace.loops` may import `jace.draft`.
+A constructed loop skips the draft and build steps. It starts at `collect`
+with decks you supply, and updates the player, the guess model and the deck
+score. Nothing in those steps imports `jace.draft`. No constructed loop is
+written yet.

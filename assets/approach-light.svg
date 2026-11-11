@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 596 406" role="img" aria-label="How jace trains, as a loop of four steps. Draft: the drafter picks a card from each pack. Build: the builder proposes decks and the deck score ranks them. Play: the player acts, with a guess of the opponent's cards. Learn: the game results update all five models, and the next draft uses the better models. Below the loop, one card embedding: every model reads cards through it, so a new set needs no new weights.">
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#1f2328;text-anchor:middle;font-size:17px}
+.t{font-weight:600}.s{font-size:14px;fill:#59636e}.l{text-anchor:start}
+.line{fill:none;stroke:#1f2328;stroke-width:1.5}.head{fill:#1f2328}
+.box{fill:#ffffff;stroke:#b8bec6}.round{fill:#eef2fd;stroke:#3a5bd9}
+</style>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker></defs>
+<rect class="box" x="18" y="18" width="250" height="100" rx="10"/>
+<text x="143" y="54" class="t">Draft</text>
+<text x="143" y="79" class="s">The drafter picks a card</text>
+<text x="143" y="98" class="s">from each pack</text>
+<rect class="box" x="328" y="18" width="250" height="100" rx="10"/>
+<text x="453" y="54" class="t">Build</text>
+<text x="453" y="79" class="s">The builder proposes decks</text>
+<text x="453" y="98" class="s">and the deck score ranks them</text>
+<rect class="box" x="328" y="178" width="250" height="100" rx="10"/>
+<text x="453" y="214" class="t">Play</text>
+<text x="453" y="239" class="s">The player acts, with a guess</text>
+<text x="453" y="258" class="s">of the opponent's cards</text>
+<rect class="box" x="18" y="178" width="250" height="100" rx="10"/>
+<text x="143" y="214" class="t">Learn</text>
+<text x="143" y="239" class="s">The game results update</text>
+<text x="143" y="258" class="s">all five models</text>
+<path class="line" d="M268 68 H324" marker-end="url(#a)"/>
+<text x="298" y="58" class="s">pools</text>
+<path class="line" d="M453 118 V174" marker-end="url(#a)"/>
+<text x="465" y="153" class="s l">decks</text>
+<path class="line" d="M328 228 H272" marker-end="url(#a)"/>
+<text x="298" y="218" class="s">results</text>
+<path class="line" d="M143 178 V122" marker-end="url(#a)"/>
+<text x="155" y="153" class="s l">better models</text>
+<rect class="round" x="18" y="312" width="560" height="76" rx="10"/>
+<text x="298" y="343" class="t">One card embedding</text>
+<text x="298" y="367" class="s">Every model reads cards through it, so a new set needs no new weights</text>
+</svg>
