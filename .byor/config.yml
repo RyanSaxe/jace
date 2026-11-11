@@ -13,7 +13,7 @@ checks:
     extensions:
       - py
       - pyi
-    run: uv run .byor/scripts/ruff.py
+    run: uv run --with ruff .byor/scripts/ruff.py
     tags:
       - greenfield
       - lint
