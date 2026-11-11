@@ -1,29 +1,59 @@
 # jace
 
-jace learns to draft, build decks and play Magic: The Gathering by self-play.
-It plays its games on the engine from
+jace learns to draft, build decks and play Magic: The Gathering by playing
+against itself. It plays its games on the engine from
 [manabot](https://github.com/loopflowstudio/manabot).
 
-> **Status: early.** Every module has a first version with tests. Nothing has
-> been trained on Magic yet. [Status](docs/status.md) lists what works.
+> **Status: early.** Every part below has a first version with tests. Nothing
+> has been trained on Magic yet. [Status](docs/status.md) says what works.
 
-## Get started
+## The approach
 
-You need Python 3.12, [uv](https://docs.astral.sh/uv/) and a Rust toolchain.
-Installing builds manabot's engine from source.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/approach-dark.svg">
+  <img alt="How jace trains, as a loop of four steps. Draft: the drafter picks a card from each pack. Build: the builder proposes decks and the deck score ranks them. Play: the player acts, with a guess of the opponent's cards. Learn: the game results update all five models, and the next draft uses the better models. Below the loop, one card embedding: every model reads cards through it, so a new set needs no new weights." src="assets/approach-light.svg">
+</picture>
+
+Limited Magic is three decisions that depend on each other: which card to
+pick, which 40 cards to play, and what to do each turn. jace trains a model
+for each, and lets the result of every game teach all of them.
+
+| Model        | Decides                                 | Learns from                         |
+| ------------ | --------------------------------------- | ----------------------------------- |
+| Drafter      | Which card to take from a pack          | How often its decks win             |
+| Deck builder | Which 40 cards to play from a pool      | The best deck a search found        |
+| Deck score   | How good a deck is                      | Which decks won and lost            |
+| Guess model  | What the opponent's deck and hand hold  | The opponent's true cards           |
+| Player       | Each action in a game                   | Whether it won                      |
+
+Three ideas hold the design together:
+
+- **One card embedding.** Every model reads a card as the same vector, and
+  scores cards by that vector. A card from a new set can be drafted and
+  played without retraining an output layer.
+- **A guess of hidden cards.** A separate model predicts the opponent's deck
+  and hand from what has happened, and the player reads its guess. Self-play
+  knows the true cards, so the guess is trained on real answers.
+- **Exploring on a schedule.** How much each model explores, and how fast it
+  learns, are values a schedule sets for every round of training.
+
+[The approach](docs/concepts/approach.md) explains each idea.
+
+## Try it
+
+You need Python 3.12, [uv](https://docs.astral.sh/uv/) and a Rust toolchain,
+because installing builds manabot's engine.
 
 ```sh
 git clone https://github.com/RyanSaxe/jace.git
 cd jace
 uv sync
-uv run pytest -q
+uv run pytest -q                   # 45 tests, about 3 seconds
+uv run python -m jace.loops.toy    # train a player on a toy game
 ```
 
-To see training work, run the smallest example. It needs no game engine:
-
-```sh
-uv run python -m jace.loops.toy
-```
+The last command needs no game engine. The player learns a game where the
+highest card wins, and prints how often it picks its best card:
 
 ```text
 iteration  1  best card 0.36  win rate 0.56
@@ -31,60 +61,18 @@ iteration 20  best card 0.59  win rate 0.60
 iteration 40  best card 0.78  win rate 0.74
 ```
 
-The player learns a toy game where the highest card wins. The output above
-shows three of its nine lines.
-
-## How it works
-
-```mermaid
-flowchart LR
-    draft["Draft"] -->|pools| build["Build decks"]
-    build -->|decks| play["Play games"]
-    play -->|results| learn["Train every model"]
-```
-
-Training repeats these four steps. Five models take part, and all of them
-read cards through one shared card embedding.
-
-| Model        | Job                                      |
-| ------------ | ---------------------------------------- |
-| Drafter      | Picks a card from each pack              |
-| Deck builder | Proposes decks from a pool of picks      |
-| Deck score   | Predicts how often a deck wins           |
-| Guess model  | Predicts the opponent's deck and hand    |
-| Player       | Chooses each action in a game            |
-
-jace has no trainer class. A training loop is a short function you write
-from the package's pieces, and
-[`jace.loops.limited`](src/jace/loops/limited.py) is the example to read
-first. Constructed play is the same code without the draft step.
-
-## Modules
-
-| Module          | Holds                                        |
-| --------------- | -------------------------------------------- |
-| `jace.cards`    | Card records and the shared card embedding   |
-| `jace.engine`   | `GameBatch`, the one way games are played    |
-| `jace.draft`    | Boosters, the draft pod, the drafter         |
-| `jace.decks`    | The deck score and the deck builder          |
-| `jace.play`     | The guess model and the player               |
-| `jace.train`    | Game collection, losses, the update step     |
-| `jace.eval`     | Win rates and the guess model's check        |
-| `jace.tracking` | Run records as plain files                   |
-| `jace.loops`    | Example loops and schedules                  |
-
 ## Documentation
 
-| Read                                              | To learn                                  |
-| ------------------------------------------------- | ----------------------------------------- |
-| [Install](docs/getting-started/install.md)        | Requirements, tests, the pre-commit hook  |
-| [Architecture](docs/concepts/architecture.md)     | What each module owns and imports         |
-| [Models](docs/concepts/models.md)                 | The card embedding and the five models    |
-| [Training](docs/concepts/training.md)             | Game collection, losses and schedules     |
-| [Write a loop](docs/guides/write-a-loop.md)       | How the limited loop works and changes    |
-| [Run records](docs/reference/run-records.md)      | The files a run writes                    |
-| [Status](docs/status.md)                          | What works today and what is not built    |
-| [Contributing](docs/contributing/README.md)       | The checks and the design rules           |
+| Page                                           | What it explains                               |
+| ---------------------------------------------- | ---------------------------------------------- |
+| [The approach](docs/concepts/approach.md)      | The training loop and the ideas behind it      |
+| [Architecture](docs/concepts/architecture.md)  | The modules and how games reach them           |
+| [Models](docs/concepts/models.md)              | What each model reads and returns              |
+| [Training](docs/concepts/training.md)          | From played games to a gradient step           |
+| [Write a loop](docs/guides/write-a-loop.md)    | How to assemble and change a training loop     |
+| [Run records](docs/reference/run-records.md)   | The files a training run writes                |
+| [Status](docs/status.md)                       | What works today and what is not built         |
+| [Contributing](docs/contributing/README.md)    | Set-up, checks and the design rules            |
 
 ## Licence
 

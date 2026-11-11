@@ -1,38 +1,16 @@
 # Documentation
 
-jace learns to draft, build decks and play Magic: The Gathering by self-play.
-It is at an early stage, and [Status](status.md) says what works today.
+Start with [The approach](concepts/approach.md). It explains what jace is
+trying to do, and the other pages build on it.
 
-## Getting started
-
-- [Install](getting-started/install.md) lists the requirements and explains
-  how to install jace, run the tests, run the example and install the
-  pre-commit hook.
-
-## Concepts
-
-- [Architecture](concepts/architecture.md) explains what each module owns,
-  which module imports which, the three state machines and the `GameBatch`
-  interface.
-- [Models](concepts/models.md) explains the shared card embedding, the
-  drafter, the deck score, the deck builder, the guess model and the player.
-- [Training](concepts/training.md) explains game collection, advantages, the
-  losses, the player's update rule, exploration and schedules.
-
-## Guides
-
-- [Write a loop](guides/write-a-loop.md) walks through the limited loop step
-  by step and explains how to change the reward, the explore rule and the
-  other seats.
-
-## Reference
-
-- [Run records](reference/run-records.md) describes each file a run writes
-  to disk, and the states a run moves through.
-- [Status](status.md) lists what works today, how it was checked, and what
-  is not built yet.
-
-## Change jace
-
-- [Contributing](contributing/README.md) explains how to set up a checkout,
-  run the checks, follow the design and testing rules, and add a lint rule.
+| Page                                       | What it explains                             |
+| ------------------------------------------ | -------------------------------------------- |
+| [Install](getting-started/install.md)      | Requirements, the tests and the example      |
+| [The approach](concepts/approach.md)       | The training loop and the ideas behind it    |
+| [Architecture](concepts/architecture.md)   | The modules and how games reach them         |
+| [Models](concepts/models.md)               | What each model reads and returns            |
+| [Training](concepts/training.md)           | From played games to a gradient step         |
+| [Write a loop](guides/write-a-loop.md)     | How to assemble and change a training loop   |
+| [Run records](reference/run-records.md)    | The files a training run writes              |
+| [Status](status.md)                        | What works today and what is not built       |
+| [Contributing](contributing/README.md)     | Set-up, checks and the design rules          |
