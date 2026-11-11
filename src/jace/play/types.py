@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from torch import Tensor
 
-__all__ = ("Boards", "Guess", "Guesser", "Policy")
+__all__ = ("Boards", "Earlier", "Guess", "Guesser", "Policy")
 
 # The engine's named arrays as tensors, each [n, ...].
 type Boards = Mapping[str, Tensor]
@@ -26,8 +26,16 @@ class Guess:
     hand: Tensor
 
 
+@dataclass(frozen=True, slots=True)
+class Earlier:
+    # guesses: the same seat's earlier guesses in this game, newest first, each [n, t, cards].
+    guesses: Guess
+    # mask: bool [n, t], False where the game had fewer earlier decisions. t may be 0.
+    mask: Tensor
+
+
 # (boards, guess) -> (action logits [n, max_actions] with illegal actions at -inf, win chance [n]).
 type Policy = Callable[[Boards, Guess], tuple[Tensor, Tensor]]
 
-# (boards, earlier guesses [n, t, cards], earlier mask [n, t] bool) -> the new guess [n, cards].
-type Guesser = Callable[[Boards, Guess, Tensor], Guess]
+# (boards, the game's earlier guesses) -> the new guess, each [n, cards].
+type Guesser = Callable[[Boards, Earlier], Guess]

@@ -15,7 +15,7 @@ from typing import Protocol
 import numpy as np
 import numpy.typing as npt
 
-from jace.cards import CardId, Deck
+from jace.cards import Deck
 
 __all__ = ("Board", "Decisions", "Finished", "GameBatch", "HiddenCards", "Outcome")
 
@@ -48,9 +48,10 @@ class Finished:
 
 @dataclass(frozen=True, slots=True)
 class HiddenCards:
-    hand: tuple[CardId, ...]
-    # The library's contents in no particular order.
-    library: tuple[CardId, ...]
+    # hands: [n, 2, cards], copies of each card in each seat's hand.
+    hands: npt.NDArray[np.int64]
+    # libraries: [n, 2, cards], copies of each card in each seat's library, order unknown.
+    libraries: npt.NDArray[np.int64]
 
 
 class GameBatch(Protocol):
@@ -58,8 +59,8 @@ class GameBatch(Protocol):
 
     `decisions` returns the pending decision in every slot. `act` applies
     one action per slot and returns the games that ended on that step, in
-    slot order. `hidden_cards` returns both seats' true hidden cards for
-    every slot, as `[slot][seat]`; it exists to label training data for the
+    slot order. `hidden_cards` returns both seats' true hands and libraries
+    in every slot as card counts; it exists to label training data for the
     guess model and must never reach a player.
     """
 
@@ -67,4 +68,4 @@ class GameBatch(Protocol):
 
     def act(self, actions: npt.NDArray[np.int64]) -> tuple[Finished, ...]: ...
 
-    def hidden_cards(self) -> tuple[tuple[HiddenCards, HiddenCards], ...]: ...
+    def hidden_cards(self) -> HiddenCards: ...

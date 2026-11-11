@@ -1,7 +1,9 @@
 """A tiny game that implements `GameBatch` without any engine.
 
 In High Card each seat holds three cards with distinct values, picks one, and
-the higher pick wins. Seat 0 picks first and seat 1 sees that pick. It exists
+the higher pick wins. Seat 0 picks first and seat 1 sees that pick. Equal
+picks deal both seats again and the game goes on, so games differ in length
+and the slots of a batch drift out of step, as real games do. It exists
 so that collection, training and evaluation can be exercised in tests and
 examples with a game whose best play is obvious: always pick the highest
 card. It is not a model of Magic.
@@ -60,20 +62,19 @@ class ToyBatch:
                 self._first_pick[slot] = self._hands[slot, 0, action]
                 continue
             first, second = int(self._first_pick[slot]), int(self._hands[slot, 1, action])
-            outcome = Outcome.DRAW if first == second else Outcome.SEAT_0_WON if first > second else Outcome.SEAT_1_WON
+            if first == second:
+                self._deal(slot)
+                continue
+            outcome = Outcome.SEAT_0_WON if first > second else Outcome.SEAT_1_WON
             finished.append(Finished(slot=slot, outcome=outcome, decks=self._decks[slot]))
             self._decks[slot] = self._matchups()
             self._deal(slot)
         return tuple(finished)
 
-    def hidden_cards(self) -> tuple[tuple[HiddenCards, HiddenCards], ...]:
-        return tuple(
-            (
-                HiddenCards(hand=tuple(int(card) for card in hands[0]), library=()),
-                HiddenCards(hand=tuple(int(card) for card in hands[1]), library=()),
-            )
-            for hands in self._hands
-        )
+    def hidden_cards(self) -> HiddenCards:
+        hands = np.zeros((len(self._hands), 2, TOY_CARDS), dtype=np.int64)
+        np.put_along_axis(hands, self._hands, 1, axis=2)
+        return HiddenCards(hands=hands, libraries=np.zeros_like(hands))
 
     def _deal(self, slot: int) -> None:
         self._hands[slot, 0] = self._rng.sample(range(TOY_CARDS), HAND_SIZE)
