@@ -53,6 +53,7 @@ which cards were still in a pack when it came around.
 **Deck builder**, `DeckBuilderModel.forward(available, partial)`. It writes a
 deck one card at a time. Rules it cannot break are enforced by masks, not
 learned: deck size, copies in the pool, and a land count within a range.
+
 `build_decks` samples many decks from it, improves each by swaps, ranks them
 with the deck score, and returns the candidates best first.
 

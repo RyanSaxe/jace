@@ -34,7 +34,9 @@ the learner. Each model runs once per step, over every game.
 
 A **rollout** is the decisions of finished games, one row each: the board,
 the guess, the action taken, the chance the player gave it, the predicted
-win chance, and how the game ended. It also holds the opponent's true deck
+win chance, and how the game ended.
+
+It also holds the opponent's true deck
 and hand at each decision, which is what the guess model is scored against.
 
 Games still running when `collect` stops are not thrown away. Dropping them

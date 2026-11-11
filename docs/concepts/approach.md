@@ -12,7 +12,9 @@ games against itself, and the results of those games are the only reward.
 
 A pick is good only if it leads to a deck that wins, and a deck wins only in
 the hands of a player who can pilot it. So the three skills cannot be judged
-apart. jace plays whole rounds of draft, build and play, and uses the game
+apart.
+
+jace plays whole rounds of draft, build and play, and uses the game
 results to improve every model at once.
 
 ## What each model learns from
@@ -35,6 +37,7 @@ adjusts it, and every model reads the result.
 
 Models never have an output with one slot per card. To choose a card, a
 model produces a query vector and scores each candidate by its embedding.
+
 A card the model has never seen still has an embedding, so it can be
 scored. This is how jace is meant to reach a new set without retraining.
 
@@ -45,7 +48,9 @@ engine program. That step is not built: the tests use random vectors.
 
 Magic hides the opponent's hand and deck. A separate guess model predicts
 both at every decision, and the player reads the guess as part of its
-input. The guess model also reads its own earlier guesses from the same
+input.
+
+The guess model also reads its own earlier guesses from the same
 game, so what it worked out on turn 2 is still there on turn 8.
 
 During self-play the true cards are known, so every decision is a labelled
