@@ -1,0 +1,17 @@
+[project]
+name = "limited"
+version = "0.1.0"
+description = "Learn to draft, build decks and play Magic limited by self-play"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.10"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
