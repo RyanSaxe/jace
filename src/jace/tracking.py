@@ -70,8 +70,14 @@ from torch import nn
 type ModelName = Literal["embedding", "drafter", "deck_builder", "deck_score", "guess", "player"]
 type Clock = Callable[[], datetime]
 
+# The version of the file layout, written to `identity.json` so a reader can tell layouts apart.
 _FORMAT = 1
+# Checkpoint file names pad the update to this many digits, so they sort by update as text.
 _UPDATE_DIGITS = 8
+# Hex digits of the identity's SHA-256 kept in a run id: enough to tell apart runs created in the same second.
+_ID_DIGEST_DIGITS = 8
+# Permissions of a record file this module creates: its owner reads and writes, everyone else reads.
+_RECORD_FILE_MODE = 0o644
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,15 +153,9 @@ def create_run(root: Path, identity: Identity, *, clock: Clock) -> Path:
     `RunExistsError` when the folder already exists.
     """
     created = clock().astimezone(UTC)
-    described = {
-        "config": dict(identity.config),
-        "seed": identity.seed,
-        "jace_commit": identity.jace_commit,
-        "manabot_commit": identity.manabot_commit,
-        "inputs": [asdict(checkpoint) for checkpoint in identity.inputs],
-    }
+    described = _described(identity)
     digest = hashlib.sha256(json.dumps(described, sort_keys=True, allow_nan=False).encode()).hexdigest()
-    run_id = f"{created:%Y%m%dT%H%M%SZ}-{digest[:8]}"
+    run_id = f"{created:%Y%m%dT%H%M%SZ}-{digest[:_ID_DIGEST_DIGITS]}"
     record = {"format": _FORMAT, "run_id": run_id, "created": created.isoformat(), **described}
     identity_text = json.dumps(record, indent=2, allow_nan=False) + "\n"
 
@@ -211,10 +211,7 @@ def writing(folder: Path, *, clock: Clock) -> Generator[Running]:
     if lock is None:
         raise RunLockedError(folder)
     try:
-        state = _settled_state(folder, clock=clock)
-        if state not in {RunState.CREATED, RunState.INTERRUPTED}:
-            raise RunNotResumableError(folder, state=state)
-        _record_state(folder, RunState.RUNNING, clock=clock)
+        _enter_running(folder, clock=clock)
         try:
             yield Running(folder=folder, lock=lock)
         except KeyboardInterrupt:
@@ -281,6 +278,25 @@ def load_checkpoint(root: Path, ref: CheckpointRef, *, into: nn.Module) -> None:
     into.load_state_dict(torch.load(path, weights_only=True))
 
 
+def _described(identity: Identity) -> dict[str, object]:
+    # The identity as JSON values. The run id hashes exactly this, and `identity.json` holds it.
+    return {
+        "config": dict(identity.config),
+        "seed": identity.seed,
+        "jace_commit": identity.jace_commit,
+        "manabot_commit": identity.manabot_commit,
+        "inputs": [asdict(checkpoint) for checkpoint in identity.inputs],
+    }
+
+
+def _enter_running(folder: Path, *, clock: Clock) -> None:
+    # The caller holds the lock.
+    state = _settled_state(folder, clock=clock)
+    if state not in {RunState.CREATED, RunState.INTERRUPTED}:
+        raise RunNotResumableError(folder, state=state)
+    _record_state(folder, RunState.RUNNING, clock=clock)
+
+
 def _checkpoint_path(folder: Path, *, model: ModelName, update: int) -> Path:
     return folder / "checkpoints" / f"{model}-{update:0{_UPDATE_DIGITS}d}.pt"
 
@@ -293,7 +309,7 @@ def _sha256(path: Path) -> str:
 def _append(path: Path, record: Mapping[str, object]) -> None:
     # One write call to a file opened for append lands as one whole line, even when the process is killed.
     line = (json.dumps(record, allow_nan=False) + "\n").encode()
-    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, _RECORD_FILE_MODE)
     try:
         os.write(descriptor, line)
     finally:

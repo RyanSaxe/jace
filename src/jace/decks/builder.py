@@ -43,6 +43,11 @@ type Proposer = Callable[[Tensor, int], Tensor]
 # Takes (available, partial), both float [n, cards], and returns float [n, cards] logits for the next card.
 type _NextCard = Callable[[Tensor, Tensor], Tensor]
 
+# The builder's model reads two amounts for each card: the copies still available and the copies in the deck.
+_AMOUNTS_PER_CARD = 2
+# The floor for a uniform draw before its log is taken, so a draw of exactly 0 does not become infinite.
+_SMALLEST_UNIFORM = 1e-20
+
 
 class InvalidBuildRulesError(ValueError):
     def __init__(self, *, size: int, min_lands: int, max_lands: int) -> None:
@@ -94,7 +99,9 @@ class DeckBuilderModel(nn.Module):
 
     def __init__(self, embedding: CardEmbedding, *, width: int, layers: int, heads: int) -> None:
         super().__init__()
-        self.cards: CardSetEncoder = CardSetEncoder(embedding, amounts=2, width=width, layers=layers, heads=heads)
+        self.cards: CardSetEncoder = CardSetEncoder(
+            embedding, amounts=_AMOUNTS_PER_CARD, width=width, layers=layers, heads=heads
+        )
         self.query: nn.Linear = nn.Linear(width, width)
         self.key: nn.Linear = nn.Linear(embedding.starting.shape[1], width)
 
@@ -141,7 +148,7 @@ def random_proposer(*, rules: BuildRules, generator: torch.Generator) -> Propose
         lands = torch.randint(fewest, most + 1, (decks,), generator=generator, device=device)
         uniform = torch.rand((decks, pool_counts.shape[0]), generator=generator, device=device)
         # The log of an exponential draw: sampling by these logits splits the lands by a uniform Dirichlet draw.
-        preferences = uniform.clamp_min(1e-20).log().neg().log()
+        preferences = uniform.clamp_min(_SMALLEST_UNIFORM).log().neg().log()
         return _write_decks(
             lambda _available, _partial: preferences,
             pool_counts=pool_counts,
@@ -197,43 +204,58 @@ def improve(decks: Tensor, *, pool_counts: Tensor, score: Scorer, rules: BuildRu
     is_land, is_basic = _land_kinds(rules, cards=pool_counts.shape[0], device=pool_counts.device)
     # Only pool cards and basics can enter or leave a deck, so swaps are laid out over those m cards.
     movable = ((pool_counts > 0) | is_basic).nonzero().squeeze(1)  # int64 [m]
-    land = is_land[movable].int()
-    land_change = land.unsqueeze(0) - land.unsqueeze(1)  # int [m out, m in]
-    different = ~torch.eye(movable.shape[0], dtype=torch.bool, device=movable.device)
     decks = decks.clone()
     with torch.no_grad():
         scores = score(decks)  # float [n]
         climbing = torch.arange(decks.shape[0], device=decks.device)  # rows that improved last round
         for _ in range(rounds):
-            held = decks[climbing][:, movable]  # float [a, m]
-            addable = (held < pool_counts[movable]) | is_basic[movable]
-            lands = (held * land).sum(dim=1).long().view(-1, 1, 1) + land_change  # int64 [a, m, m]
-            legal = (
-                held.gt(0).unsqueeze(2)
-                & addable.unsqueeze(1)
-                & different
-                & (lands >= rules.min_lands)
-                & (lands <= rules.max_lands)
+            legal = _legal_swaps(
+                decks[climbing][:, movable],
+                in_pool=pool_counts[movable],
+                is_basic=is_basic[movable],
+                is_land=is_land[movable],
+                rules=rules,
             )
-            row, out, into = legal.nonzero().unbind(dim=1)  # int64 [k] each
-            if row.shape[0] == 0:
+            if not bool(legal.any()):
                 break
-            swapped = decks[climbing[row]]  # float [k, cards]
-            each = torch.arange(row.shape[0], device=decks.device)
-            swapped[each, movable[out]] -= 1
-            swapped[each, movable[into]] += 1
-            swap_scores = torch.full(legal.shape, float("-inf"), device=decks.device)
-            swap_scores[legal] = score(swapped).to(swap_scores.dtype)
-            best, flat = swap_scores.flatten(1).max(dim=1)  # [a]
+            swap_scores = _swap_scores(decks[climbing], legal, movable=movable, score=score)
+            best, flat = swap_scores.flatten(1).max(dim=1)  # [a]; flat indexes a deck's [m out, m in] swaps
             better = best > scores[climbing]
             climbing = climbing[better]
             if climbing.shape[0] == 0:
                 break
-            chosen = flat[better]
-            decks[climbing, movable[chosen // movable.shape[0]]] -= 1
-            decks[climbing, movable[chosen % movable.shape[0]]] += 1
+            out = flat[better] // movable.shape[0]
+            into = flat[better] % movable.shape[0]
+            decks[climbing, movable[out]] -= 1
+            decks[climbing, movable[into]] += 1
             scores[climbing] = best[better].to(scores.dtype)
     return decks
+
+
+def _legal_swaps(held: Tensor, *, in_pool: Tensor, is_basic: Tensor, is_land: Tensor, rules: BuildRules) -> Tensor:
+    # held: float [a, m], each deck's copies of the m movable cards. in_pool: float [m], the pool's copies.
+    # is_basic, is_land: bool [m]. Returns bool [a, m out, m in]: true where taking one copy of
+    # card `out` and adding one copy of card `in` leaves a legal deck.
+    land = is_land.int()
+    land_change = land.unsqueeze(0) - land.unsqueeze(1)  # int [m out, m in]
+    lands = (held * land).sum(dim=1).long().view(-1, 1, 1) + land_change  # int64 [a, m, m]
+    removable = held.gt(0).unsqueeze(2)  # bool [a, m, 1]
+    addable = ((held < in_pool) | is_basic).unsqueeze(1)  # bool [a, 1, m]
+    different = ~torch.eye(held.shape[1], dtype=torch.bool, device=held.device)  # bool [m, m]
+    return removable & addable & different & (lands >= rules.min_lands) & (lands <= rules.max_lands)
+
+
+def _swap_scores(decks: Tensor, legal: Tensor, *, movable: Tensor, score: Scorer) -> Tensor:
+    # decks: float [a, cards]. legal: bool [a, m, m], as `_legal_swaps` returns it. movable: int64 [m].
+    # Returns float [a, m, m]: each deck's score after each legal swap, and -inf for the others.
+    row, out, into = legal.nonzero().unbind(dim=1)  # int64 [k] each
+    swapped = decks[row]  # float [k, cards]
+    each = torch.arange(row.shape[0], device=decks.device)
+    swapped[each, movable[out]] -= 1
+    swapped[each, movable[into]] += 1
+    swap_scores = torch.full(legal.shape, float("-inf"), device=decks.device)
+    swap_scores[legal] = score(swapped).to(swap_scores.dtype)
+    return swap_scores
 
 
 def build_decks(

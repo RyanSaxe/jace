@@ -24,14 +24,39 @@ type BoosterSpec = Sequence[SlotOdds]
 
 _COMMON: SlotOdds = {Rarity.COMMON: 1.0}
 _UNCOMMON: SlotOdds = {Rarity.UNCOMMON: 1.0}
-_RARE_OR_MYTHIC: SlotOdds = {Rarity.RARE: 7 / 8, Rarity.MYTHIC: 1 / 8}
+
+# One rare slot in eight holds a mythic instead.
+_MYTHIC_CHANCE = 1 / 8
+_RARE_OR_MYTHIC: SlotOdds = {Rarity.RARE: 1 - _MYTHIC_CHANCE, Rarity.MYTHIC: _MYTHIC_CHANCE}
+
 # Placeholder odds for the wildcard and foil slots, to be replaced with sourced odds.
-_ANY_RARITY: SlotOdds = {Rarity.COMMON: 0.6, Rarity.UNCOMMON: 0.3, Rarity.RARE: 0.0875, Rarity.MYTHIC: 0.0125}
-_LAND: SlotOdds = {Rarity.BASIC: 0.5, Rarity.COMMON: 0.5}
+_PLACEHOLDER_COMMON_CHANCE = 0.6
+_PLACEHOLDER_UNCOMMON_CHANCE = 0.3
+_PLACEHOLDER_RARE_CHANCE = 0.0875
+_PLACEHOLDER_MYTHIC_CHANCE = 0.0125
+_ANY_RARITY: SlotOdds = {
+    Rarity.COMMON: _PLACEHOLDER_COMMON_CHANCE,
+    Rarity.UNCOMMON: _PLACEHOLDER_UNCOMMON_CHANCE,
+    Rarity.RARE: _PLACEHOLDER_RARE_CHANCE,
+    Rarity.MYTHIC: _PLACEHOLDER_MYTHIC_CHANCE,
+}
+
+# The land slot holds a basic land or a common land, each half the time.
+_BASIC_LAND_CHANCE = 0.5
+_LAND: SlotOdds = {Rarity.BASIC: _BASIC_LAND_CHANCE, Rarity.COMMON: 1 - _BASIC_LAND_CHANCE}
 
 # A first, simplified Avatar: The Last Airbender play booster: 7 commons, 3 uncommons,
 # 1 rare or mythic, 1 wildcard, 1 foil and 1 land.
-TLA_PLAY_BOOSTER: BoosterSpec = (*[_COMMON] * 7, *[_UNCOMMON] * 3, _RARE_OR_MYTHIC, _ANY_RARITY, _ANY_RARITY, _LAND)
+_COMMON_SLOTS = 7
+_UNCOMMON_SLOTS = 3
+TLA_PLAY_BOOSTER: BoosterSpec = (
+    *[_COMMON] * _COMMON_SLOTS,
+    *[_UNCOMMON] * _UNCOMMON_SLOTS,
+    _RARE_OR_MYTHIC,
+    _ANY_RARITY,
+    _ANY_RARITY,
+    _LAND,
+)
 
 
 class BoosterSpecError(ValueError):
@@ -52,19 +77,23 @@ def open_booster(spec: BoosterSpec, pool: CardPool, *, rng: random.Random) -> Pa
     rarity than the number of slots that can draw that rarity. A pool with no
     cards of a slot's rarity is the plainest case of the second.
     """
-    for slot, odds in enumerate(spec):
-        if not math.isclose(sum(odds.values()), 1.0):
-            message = f"the odds of slot {slot} sum to {sum(odds.values())}, not 1: {dict(odds)}"
-            raise BoosterSpecError(message)
     available = {rarity: list(pool.of_rarity(rarity)) for rarity in Rarity}
-    for rarity, cards in available.items():
-        slots = sum(1 for odds in spec if odds.get(rarity, 0.0) > 0.0)
-        if slots > len(cards):
-            message = f"{slots} slots can draw a {rarity.value} card, but the pool holds {len(cards)}"
-            raise BoosterSpecError(message)
+    _check_spec(spec, available)
     booster: list[CardId] = []
     for odds in spec:
         (rarity,) = rng.choices(tuple(odds), weights=tuple(odds.values()))
         cards = available[rarity]
         booster.append(cards.pop(rng.randrange(len(cards))))
     return tuple(booster)
+
+
+def _check_spec(spec: BoosterSpec, available: Mapping[Rarity, Sequence[CardId]]) -> None:
+    for slot, odds in enumerate(spec):
+        if not math.isclose(sum(odds.values()), 1.0):
+            message = f"the odds of slot {slot} sum to {sum(odds.values())}, not 1: {dict(odds)}"
+            raise BoosterSpecError(message)
+    for rarity, cards in available.items():
+        slots = sum(1 for odds in spec if odds.get(rarity, 0.0) > 0.0)
+        if slots > len(cards):
+            message = f"{slots} slots can draw a {rarity.value} card, but the pool holds {len(cards)}"
+            raise BoosterSpecError(message)

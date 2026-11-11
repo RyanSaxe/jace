@@ -15,7 +15,7 @@ import torch
 from torch import Tensor, nn
 
 from jace.cards import CardEmbedding
-from jace.modules import run
+from jace.modules import DROPOUT, FEEDFORWARD_EXPANSION, run
 
 __all__ = ("CardSetEncoder", "DeckScore", "EmptyCardSetError", "Scorer")
 
@@ -44,7 +44,12 @@ class CardSetEncoder(nn.Module):
         self.project: nn.Linear = nn.Linear(embedding.starting.shape[1], width)
         self.amount: nn.Sequential = nn.Sequential(nn.Linear(amounts, width), nn.GELU(), nn.Linear(width, width))
         layer = nn.TransformerEncoderLayer(
-            width, heads, dim_feedforward=4 * width, dropout=0.0, batch_first=True, norm_first=True
+            width,
+            heads,
+            dim_feedforward=FEEDFORWARD_EXPANSION * width,
+            dropout=DROPOUT,
+            batch_first=True,
+            norm_first=True,
         )
         self.encoder: nn.TransformerEncoder = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
 

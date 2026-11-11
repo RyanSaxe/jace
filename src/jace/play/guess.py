@@ -14,18 +14,24 @@ import torch
 from torch import Tensor, nn
 
 from jace.cards import CardEmbedding
-from jace.modules import run
+from jace.modules import run, transformer
 from jace.play.tokens import EntityEncoder, board_tokens
 from jace.play.types import Boards, Earlier, Guess
 
 __all__ = ("GuessModel",)
 
+# A guess has two parts: the opponent's deck and the opponent's hand.
+_GUESS_PARTS = 2
+# The base of the wavelengths in the age encoding, the value the original transformer used for positions.
+_AGE_ENCODING_BASE = 10000.0
+
 
 def _age_encoding(age: Tensor, *, width: int) -> Tensor:
     # age: int64 [b, t], how many real rows are newer than each row. Returns float [b, t, width]
     # sinusoids, so the newest real row gets the same encoding however much padding there is.
-    rates = torch.exp(torch.arange(0, width, 2, device=age.device) * (-math.log(10000.0) / width))
-    angles = age[..., None] * rates
+    # One rate for each sine and cosine pair, so every second position up to the width.
+    rates = torch.exp(torch.arange(0, width, 2, device=age.device) * (-math.log(_AGE_ENCODING_BASE) / width))
+    angles = age[..., None] * rates  # [b, t, rates]
     return torch.cat((angles.sin(), angles.cos()), dim=-1)[..., :width]
 
 
@@ -60,14 +66,10 @@ class GuessModel(nn.Module):
         tokens = board_tokens(sample, engine_to_card=engine_to_card)
         self.entities: EntityEncoder = EntityEncoder(tokens, card_width=card_width, width=width)
         self.events: nn.Linear = nn.Linear(tokens.events.shape[-1], width)
-        self.earlier: nn.Linear = nn.Linear(2 * card_width, width)
-        self.queries: nn.Parameter = nn.Parameter(torch.randn(2, width) * width**-0.5)
-        layer = nn.TransformerEncoderLayer(
-            width, heads, dim_feedforward=4 * width, dropout=0.0, batch_first=True, norm_first=True
-        )
-        self.encoder: nn.TransformerEncoder = nn.TransformerEncoder(
-            layer, layers, norm=nn.LayerNorm(width), enable_nested_tensor=False
-        )
+        self.earlier: nn.Linear = nn.Linear(_GUESS_PARTS * card_width, width)
+        # queries: float [guess parts, width], the tokens whose encodings score the deck and the hand.
+        self.queries: nn.Parameter = nn.Parameter(torch.randn(_GUESS_PARTS, width) * width**-0.5)
+        self.encoder: nn.TransformerEncoder = transformer(width, layers=layers, heads=heads)
         self.card_keys: nn.Linear = nn.Linear(card_width, width)
         self.hand_bias: nn.Parameter = nn.Parameter(torch.zeros(()))
 
@@ -90,10 +92,10 @@ class GuessModel(nn.Module):
         batch = entities.shape[0]
         queries = self.queries.expand(batch, -1, -1)
         sequence = torch.cat((queries, entities, events, earlier_tokens), dim=1)
-        query_mask = torch.ones(batch, 2, dtype=torch.bool, device=sequence.device)
+        query_mask = torch.ones(batch, _GUESS_PARTS, dtype=torch.bool, device=sequence.device)
         mask = torch.cat((query_mask, tokens.entity_mask, tokens.event_mask, earlier.mask), dim=1)
         encoded = self.encoder.forward(sequence, src_key_padding_mask=~mask)
 
         keys = run(self.card_keys, card_table)  # [cards, width]
-        scores = encoded[:, :2] @ keys.T * self.width**-0.5  # [b, 2, cards]
+        scores = encoded[:, :_GUESS_PARTS] @ keys.T * self.width**-0.5  # [b, guess parts, cards]
         return Guess(deck=scores[:, 0].softmax(dim=-1), hand=(scores[:, 1] + self.hand_bias).sigmoid())

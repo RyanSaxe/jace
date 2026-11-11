@@ -13,11 +13,17 @@ from torch import Tensor, nn
 
 from jace.cards import CardEmbedding
 from jace.engine import Decisions
-from jace.modules import run
+from jace.modules import run, transformer
 from jace.play.tokens import EntityEncoder, board_tokens
 from jace.play.types import Boards, Guess, Policy
 
 __all__ = ("PlayerModel", "as_boards", "random_policy")
+
+# An action is scored from four vectors of the model's width: its own row, its two focus
+# entities and the board summary.
+_SCORED_VECTORS = 4
+# A policy with no value estimate reports an even chance of winning.
+_EVEN_CHANCE = 0.5
 
 
 def as_boards(decisions: Decisions, *, device: torch.device) -> Boards:
@@ -29,7 +35,7 @@ def random_policy(engine_to_card: Tensor) -> Policy:
     def policy(boards: Boards, guess: Guess) -> tuple[Tensor, Tensor]:
         legal = board_tokens(boards, engine_to_card=engine_to_card).action_mask  # bool [b, max_actions]
         logits = torch.zeros(legal.shape, device=legal.device).masked_fill(~legal, -torch.inf)
-        return logits, torch.full_like(guess.hand[:, 0], 0.5)
+        return logits, torch.full_like(guess.hand[:, 0], _EVEN_CHANCE)
 
     return policy
 
@@ -68,15 +74,11 @@ class PlayerModel(nn.Module):
         self.entities: EntityEncoder = EntityEncoder(tokens, card_width=card_width, width=width)
         self.guessed_card: nn.Linear = nn.Linear(card_width, width)
         self.guessed_chance: nn.Linear = nn.Linear(1, width)
-        layer = nn.TransformerEncoderLayer(
-            width, heads, dim_feedforward=4 * width, dropout=0.0, batch_first=True, norm_first=True
-        )
-        self.encoder: nn.TransformerEncoder = nn.TransformerEncoder(
-            layer, layers, norm=nn.LayerNorm(width), enable_nested_tensor=False
-        )
+        self.encoder: nn.TransformerEncoder = transformer(width, layers=layers, heads=heads)
         self.actions: nn.Linear = nn.Linear(tokens.actions.shape[-1], width)
-        # An action is scored from its own row, its two focus entities and the board summary.
-        self.action_head: nn.Sequential = nn.Sequential(nn.Linear(4 * width, width), nn.GELU(), nn.Linear(width, 1))
+        self.action_head: nn.Sequential = nn.Sequential(
+            nn.Linear(_SCORED_VECTORS * width, width), nn.GELU(), nn.Linear(width, 1)
+        )
         self.value_head: nn.Sequential = nn.Sequential(nn.Linear(width, width), nn.GELU(), nn.Linear(width, 1))
 
     def policy(self, boards: Boards, guess: Guess) -> tuple[Tensor, Tensor]:
@@ -93,22 +95,24 @@ class PlayerModel(nn.Module):
         mask = torch.cat((tokens.entity_mask, torch.ones_like(likeliest, dtype=torch.bool)), dim=1)
         encoded = self.encoder.forward(sequence, src_key_padding_mask=~mask)
 
-        real = mask[..., None]
+        real = mask[..., None]  # bool [b, entities + guessed, 1]
         summary = (encoded * real).sum(dim=1) / real.sum(dim=1)  # [b, width]
 
-        entity_count = entities.shape[1]
-        focus = tokens.action_focus  # [b, max_actions, 2]
-        named = focus >= 0
-        batch, max_actions, slots = focus.shape
-        index = focus.clamp_min(0).reshape(batch, max_actions * slots, 1).expand(-1, -1, encoded.shape[-1])
-        focused = encoded[:, :entity_count].gather(1, index) * named.reshape(batch, max_actions * slots, 1)
+        focused = _focus_vectors(encoded[:, : entities.shape[1]], tokens.action_focus)
+        max_actions = focused.shape[1]
         scored = torch.cat(
-            (
-                run(self.actions, tokens.actions),
-                focused.reshape(batch, max_actions, -1),
-                summary[:, None].expand(-1, max_actions, -1),
-            ),
-            dim=-1,
-        )
+            (run(self.actions, tokens.actions), focused, summary[:, None].expand(-1, max_actions, -1)), dim=-1
+        )  # [b, max_actions, scored vectors * width]
         logits = run(self.action_head, scored).squeeze(-1).masked_fill(~tokens.action_mask, -torch.inf)
         return logits, run(self.value_head, summary).squeeze(-1).sigmoid()
+
+
+def _focus_vectors(entities: Tensor, focus: Tensor) -> Tensor:
+    # entities: float [b, entities, width], the encoded board entities.
+    # focus: int64 [b, max_actions, slots], the entity numbers each action names, or -1 for none.
+    # Returns float [b, max_actions, slots * width]: each action's focus entities side by side,
+    # zeros where a slot names none.
+    batch, max_actions, slots = focus.shape
+    named = (focus >= 0).reshape(batch, max_actions * slots, 1)
+    index = focus.clamp_min(0).reshape(batch, max_actions * slots, 1).expand(-1, -1, entities.shape[-1])
+    return (entities.gather(1, index) * named).reshape(batch, max_actions, -1)

@@ -13,10 +13,14 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
+from jace.engine.batch import SEATS
 from jace.modules import run
 from jace.play.types import Boards
 
 __all__ = ("BoardTokens", "EntityEncoder", "board_tokens")
+
+# The column of the engine's permanent rows that holds the card definition id + 1.
+_PERMANENT_DEFINITION_COLUMN = 24
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,17 +72,12 @@ def board_tokens(boards: Boards, *, engine_to_card: Tensor) -> BoardTokens:
     #
     # engine_to_card: int64 [engine definition ids], the `CardId` of each engine definition,
     # or -1 for a definition the card pool lacks.
-    permanent_definition_column = 24
     players = torch.cat((boards["agent_player"], boards["opponent_player"]), dim=1)
     cards = torch.cat((boards["agent_cards"], boards["opponent_cards"]), dim=1)
     permanents = torch.cat((boards["agent_permanents"], boards["opponent_permanents"]), dim=1)
-
-    definitions = torch.cat((boards["semantic_cards"].flatten(1), permanents[..., permanent_definition_column]), dim=1)
-    engine_ids = definitions.long() - 1
-    card_ids = torch.where(engine_ids >= 0, engine_to_card[engine_ids.clamp_min(0)], -1)
+    card_ids = _card_ids(boards["semantic_cards"], permanents, engine_to_card=engine_to_card)
     # The definition id is an identity, read through the card embedding, never a numeric feature.
-    permanents[..., permanent_definition_column] = 0.0
-
+    permanents[..., _PERMANENT_DEFINITION_COLUMN] = 0.0
     entity_valid = torch.cat(
         (
             boards["agent_player_valid"],
@@ -104,6 +103,14 @@ def board_tokens(boards: Boards, *, engine_to_card: Tensor) -> BoardTokens:
     )
 
 
+def _card_ids(semantic_cards: Tensor, permanents: Tensor, *, engine_to_card: Tensor) -> Tensor:
+    # semantic_cards: float [b, seats, cards per seat]. permanents: float [b, permanents, permanent features],
+    # read before its definition column is cleared. Returns int64 [b, cards + permanents], -1 for none.
+    definitions = torch.cat((semantic_cards.flatten(1), permanents[..., _PERMANENT_DEFINITION_COLUMN]), dim=1)
+    engine_ids = definitions.long() - 1
+    return torch.where(engine_ids >= 0, engine_to_card[engine_ids.clamp_min(0)], -1)
+
+
 class EntityEncoder(nn.Module):
     """Project players, cards and permanents to one width, in entity order.
 
@@ -120,7 +127,8 @@ class EntityEncoder(nn.Module):
         self.cards: nn.Linear = nn.Linear(sample.cards.shape[-1], width)
         self.permanents: nn.Linear = nn.Linear(sample.permanents.shape[-1], width)
         self.card_vectors: nn.Linear = nn.Linear(card_width, width, bias=False)
-        self.seats: nn.Parameter = nn.Parameter(torch.zeros(2, width))
+        # seats: float [seats, width], added to the player rows to tell the acting seat from its opponent.
+        self.seats: nn.Parameter = nn.Parameter(torch.zeros(SEATS, width))
 
     def embed(self, tokens: BoardTokens, card_table: Tensor) -> Tensor:
         # card_table: float [pool cards, card_width], the shared embedding of every card in the pool.

@@ -60,32 +60,48 @@ def run_drafts(
     if len(drafters) != draft_format.seats:
         message = f"expected one drafter for each of {draft_format.seats} seats, got {len(drafters)}"
         raise InvalidDraftError(message)
-    seats_by_drafter: dict[int, list[int]] = {}
-    for seat, drafter in enumerate(drafters):
-        seats_by_drafter.setdefault(id(drafter), []).append(seat)
-
+    seat_groups = _seats_by_drafter(drafters)
     states: tuple[PodState, ...] = tuple(open_pod(draft_format, pod_boosters) for pod_boosters in boosters)
     # Indexed by pod, then seat, then pick number.
     views: list[list[list[SeatView]]] = [[[] for _ in drafters] for _ in states]
     while picking := tuple(state for state in states if isinstance(state, Picking)):
         for pod_views, state in zip(views, picking, strict=True):
-            for seat_views, pack, pool in zip(pod_views, state.packs, state.pools, strict=True):
-                seen = tuple(view.pack for view in seat_views)
-                seat_views.append(SeatView(pick_number=len(seat_views), pack=pack, seen=seen, picks=pool))
-        picks: list[dict[int, CardId]] = [{} for _ in picking]
-        for seats in seats_by_drafter.values():
-            asked = [(pod, seat) for pod in range(len(picking)) for seat in seats]
-            chosen = drafters[seats[0]]([views[pod][seat][-1] for pod, seat in asked])
-            if len(chosen) != len(asked):
-                message = f"the drafter of seats {seats} returned {len(chosen)} picks for {len(asked)} views"
-                raise InvalidDraftError(message)
-            for (pod, seat), card in zip(asked, chosen, strict=True):
-                picks[pod][seat] = card
-        states = tuple(
-            advance(state, [pod_picks[seat] for seat in range(draft_format.seats)])
-            for state, pod_picks in zip(picking, picks, strict=True)
-        )
+            _add_views(pod_views, state)
+        picks = _ask_drafters(drafters, seat_groups, views=views)
+        states = tuple(advance(state, pod_picks) for state, pod_picks in zip(picking, picks, strict=True))
     return tuple(
         DraftRecord(views=tuple(tuple(seat_views) for seat_views in pod_views), pools=state.pools)
         for pod_views, state in zip(views, states, strict=True)
     )
+
+
+def _seats_by_drafter(drafters: Sequence[Drafter]) -> list[list[int]]:
+    # One group of seats for each distinct drafter object, in the order of each drafter's first seat.
+    groups: dict[int, list[int]] = {}
+    for seat, drafter in enumerate(drafters):
+        groups.setdefault(id(drafter), []).append(seat)
+    return list(groups.values())
+
+
+def _add_views(pod_views: Sequence[list[SeatView]], state: Picking) -> None:
+    # Appends to each seat's views what the seat knows at the pick it now owes.
+    for seat_views, pack, pool in zip(pod_views, state.packs, state.pools, strict=True):
+        seen = tuple(view.pack for view in seat_views)
+        seat_views.append(SeatView(pick_number=len(seat_views), pack=pack, seen=seen, picks=pool))
+
+
+def _ask_drafters(
+    drafters: Sequence[Drafter], seat_groups: Sequence[Sequence[int]], *, views: Sequence[Sequence[Sequence[SeatView]]]
+) -> list[list[CardId]]:
+    # Calls each distinct drafter once with the newest view of every seat it fills in every pod.
+    # Returns the picks indexed by pod, then seat.
+    picks: list[dict[int, CardId]] = [{} for _ in views]
+    for seats in seat_groups:
+        asked = [(pod, seat) for pod in range(len(views)) for seat in seats]
+        chosen = drafters[seats[0]]([views[pod][seat][-1] for pod, seat in asked])
+        if len(chosen) != len(asked):
+            message = f"the drafter of seats {seats} returned {len(chosen)} picks for {len(asked)} views"
+            raise InvalidDraftError(message)
+        for (pod, seat), card in zip(asked, chosen, strict=True):
+            picks[pod][seat] = card
+    return [[pod_picks[seat] for seat in range(len(drafters))] for pod_picks in picks]

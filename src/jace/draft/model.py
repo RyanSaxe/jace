@@ -18,7 +18,7 @@ from torch import Tensor, nn
 
 from jace.cards import CardEmbedding, CardId
 from jace.draft.drafting import Drafter, SeatView
-from jace.modules import run
+from jace.modules import run, transformer
 
 __all__ = ("DrafterModel", "model_drafter", "view_tensors")
 
@@ -42,12 +42,7 @@ class DrafterModel(nn.Module):
         self.positions: nn.Embedding = nn.Embedding(picks, width)
         # Stands where an earlier token has its picked card.
         self.current: nn.Parameter = nn.Parameter(torch.zeros(width))
-        layer = nn.TransformerEncoderLayer(
-            width, heads, dim_feedforward=4 * width, dropout=0.0, batch_first=True, norm_first=True
-        )
-        self.encoder: nn.TransformerEncoder = nn.TransformerEncoder(
-            layer, layers, norm=nn.LayerNorm(width), enable_nested_tensor=False
-        )
+        self.encoder: nn.TransformerEncoder = transformer(width, layers=layers, heads=heads)
 
     @override
     def forward(self, seen: Tensor, picks: Tensor, *, pack: Tensor) -> Tensor:

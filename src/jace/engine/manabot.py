@@ -21,7 +21,7 @@ from manabot import managym
 from torch import Tensor
 
 from jace.cards import CardPool, Deck
-from jace.engine.batch import Decisions, Finished, GameBatch, HiddenCards, Outcome
+from jace.engine.batch import SEATS, Decisions, Finished, GameBatch, HiddenCards, Outcome
 
 __all__ = (
     "POLICY_INPUT_VERSION",
@@ -34,8 +34,6 @@ __all__ = (
 )
 
 POLICY_INPUT_VERSION = 8
-
-_SEATS = (0, 1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,7 +144,7 @@ class _ManabotBatch:
         self._seats: npt.NDArray[np.int64] = np.zeros(games, dtype=np.int64)
         self._action_counts: npt.NDArray[np.int64] = np.zeros(games, dtype=np.int64)
         # deck_counts: int64 [n, 2, cards], copies of each card in each seat's deck.
-        self._deck_counts: npt.NDArray[np.int64] = np.zeros((games, 2, len(names)), dtype=np.int64)
+        self._deck_counts: npt.NDArray[np.int64] = np.zeros((games, SEATS, len(names)), dtype=np.int64)
         self._boards: dict[str, npt.NDArray[np.generic]] = {}
         for slot in range(games):
             decks = matchups()
@@ -181,18 +179,26 @@ class _ManabotBatch:
         hands = np.zeros_like(self._deck_counts)
         outside_library = np.zeros_like(self._deck_counts)
         for slot, env in enumerate(self._envs):
-            for seat in _SEATS:
+            for seat in range(SEATS):
                 view = env.observation_for_player(seat)
-                for card in (*view.agent_cards, *view.opponent_cards):
-                    card_id = int(self._card_ids[card.registry_key])
-                    if card.owner_id != view.agent.id or card.is_token or card_id < 0:
-                        continue
-                    if card.zone == managym.ZoneEnum.HAND:
-                        hands[slot, seat, card_id] += 1
-                    if card.zone != managym.ZoneEnum.LIBRARY:
-                        outside_library[slot, seat, card_id] += 1
+                hands[slot, seat], outside_library[slot, seat] = self._own_card_counts(view)
         # A seat's own view lists its cards in every zone but the library, so the library is the rest of its deck.
         return HiddenCards(hands=hands, libraries=(self._deck_counts - outside_library).clip(min=0))
+
+    def _own_card_counts(self, view: managym.Observation) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+        # Returns (hand, outside_library), both int64 [cards]: copies of each card the viewing seat
+        # owns in its hand, and in any zone but its library.
+        hand = np.zeros(len(self._names), dtype=np.int64)
+        outside_library = np.zeros(len(self._names), dtype=np.int64)
+        for card in (*view.agent_cards, *view.opponent_cards):
+            card_id = int(self._card_ids[card.registry_key])
+            if card.owner_id != view.agent.id or card.is_token or card_id < 0:
+                continue
+            if card.zone == managym.ZoneEnum.HAND:
+                hand[card_id] += 1
+            if card.zone != managym.ZoneEnum.LIBRARY:
+                outside_library[card_id] += 1
+        return hand, outside_library
 
     def _deal(self, slot: int, *, decks: tuple[Deck, Deck]) -> tuple[managym.Env, managym.Observation]:
         # Each game's seed depends only on the batch seed, its slot and how many games the slot has
@@ -201,7 +207,7 @@ class _ManabotBatch:
         self._games_started[slot] += 1
         env = managym.Env(seed=int(np.random.SeedSequence(entropy).generate_state(1, np.uint64)[0]))
         players: list[managym.PlayerConfig] = []
-        for seat in _SEATS:
+        for seat in range(SEATS):
             copies = collections.Counter(self._names[card] for card in decks[seat])
             players.append(
                 managym.PlayerConfig(f"seat {seat}", dict(copies), world=managym.WORLD_SETUP, disclosure="closed")
