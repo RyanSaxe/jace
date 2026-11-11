@@ -5,6 +5,7 @@ description = "Learn to draft, build decks and play Magic: The Gathering by self
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "manabot",
     "numpy>=2",
     "torch>=2.10",
 ]
@@ -77,3 +78,6 @@ line-ending = "auto"
 [tool.ty.src]
 # BYOR vendors and manages its check scripts; they follow BYOR's own config.
 exclude = [".byor"]
+
+[tool.uv.sources]
+manabot = { git = "https://github.com/loopflowstudio/manabot", rev = "b5e8f404adf55a2315a2810906cbb81c49465781" }

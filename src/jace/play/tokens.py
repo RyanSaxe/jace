@@ -51,7 +51,8 @@ def _squash(features: Tensor) -> Tensor:
 
 def board_tokens(boards: Boards, *, engine_to_card: Tensor) -> BoardTokens:
     # ASSUMPTION, TO BE REVISITED. This function is coupled to the arrays that manabot's
-    # observation encoder writes at policy input version 6, each with a leading batch axis:
+    # observation encoder writes, each with a leading batch axis. The arrays below have the
+    # same names and shapes at policy input versions 6 and 8; the adapter encodes at 8:
     #   agent_player, opponent_player          float32 [b, 1, 73]
     #   agent_cards, opponent_cards            float32 [b, 60, 56]
     #   agent_permanents, opponent_permanents  float32 [b, 40, 38]; column 24 is the card definition id + 1
