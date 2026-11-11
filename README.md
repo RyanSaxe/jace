@@ -12,17 +12,32 @@ drafter, because the deck builder and the player do not depend on it.
 
 ## Status
 
-The repository holds the first module, `jace.draft`, which runs a draft pod
-as an explicit state machine. Nothing is trained yet.
+A first version of every module exists, with tests. A full limited iteration
+runs end to end on a toy game. Nothing has been trained on real Magic games
+yet.
 
 ## Layout
 
 | Module | Holds |
 |---|---|
-| `jace.draft` | The draft pod: seats, packs, passing and pools |
+| `jace.cards` | Card records, the pool that defines a card id, and the one card embedding every model reads |
+| `jace.engine` | `GameBatch`, the interface every caller plays games through. `jace.engine.manabot` implements it on manabot and `jace.engine.toy` on a tiny game for tests |
+| `jace.draft` | Boosters, the draft pod, whole drafts across pods, and the drafter model |
+| `jace.decks` | The deck score, and a deck builder that proposes whole decks and improves them |
+| `jace.play` | The guess model, which predicts the opponent's deck and hand, and the player model |
+| `jace.train` | The pieces a loop is written from: game collection, advantages, losses and the update step |
+| `jace.eval` | Win rates with a range, and the guess model's honesty check |
+| `jace.tracking` | Run records as plain files |
+| `jace.loops` | Example loops written from the pieces, and the schedules that drive them |
 
-Modules for cards, the engine, decks, play, training and evaluation are added
-as each is built.
+## Writing a loop
+
+The package is pieces, not a framework. A training loop is a short function
+that calls them in the order it wants. `jace.loops.limited` is one example:
+it drafts pods, builds a deck from each pool, plays the decks against each
+other and updates every model. A schedule is a function from the iteration
+number to that iteration's dials, such as learning rates and how much to
+explore.
 
 ## Develop
 
@@ -39,8 +54,14 @@ ast-grep rules in `.byor/rules`, ruff, ty, and three documentation checks.
 
 ## Conventions
 
-- Every state machine is explicit. A state is an immutable value with its own
-  type, and each transition is one function from a state to the next.
+- Start from functions and plain values. A type is added only when it has
+  several fields or states a rule the type checker should enforce.
+- A real state machine is explicit: one immutable type per state and one
+  function per transition. A sequence of calls is a function.
+- A dependency is handed in as an argument. One behaviour is a callable
+  type, and a protocol is for an injected object with several methods.
+- Two lint rules guard the boundaries: only `jace.engine.manabot` imports
+  manabot, and only `jace.loops` imports `jace.draft`.
 - A module's public interface is its `__all__`. Tests use only that interface.
 
 ## Notice
