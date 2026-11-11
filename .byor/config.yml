@@ -58,7 +58,7 @@ checks:
     extensions:
       - py
       - pyi
-    run: uv run tools/max_file_lines.py
+    run: uv run .byor/scripts/max-file-lines.py
     tags:
       - jace
       - size

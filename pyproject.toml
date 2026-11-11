@@ -23,8 +23,15 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 120
 target-version = "py312"
-# BYOR vendors and manages its check scripts; they follow BYOR's own config.
-extend-exclude = [".byor"]
+# BYOR vendors and manages these check scripts; they follow BYOR's own config.
+# The repository's own check scripts sit beside them and are linted.
+extend-exclude = [
+    ".byor/scripts/lib",
+    ".byor/scripts/module-contract.py",
+    ".byor/scripts/no-suppression-comments.py",
+    ".byor/scripts/no-thin-docstrings.py",
+    ".byor/scripts/ruff.py",
+]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -67,8 +74,8 @@ max-complexity = 6
 ban-relative-imports = "all"
 
 [tool.ruff.lint.per-file-ignores]
-"tools/**/*.py" = [
-    # The repository's check scripts run git with fixed arguments, never with outside input.
+".byor/scripts/max-file-lines.py" = [
+    # This check runs git with fixed arguments, never with outside input.
     "S603",
 ]
 "tests/**/*.py" = [
@@ -84,8 +91,14 @@ indent-style = "space"
 line-ending = "auto"
 
 [tool.ty.src]
-# BYOR vendors and manages its check scripts; they follow BYOR's own config.
-exclude = [".byor"]
+# BYOR vendors and manages these check scripts; they follow BYOR's own config.
+exclude = [
+    ".byor/scripts/lib",
+    ".byor/scripts/module-contract.py",
+    ".byor/scripts/no-suppression-comments.py",
+    ".byor/scripts/no-thin-docstrings.py",
+    ".byor/scripts/ruff.py",
+]
 
 [tool.uv.sources]
 manabot = { git = "https://github.com/loopflowstudio/manabot", rev = "b5e8f404adf55a2315a2810906cbb81c49465781" }
