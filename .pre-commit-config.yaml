@@ -8,12 +8,12 @@ repos:
         language: system
       - id: byor-ruff
         name: ruff
-        entry: uv run .byor/scripts/ruff.py
+        entry: uv run --with ruff .byor/scripts/ruff.py
         language: system
         files: \.(py|pyi)$
       - id: byor-ty
         name: ty
-        entry: uvx ty check --output-format concise --no-progress --color never --error all
+        entry: uv run ty check --output-format concise --no-progress --color never --error all
         language: system
         files: \.(py|pyi)$
       - id: byor-no-suppression-comments
@@ -29,5 +29,10 @@ repos:
       - id: byor-no-thin-docstrings
         name: no-thin-docstrings
         entry: uv run .byor/scripts/no-thin-docstrings.py
+        language: system
+        files: \.(py|pyi)$
+      - id: byor-max-file-lines
+        name: max-file-lines
+        entry: uv run .byor/scripts/max-file-lines.py
         language: system
         files: \.(py|pyi)$

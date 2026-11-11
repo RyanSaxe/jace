@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "Learn to draft, build decks and play Magic: The Gathering by self-play"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "manabot",
+    "numpy>=2",
+    "torch>=2.10",
+]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.14", "ty>=0.0.1a20"]
@@ -19,8 +23,15 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 120
 target-version = "py312"
-# BYOR vendors and manages its check scripts; they follow BYOR's own config.
-extend-exclude = [".byor"]
+# BYOR vendors and manages these check scripts; they follow BYOR's own config.
+# The repository's own check scripts sit beside them and are linted.
+extend-exclude = [
+    ".byor/scripts/lib",
+    ".byor/scripts/module-contract.py",
+    ".byor/scripts/no-suppression-comments.py",
+    ".byor/scripts/no-thin-docstrings.py",
+    ".byor/scripts/ruff.py",
+]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -51,12 +62,22 @@ ignore = [
     "ISC001",
     # BYOR's keyword-only rule allows many keyword-only parameters.
     "PLR0913",
+    # Seeded pseudo-random generators drive simulations here; nothing is cryptographic.
+    "S311",
 ]
+
+[tool.ruff.lint.mccabe]
+# A function with more than this many independent paths is split into named helpers.
+max-complexity = 6
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
 
 [tool.ruff.lint.per-file-ignores]
+".byor/scripts/max-file-lines.py" = [
+    # This check runs git with fixed arguments, never with outside input.
+    "S603",
+]
 "tests/**/*.py" = [
     # Pytest's assertion introspection is the test framework contract.
     "S101",
@@ -70,5 +91,14 @@ indent-style = "space"
 line-ending = "auto"
 
 [tool.ty.src]
-# BYOR vendors and manages its check scripts; they follow BYOR's own config.
-exclude = [".byor"]
+# BYOR vendors and manages these check scripts; they follow BYOR's own config.
+exclude = [
+    ".byor/scripts/lib",
+    ".byor/scripts/module-contract.py",
+    ".byor/scripts/no-suppression-comments.py",
+    ".byor/scripts/no-thin-docstrings.py",
+    ".byor/scripts/ruff.py",
+]
+
+[tool.uv.sources]
+manabot = { git = "https://github.com/loopflowstudio/manabot", rev = "b5e8f404adf55a2315a2810906cbb81c49465781" }

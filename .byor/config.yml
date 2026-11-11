@@ -1,6 +1,6 @@
 version: 1
 project:
-  name: limited
+  name: jace
 paths:
   sgconfig: sgconfig.yml
   project_rules: .byor/rules/project
@@ -13,7 +13,7 @@ checks:
     extensions:
       - py
       - pyi
-    run: uv run .byor/scripts/ruff.py
+    run: uv run --with ruff .byor/scripts/ruff.py
     tags:
       - greenfield
       - lint
@@ -22,7 +22,7 @@ checks:
     extensions:
       - py
       - pyi
-    run: uvx ty check --output-format concise --no-progress --color never --error all
+    run: uv run ty check --output-format concise --no-progress --color never --error all
     tags:
       - greenfield
       - typing
@@ -54,5 +54,13 @@ checks:
       - greenfield
       - documentation
       - style-guide
+  - name: max-file-lines
+    extensions:
+      - py
+      - pyi
+    run: uv run .byor/scripts/max-file-lines.py
+    tags:
+      - jace
+      - size
 gate: true
 gate_branch: main

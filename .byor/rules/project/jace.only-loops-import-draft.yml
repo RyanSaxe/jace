@@ -1,0 +1,39 @@
+id: jace.only-loops-import-draft
+language: Python
+severity: error
+message: Only jace.loops may import jace.draft, so constructed play needs no drafting code.
+files:
+  - src/jace/**/*.py
+ignores:
+  - src/jace/draft/**
+  - src/jace/loops/**
+rule:
+  any:
+    - kind: import_from_statement
+      has:
+        field: module_name
+        regex: ^jace\.draft(\.|$)
+    - kind: import_statement
+      has:
+        any:
+          - kind: dotted_name
+            regex: ^jace\.draft(\.|$)
+          - kind: aliased_import
+            has:
+              kind: dotted_name
+              regex: ^jace\.draft(\.|$)
+metadata:
+  byor:
+    rationale: >
+      Constructed is the same code with the drafter left out. That only
+      holds while decks, play, train, eval and tracking do not depend on
+      the draft module.
+    agent_prompt: >
+      Do not import jace.draft from this module. Shared card types (CardId,
+      Pool, Deck) live in jace.cards. If this code needs draft results, take
+      them as plain arguments such as pools or tensors, and let the loop in
+      jace.loops pass them in.
+    tags:
+      - python
+      - jace
+      - boundaries
