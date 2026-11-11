@@ -8,7 +8,7 @@ its one transition.
 
 from jace.draft.boosters import TLA_PLAY_BOOSTER, BoosterSpec, BoosterSpecError, SlotOdds, open_booster
 from jace.draft.drafting import Drafter, DraftRecord, SeatView, run_drafts
-from jace.draft.model import DrafterModel, model_drafter
+from jace.draft.model import DrafterModel, model_drafter, view_tensors
 from jace.draft.pod import (
     Complete,
     DraftFormat,
@@ -42,4 +42,5 @@ __all__ = (
     "open_booster",
     "open_pod",
     "run_drafts",
+    "view_tensors",
 )

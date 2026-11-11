@@ -33,6 +33,7 @@ __all__ = (
     "improve",
     "model_proposer",
     "random_proposer",
+    "writing_steps",
 )
 
 # Takes the pool's float [cards] copy counts and a number of decks n.
@@ -151,6 +152,33 @@ def random_proposer(*, rules: BuildRules, generator: torch.Generator) -> Propose
         )
 
     return propose
+
+
+def writing_steps(
+    decks: Tensor, *, pool_counts: Tensor, rules: BuildRules, generator: torch.Generator
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Lay finished decks out as the steps that would have written them.
+
+    `decks` is `[n, cards]` and `pool_counts` is `[n, cards]`, each deck with
+    the pool it was built from. Each deck's cards are put in a random order,
+    and every step becomes one example: the copies still `available`, the
+    `partial` deck so far, and the card `chosen` next, as `DeckBuilderModel`
+    sees them while proposing. Returns the three as `[n * size, cards]`,
+    `[n * size, cards]` and int64 `[n * size]`. Training the model on these
+    with a cross-entropy loss teaches it to write decks like the ones given.
+    """
+    count, cards = decks.shape
+    _, is_basic = _land_kinds(rules, cards=cards, device=decks.device)
+    every_card = torch.arange(cards, device=decks.device)
+    listed = torch.stack([every_card.repeat_interleave(row) for row in decks.long()])  # [n, size]
+    shuffle = torch.rand(listed.shape, generator=generator, device=decks.device).argsort(dim=1)
+    chosen = listed.gather(1, shuffle)
+    written = torch.nn.functional.one_hot(chosen, cards).float().cumsum(dim=1)  # [n, size, cards]
+    partial = torch.cat([torch.zeros_like(written[:, :1]), written[:, :-1]], dim=1)
+    available = (pool_counts[:, None, :] - partial).clamp_min(0)
+    slots_left = rules.size - torch.arange(rules.size, device=decks.device)
+    available[:, :, is_basic] = slots_left[None, :, None].float().expand(count, -1, int(is_basic.sum()))
+    return available.reshape(-1, cards), partial.reshape(-1, cards), chosen.reshape(-1)
 
 
 def improve(decks: Tensor, *, pool_counts: Tensor, score: Scorer, rules: BuildRules, rounds: int) -> Tensor:

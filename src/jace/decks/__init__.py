@@ -19,6 +19,7 @@ from jace.decks.builder import (
     improve,
     model_proposer,
     random_proposer,
+    writing_steps,
 )
 from jace.decks.score import DeckScore, Scorer
 
@@ -35,4 +36,5 @@ __all__ = (
     "improve",
     "model_proposer",
     "random_proposer",
+    "writing_steps",
 )

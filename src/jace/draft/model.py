@@ -20,7 +20,7 @@ from jace.cards import CardEmbedding, CardId
 from jace.draft.drafting import Drafter, SeatView
 from jace.modules import run
 
-__all__ = ("DrafterModel", "model_drafter")
+__all__ = ("DrafterModel", "model_drafter", "view_tensors")
 
 
 class DrafterModel(nn.Module):
@@ -100,7 +100,7 @@ def model_drafter(model: DrafterModel, *, generator: torch.Generator | None) -> 
             return ()
         starting = model.embedding.starting
         with torch.no_grad():
-            seen, picks, pack = _view_tensors(views, cards=starting.shape[0], device=starting.device)
+            seen, picks, pack = view_tensors(views, cards=starting.shape[0], device=starting.device)
             logits = model.forward(seen, picks, pack=pack)
             if generator is None:
                 chosen = logits.argmax(dim=-1)
@@ -112,9 +112,9 @@ def model_drafter(model: DrafterModel, *, generator: torch.Generator | None) -> 
     return draft
 
 
-def _view_tensors(views: Sequence[SeatView], *, cards: int, device: torch.device) -> tuple[Tensor, Tensor, Tensor]:
+def view_tensors(views: Sequence[SeatView], *, cards: int, device: torch.device) -> tuple[Tensor, Tensor, Tensor]:
     # Returns `seen`, `picks` and `pack` as `DrafterModel.forward` takes them, with shorter
-    # histories padded at the end.
+    # histories padded at the end. Training uses it to recompute the logits of recorded picks.
     steps = max(view.pick_number for view in views)
     seen = torch.zeros(len(views), steps, cards, device=device)
     pack = torch.zeros(len(views), cards, device=device)
