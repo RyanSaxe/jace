@@ -16,6 +16,21 @@ type Pack = tuple[CardId, ...]
 type Pool = tuple[CardId, ...]
 
 
+class InvalidDraftError(ValueError):
+    """The format, the boosters or a set of picks does not describe a legal draft.
+
+    It is raised before a new state is built, so the state the caller holds
+    is still valid. The message names the round and seat at fault when there
+    is one. It subclasses `ValueError` so callers that validate input in bulk
+    can catch both.
+    """
+
+
+class IllegalPickError(InvalidDraftError):
+    def __init__(self, *, seat: int, pick: CardId, pack: Pack) -> None:
+        super().__init__(f"seat {seat} picked card {pick}, which is not in its pack {pack}")
+
+
 @dataclass(frozen=True, slots=True)
 class DraftFormat:
     """The shape of a draft: how many seats, rounds, and picks in each round.
@@ -32,7 +47,8 @@ class DraftFormat:
 
     def __post_init__(self) -> None:
         if min(self.seats, self.rounds, self.picks_per_round) < 1:
-            raise ValueError(f"every field of a draft format must be positive: {self}")
+            message = f"every field of a draft format must be positive: {self}"
+            raise InvalidDraftError(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +60,7 @@ class Picking:
     opens when the next round starts.
     """
 
-    format: DraftFormat
+    draft_format: DraftFormat
     round_index: int
     pick_index: int
     packs: tuple[Pack, ...]
@@ -54,47 +70,43 @@ class Picking:
 
 @dataclass(frozen=True, slots=True)
 class Complete:
-    format: DraftFormat
+    draft_format: DraftFormat
     pools: tuple[Pool, ...]
 
 
 type PodState = Picking | Complete
 
 
-def open_pod(format: DraftFormat, boosters: Sequence[Sequence[Pack]]) -> Picking:
+def open_pod(draft_format: DraftFormat, boosters: Sequence[Sequence[Pack]]) -> Picking:
     """Seat the pod and open the first round.
 
     `boosters[round][seat]` is the booster that seat opens in that round. The
     cards in a booster keep their order, and a card may appear more than once.
 
-    Raises `ValueError` when the boosters do not match the format: the wrong
+    Raises `InvalidDraftError` when the boosters do not match the format: the wrong
     number of rounds or seats, or a booster too small for a round's picks.
     """
-    if len(boosters) != format.rounds:
-        raise ValueError(
-            f"expected {format.rounds} rounds of boosters, got {len(boosters)}"
-        )
+    if len(boosters) != draft_format.rounds:
+        message = f"expected {draft_format.rounds} rounds of boosters, got {len(boosters)}"
+        raise InvalidDraftError(message)
     for round_index, round_boosters in enumerate(boosters):
-        if len(round_boosters) != format.seats:
-            raise ValueError(
-                f"round {round_index} has {len(round_boosters)} boosters for {format.seats} seats"
-            )
+        if len(round_boosters) != draft_format.seats:
+            message = f"round {round_index} has {len(round_boosters)} boosters for {draft_format.seats} seats"
+            raise InvalidDraftError(message)
         for seat, booster in enumerate(round_boosters):
-            if len(booster) < format.picks_per_round:
-                raise ValueError(
+            if len(booster) < draft_format.picks_per_round:
+                message = (
                     f"round {round_index} seat {seat}: a booster of {len(booster)} cards "
-                    f"cannot supply {format.picks_per_round} picks"
+                    f"cannot supply {draft_format.picks_per_round} picks"
                 )
-    rounds = tuple(
-        tuple(tuple(booster) for booster in round_boosters)
-        for round_boosters in boosters
-    )
+                raise InvalidDraftError(message)
+    rounds = tuple(tuple(tuple(booster) for booster in round_boosters) for round_boosters in boosters)
     return Picking(
-        format=format,
+        draft_format=draft_format,
         round_index=0,
         pick_index=0,
         packs=rounds[0],
-        pools=tuple(() for _ in range(format.seats)),
+        pools=tuple(() for _ in range(draft_format.seats)),
         unopened=rounds[1:],
     )
 
@@ -105,22 +117,21 @@ def advance(state: Picking, picks: Sequence[CardId]) -> PodState:
     The result is `Picking` again after the packs are passed or the next round
     is opened, and `Complete` after the last pick of the last round. Packs
     pass to the next seat in even rounds and to the previous seat in odd
-    rounds. Raises `ValueError` when a seat picks a card that is not in its
-    pack or when the number of picks differs from the number of seats.
+    rounds. Raises `IllegalPickError` when a seat picks a card that is not in
+    its pack, and `InvalidDraftError` when the number of picks differs from the
+    number of seats.
     """
-    format = state.format
-    if len(picks) != format.seats:
-        raise ValueError(
-            f"expected one pick from each of {format.seats} seats, got {len(picks)}"
-        )
-    pools = tuple(pool + (pick,) for pool, pick in zip(state.pools, picks, strict=True))
+    draft_format = state.draft_format
+    if len(picks) != draft_format.seats:
+        message = f"expected one pick from each of {draft_format.seats} seats, got {len(picks)}"
+        raise InvalidDraftError(message)
+    pools = tuple((*pool, pick) for pool, pick in zip(state.pools, picks, strict=True))
     remaining = tuple(
-        _without(pack, pick, seat=seat)
-        for seat, (pack, pick) in enumerate(zip(state.packs, picks, strict=True))
+        _without(pack, pick, seat=seat) for seat, (pack, pick) in enumerate(zip(state.packs, picks, strict=True))
     )
-    if state.pick_index + 1 < format.picks_per_round:
+    if state.pick_index + 1 < draft_format.picks_per_round:
         return Picking(
-            format=format,
+            draft_format=draft_format,
             round_index=state.round_index,
             pick_index=state.pick_index + 1,
             packs=_passed(remaining, round_index=state.round_index),
@@ -129,21 +140,19 @@ def advance(state: Picking, picks: Sequence[CardId]) -> PodState:
         )
     if state.unopened:
         return Picking(
-            format=format,
+            draft_format=draft_format,
             round_index=state.round_index + 1,
             pick_index=0,
             packs=state.unopened[0],
             pools=pools,
             unopened=state.unopened[1:],
         )
-    return Complete(format=format, pools=pools)
+    return Complete(draft_format=draft_format, pools=pools)
 
 
 def _without(pack: Pack, pick: CardId, *, seat: int) -> Pack:
     if pick not in pack:
-        raise ValueError(
-            f"seat {seat} picked card {pick}, which is not in its pack {pack}"
-        )
+        raise IllegalPickError(seat=seat, pick=pick, pack=pack)
     position = pack.index(pick)
     return pack[:position] + pack[position + 1 :]
 
@@ -158,6 +167,8 @@ __all__ = (
     "CardId",
     "Complete",
     "DraftFormat",
+    "IllegalPickError",
+    "InvalidDraftError",
     "Pack",
     "Picking",
     "PodState",

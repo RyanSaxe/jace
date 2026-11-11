@@ -1,13 +1,13 @@
 [project]
-name = "limited"
+name = "mtg-rl"
 version = "0.1.0"
-description = "Learn to draft, build decks and play Magic limited by self-play"
+description = "Learn to draft, build decks and play Magic: The Gathering by self-play"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = []
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.14", "ty>=0.0.1a20"]
 
 [build-system]
 requires = ["uv_build>=0.9,<0.10"]
@@ -15,3 +15,60 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+# BYOR vendors and manages its check scripts; they follow BYOR's own config.
+extend-exclude = [".byor"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+unfixable = [
+    # Leave unused imports visible for review instead of deleting them during
+    # autofix; import removals can change public/API intent.
+    "F401",
+]
+ignore = [
+    # Not a personal code-quality rule; legal headers are project-specific.
+    "CPY001",
+    # Standalone scripts and scratch modules are valid in many projects.
+    "INP001",
+    # BYOR owns module-docstring format and public export checks.
+    "D100",
+    "D104",
+    # Do not require docstrings on every public class/function/method.
+    "D101",
+    "D102",
+    "D103",
+    "D105",
+    "D106",
+    "D107",
+    # Known pydocstyle and formatter conflicts.
+    "D203",
+    "D213",
+    "COM812",
+    "ISC001",
+    # BYOR's keyword-only rule allows many keyword-only parameters.
+    "PLR0913",
+]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    # Pytest's assertion introspection is the test framework contract.
+    "S101",
+    # Test literals are part of the expected behavior being documented.
+    "PLR2004",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.ty.src]
+# BYOR vendors and manages its check scripts; they follow BYOR's own config.
+exclude = [".byor"]

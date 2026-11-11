@@ -5,10 +5,12 @@ seat should take. Pick policies live elsewhere and talk to a pod only through
 the states and the transition exported here.
 """
 
-from limited.draft.pod import (
+from mtg_rl.draft.pod import (
     CardId,
     Complete,
     DraftFormat,
+    IllegalPickError,
+    InvalidDraftError,
     Pack,
     Picking,
     PodState,
@@ -21,6 +23,8 @@ __all__ = (
     "CardId",
     "Complete",
     "DraftFormat",
+    "IllegalPickError",
+    "InvalidDraftError",
     "Pack",
     "Picking",
     "PodState",
