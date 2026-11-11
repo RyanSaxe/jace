@@ -14,7 +14,7 @@ jobs:
           enable-cache: true
       - run: uvx --from ast-grep-cli==0.42.3 ast-grep scan --error
       - run: uv run --with ruff .byor/scripts/ruff.py
-      - run: uvx ty check --output-format concise --no-progress --color never --error all
+      - run: uv run ty check --output-format concise --no-progress --color never --error all
       - run: uv run .byor/scripts/no-suppression-comments.py
       - run: uv run .byor/scripts/module-contract.py
       - run: uv run .byor/scripts/no-thin-docstrings.py

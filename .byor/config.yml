@@ -22,7 +22,7 @@ checks:
     extensions:
       - py
       - pyi
-    run: uvx ty check --output-format concise --no-progress --color never --error all
+    run: uv run ty check --output-format concise --no-progress --color never --error all
     tags:
       - greenfield
       - typing

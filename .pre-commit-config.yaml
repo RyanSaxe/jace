@@ -13,7 +13,7 @@ repos:
         files: \.(py|pyi)$
       - id: byor-ty
         name: ty
-        entry: uvx ty check --output-format concise --no-progress --color never --error all
+        entry: uv run ty check --output-format concise --no-progress --color never --error all
         language: system
         files: \.(py|pyi)$
       - id: byor-no-suppression-comments
