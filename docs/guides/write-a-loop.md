@@ -115,6 +115,7 @@ def matchup() -> tuple[Deck, Deck]:
     first, second = rng.sample(decks, SEATS)
     return first, second
 
+
 collected = collect(
     start(matchup),
     None,
