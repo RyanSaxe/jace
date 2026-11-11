@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
+from jace.engine import SEATS
 from jace.play import Earlier, Guess
 
 __all__ = ("Sequences", "advantages", "earlier_guesses", "sequences")
@@ -31,7 +32,7 @@ class Sequences:
 def sequences(games: Tensor, seats: Tensor) -> Sequences:
     # games, seats: int64 [n], rows in the order the decisions were made.
     rows = torch.arange(len(games), device=games.device)
-    keys = games * 2 + seats
+    keys = games * SEATS + seats
     order = torch.argsort(keys, stable=True)
     sorted_keys = keys[order]
     starts = torch.ones_like(sorted_keys, dtype=torch.bool)

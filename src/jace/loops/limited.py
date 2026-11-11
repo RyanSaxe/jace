@@ -38,7 +38,7 @@ from jace.draft import (
     run_drafts,
     view_tensors,
 )
-from jace.engine import GameBatch
+from jace.engine import SEATS, GameBatch
 from jace.loops.schedules import Dials
 from jace.modules import run
 from jace.play import Guesser, Policy
@@ -46,6 +46,7 @@ from jace.train import (
     GameResult,
     Metrics,
     PlayerRule,
+    Rollout,
     apply,
     choice_loss,
     collect,
@@ -57,6 +58,9 @@ from jace.train import (
 )
 
 __all__ = ("Learners", "LimitedSetup", "StartBatch", "limited_iteration")
+
+# PyTorch seeds a generator with a signed 64-bit integer, so a seed drawn from `random` uses 63 bits.
+_SEED_BITS = 63
 
 # Starts a batch of games whose matchups come from the function it is given.
 type StartBatch = Callable[[Callable[[], tuple[Deck, Deck]]], GameBatch]
@@ -139,7 +143,7 @@ def _build(
     setup: LimitedSetup, learners: Learners, *, records: Sequence[DraftRecord], dials: Dials, rng: random.Random
 ) -> tuple[list[Candidate], list[Candidate]]:
     # Returns (the deck played for each pool, the top-scored deck for each pool), pools in pod then seat order.
-    generator = torch.Generator().manual_seed(rng.getrandbits(63))
+    generator = torch.Generator().manual_seed(rng.getrandbits(_SEED_BITS))
     propose = model_proposer(learners.builder, rules=setup.rules, generator=generator)
 
     def score(decks: Tensor) -> Tensor:
@@ -230,6 +234,64 @@ def _update_drafter(
     return {"drafter/loss": float(loss.detach()), "drafter/mean_reward": float(reward.mean())}
 
 
+def _update_play_models(setup: LimitedSetup, learners: Learners, *, rollout: Rollout, dials: Dials) -> Metrics:
+    embedding = learners.optimizers["embedding"]
+    player = update_player(
+        learners.policy,
+        rollout,
+        rule=replace(setup.player_rule, spread=dials.spread),
+        lam_advantage=setup.lam_advantage,
+        lam_value=setup.lam_value,
+        slice_rows=setup.slice_rows,
+        max_grad_norm=setup.max_grad_norm,
+        optimizers=[learners.optimizers["player"], embedding],
+    )
+    guess = update_guess(
+        learners.guesser,
+        rollout,
+        history=setup.history,
+        slice_rows=setup.slice_rows,
+        max_grad_norm=setup.max_grad_norm,
+        optimizers=[learners.optimizers["guess"], embedding],
+    )
+    named = {f"player/{name}": value for name, value in player.items()}
+    return named | {f"guess/{name}": value for name, value in guess.items()}
+
+
+def _update_deck_score(
+    setup: LimitedSetup, learners: Learners, *, decks: Sequence[Deck], wins: Tensor, played: Tensor
+) -> Metrics:
+    # wins, played: [decks]. Decks that played no game teach nothing.
+    seen_play = played > 0
+    if not bool(seen_play.any()):
+        nothing: dict[str, float] = {}
+        return nothing
+    logits = run(learners.score, _counts(decks, cards=len(setup.pool))[seen_play])
+    loss = score_loss(logits, wins=wins[seen_play], games=played[seen_play])
+    optimizers = [learners.optimizers["deck_score"], learners.optimizers["embedding"]]
+    apply(loss, optimizers, max_grad_norm=setup.max_grad_norm)
+    return {"deck_score/loss": float(loss.detach())}
+
+
+def _update_builder(
+    setup: LimitedSetup,
+    learners: Learners,
+    *,
+    records: Sequence[DraftRecord],
+    best_decks: Sequence[Candidate],
+    generator: torch.Generator,
+) -> Metrics:
+    # Teaches the builder to write the top-scored deck the search found for each pool.
+    cards = len(setup.pool)
+    pools = _counts([pool for record in records for pool in record.pools], cards=cards)
+    best = _counts([candidate.deck for candidate in best_decks], cards=cards)
+    available, partial, chosen = writing_steps(best, pool_counts=pools, rules=setup.rules, generator=generator)
+    loss = choice_loss(run(learners.builder, available, partial), chosen, weights=torch.ones(len(chosen)))
+    optimizers = [learners.optimizers["deck_builder"], learners.optimizers["embedding"]]
+    apply(loss, optimizers, max_grad_norm=setup.max_grad_norm)
+    return {"deck_builder/loss": float(loss.detach())}
+
+
 def limited_iteration(
     setup: LimitedSetup,
     learners: Learners,
@@ -250,20 +312,17 @@ def limited_iteration(
     discarded, which matters little while `setup.decisions` is many games'
     worth.
     """
-    generator = torch.Generator().manual_seed(rng.getrandbits(63))
-    cards = len(setup.pool)
-    embedding = learners.optimizers["embedding"]
+    generator = torch.Generator().manual_seed(rng.getrandbits(_SEED_BITS))
     _set_rate(learners.optimizers["player"], dials.player_rate)
     _set_rate(learners.optimizers["drafter"], dials.drafter_rate)
 
-    records = _draft(
-        setup, drafter=model_drafter(learners.drafter, generator=generator), other_seats=other_seats, rng=rng
-    )
+    drafter = model_drafter(learners.drafter, generator=generator)
+    records = _draft(setup, drafter=drafter, other_seats=other_seats, rng=rng)
     played_decks, best_decks = _build(setup, learners, records=records, dials=dials, rng=rng)
     decks = [candidate.deck for candidate in played_decks]
 
     def matchup() -> tuple[Deck, Deck]:
-        first, second = rng.sample(decks, 2)
+        first, second = rng.sample(decks, SEATS)
         return first, second
 
     collected = collect(
@@ -272,54 +331,17 @@ def limited_iteration(
         learner=learners.policy,
         opponent=opponent,
         guesser=learners.guesser,
-        cards=cards,
+        cards=len(setup.pool),
         history=setup.history,
         decisions=setup.decisions,
         generator=generator,
     )
-    rollout = collected.rollout
-    metrics: dict[str, float] = {"games": float(len(collected.games))}
-
-    player = update_player(
-        learners.policy,
-        rollout,
-        rule=replace(setup.player_rule, spread=dials.spread),
-        lam_advantage=setup.lam_advantage,
-        lam_value=setup.lam_value,
-        slice_rows=setup.slice_rows,
-        max_grad_norm=setup.max_grad_norm,
-        optimizers=[learners.optimizers["player"], embedding],
-    )
-    guess = update_guess(
-        learners.guesser,
-        rollout,
-        history=setup.history,
-        slice_rows=setup.slice_rows,
-        max_grad_norm=setup.max_grad_norm,
-        optimizers=[learners.optimizers["guess"], embedding],
-    )
-    metrics |= {f"player/{name}": value for name, value in player.items()}
-    metrics |= {f"guess/{name}": value for name, value in guess.items()}
-
     wins, played = _deck_records(decks, collected.games)
-    seen_play = played > 0
-    if bool(seen_play.any()):
-        logits = run(learners.score, _counts(decks, cards=cards)[seen_play])
-        loss = score_loss(logits, wins=wins[seen_play], games=played[seen_play])
-        apply(loss, [learners.optimizers["deck_score"], embedding], max_grad_norm=setup.max_grad_norm)
-        metrics["deck_score/loss"] = float(loss.detach())
 
-    pools = _counts([pool for record in records for pool in record.pools], cards=cards)
-    available, partial, chosen = writing_steps(
-        _counts([candidate.deck for candidate in best_decks], cards=cards),
-        pool_counts=pools,
-        rules=setup.rules,
-        generator=generator,
-    )
-    loss = choice_loss(run(learners.builder, available, partial), chosen, weights=torch.ones(len(chosen)))
-    apply(loss, [learners.optimizers["deck_builder"], embedding], max_grad_norm=setup.max_grad_norm)
-    metrics["deck_builder/loss"] = float(loss.detach())
-
+    metrics: dict[str, float] = {"games": float(len(collected.games))}
+    metrics |= _update_play_models(setup, learners, rollout=collected.rollout, dials=dials)
+    metrics |= _update_deck_score(setup, learners, decks=decks, wins=wins, played=played)
+    metrics |= _update_builder(setup, learners, records=records, best_decks=best_decks, generator=generator)
     if dials.drafter_rate > 0:
         metrics |= _update_drafter(
             setup,

@@ -19,11 +19,17 @@ __all__ = ("CHANCE_RANGES", "GuessReport", "WinRate", "check_guess", "learner_re
 # A guess is checked in this many equal ranges of stated chance: 0 to 10%, 10 to 20%, and so on.
 CHANCE_RANGES = 10
 
+# A win rate's range leaves this share of resampled rates out at each end, so it covers 95% of them.
+_RANGE_TAIL = 0.025
+
+# Chances are kept this far from 0 and 1 before taking a logarithm.
+_CHANCE_MARGIN = 1e-6
+
 
 @dataclass(frozen=True, slots=True)
 class WinRate:
     rate: float
-    # low, high: the 2.5th and 97.5th percentiles of the rate when the games are resampled.
+    # low, high: the ends of the range that holds 95% of the rates seen when the games are resampled.
     low: float
     high: float
 
@@ -66,12 +72,12 @@ def win_rate(results: Tensor, *, resamples: int, generator: torch.Generator) -> 
     """
     picks = torch.randint(0, len(results), (resamples, len(results)), generator=generator)
     rates = results[picks].mean(dim=1)
-    low, high = rates.quantile(torch.tensor([0.025, 0.975])).tolist()
+    low, high = rates.quantile(torch.tensor([_RANGE_TAIL, 1.0 - _RANGE_TAIL])).tolist()
     return WinRate(rate=float(results.mean()), low=low, high=high)
 
 
 def _log_loss(chance: Tensor, truth: Tensor) -> float:
-    safe = chance.clamp(1e-6, 1.0 - 1e-6)
+    safe = chance.clamp(_CHANCE_MARGIN, 1.0 - _CHANCE_MARGIN)
     return float(-(truth * safe.log() + (1.0 - truth) * (1.0 - safe).log()).mean())
 
 

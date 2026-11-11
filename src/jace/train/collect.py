@@ -16,7 +16,7 @@ import torch
 from torch import Tensor
 
 from jace.cards import Deck
-from jace.engine import GameBatch, Outcome
+from jace.engine import SEATS, Finished, GameBatch, Outcome
 from jace.play import Boards, Earlier, Guess, Guesser, Policy
 
 __all__ = ("Collected", "GameResult", "Pending", "Rollout", "collect", "select")
@@ -120,12 +120,12 @@ def _join(parts: list[Rollout]) -> Rollout:
 
 
 def _fresh(slots: int, *, cards: int, history: int, generator: torch.Generator) -> Pending:
-    empty = torch.zeros(slots, 2, history, cards)
+    empty = torch.zeros(slots, SEATS, history, cards)
     return Pending(
         rows=None,
         history=Guess(deck=empty, hand=empty.clone()),
-        history_count=torch.zeros(slots, 2, dtype=torch.long),
-        learner_seat=torch.randint(0, 2, (slots,), generator=generator),
+        history_count=torch.zeros(slots, SEATS, dtype=torch.long),
+        learner_seat=torch.randint(0, SEATS, (slots,), generator=generator),
         game_ids=torch.arange(slots),
         next_game=slots,
     )
@@ -158,10 +158,13 @@ def _truth(batch: GameBatch, seats: Tensor) -> tuple[Tensor, Tensor]:
     return unseen / unseen.sum(dim=-1, keepdim=True).clamp_min(1.0), (hands > 0).float()
 
 
-def _split(parts: list[Rollout], results_by_game: dict[int, float]) -> tuple[Rollout, Rollout | None]:
+def _split(parts: list[Rollout], finished: list[GameResult]) -> tuple[Rollout, Rollout | None]:
     # Fills in results and returns (rows of finished games, rows of games still running or None).
     rows = _join(parts)
-    seat_0_result = torch.tensor([results_by_game.get(game, float("nan")) for game in rows.games.tolist()])
+    result_for_seat_0 = {
+        game.game: game.learner_result if game.learner_seat == 0 else 1.0 - game.learner_result for game in finished
+    }
+    seat_0_result = torch.tensor([result_for_seat_0.get(game, float("nan")) for game in rows.games.tolist()])
     results = torch.where(rows.seats == 0, seat_0_result, 1.0 - seat_0_result)
     done = ~results.isnan()
     plain = {
@@ -173,16 +176,34 @@ def _split(parts: list[Rollout], results_by_game: dict[int, float]) -> tuple[Rol
     return select(everything, done), select(everything, ~done) if bool((~done).any()) else None
 
 
-def _learner_rows(rows: Rollout | None) -> dict[int, int]:
-    # Counts the learner's decisions so far in each unfinished game.
-    counts: dict[int, int] = {}
-    if rows is not None:
-        for game in rows.games[rows.learner].tolist():
-            counts[game] = counts.get(game, 0) + 1
-    return counts
+def _count_learner_rows(counts: dict[int, int], games: Tensor) -> None:
+    # Adds one to `counts[game]` for each game id in `games`, int64 [m], in place.
+    for game in games.tolist():
+        counts[game] = counts.get(game, 0) + 1
 
 
-RESULT_FOR_SEAT_0 = {Outcome.SEAT_0_WON: 1.0, Outcome.SEAT_1_WON: 0.0, Outcome.DRAW: 0.5}
+def _guess(guesser: Guesser, boards: Boards, *, seats: Tensor, history: Guess, history_count: Tensor) -> Guess:
+    # Makes the acting seat's guess in every slot and puts it at the front of that seat's
+    # history, in place. history: [slots, 2, h, cards] each; history_count: int64 [slots, 2].
+    slots = torch.arange(len(seats))
+    shown = history.deck.shape[2]
+    earlier = Guess(deck=history.deck[slots, seats], hand=history.hand[slots, seats])
+    mask = torch.arange(shown) < history_count[slots, seats][:, None]
+    guess = guesser(boards, Earlier(guesses=earlier, mask=mask))
+    history.deck[slots, seats] = torch.cat([guess.deck[:, None], earlier.deck[:, :-1]], dim=1)
+    history.hand[slots, seats] = torch.cat([guess.hand[:, None], earlier.hand[:, :-1]], dim=1)
+    history_count[slots, seats] = (history_count[slots, seats] + 1).clamp_max(shown)
+    return guess
+
+
+def _game_result(ended: Finished, *, game: int, learner_seat: int) -> GameResult:
+    seat_0_result = {Outcome.SEAT_0_WON: 1.0, Outcome.SEAT_1_WON: 0.0, Outcome.DRAW: 0.5}[ended.outcome]
+    return GameResult(
+        game=game,
+        decks=ended.decks,
+        learner_seat=learner_seat,
+        learner_result=seat_0_result if learner_seat == 0 else 1.0 - seat_0_result,
+    )
 
 
 @torch.no_grad()
@@ -211,24 +232,18 @@ def collect(
     slots = len(pending_decisions.seats)
     state = pending if pending is not None else _fresh(slots, cards=cards, history=history, generator=generator)
     learner_seat, game_ids, next_game = state.learner_seat.clone(), state.game_ids.clone(), state.next_game
-    history_deck, history_hand = state.history.deck.clone(), state.history.hand.clone()
-    history_count = state.history_count.clone()
+    guesses = Guess(deck=state.history.deck.clone(), hand=state.history.hand.clone())
+    guess_count = state.history_count.clone()
     parts: list[Rollout] = [] if state.rows is None else [state.rows]
-    results_by_game: dict[int, float] = {}
-    game_results: list[GameResult] = []
-    learner_rows = _learner_rows(state.rows)
+    finished: list[GameResult] = []
+    learner_rows: dict[int, int] = {}
+    if state.rows is not None:
+        _count_learner_rows(learner_rows, state.rows.games[state.rows.learner])
     finished_learner_rows = 0
-    slot_index = torch.arange(slots)
     while finished_learner_rows < decisions:
         seats = torch.from_numpy(pending_decisions.seats.copy())
         boards = {name: torch.from_numpy(np.array(array)) for name, array in pending_decisions.boards.items()}
-        earlier = Guess(deck=history_deck[slot_index, seats], hand=history_hand[slot_index, seats])
-        earlier_mask = torch.arange(history) < history_count[slot_index, seats][:, None]
-        guess = guesser(boards, Earlier(guesses=earlier, mask=earlier_mask))
-        history_deck[slot_index, seats] = torch.cat([guess.deck[:, None], earlier.deck[:, :-1]], dim=1)
-        history_hand[slot_index, seats] = torch.cat([guess.hand[:, None], earlier.hand[:, :-1]], dim=1)
-        history_count[slot_index, seats] = (history_count[slot_index, seats] + 1).clamp_max(history)
-
+        guess = _guess(guesser, boards, seats=seats, history=guesses, history_count=guess_count)
         is_learner = seats == learner_seat
         logits, values = _decide(boards, guess, is_learner=is_learner, learner=learner, opponent=opponent)
         log_probs = logits.log_softmax(dim=-1)
@@ -250,36 +265,25 @@ def collect(
                 hand_truth=hand_truth,
             )
         )
-        for game in game_ids[is_learner].tolist():
-            learner_rows[game] = learner_rows.get(game, 0) + 1
+        _count_learner_rows(learner_rows, game_ids[is_learner])
 
         for ended in batch.act(actions.numpy()):
             game = int(game_ids[ended.slot])
-            seat_0_result = RESULT_FOR_SEAT_0[ended.outcome]
-            results_by_game[game] = seat_0_result
-            seat = int(learner_seat[ended.slot])
-            game_results.append(
-                GameResult(
-                    game=game,
-                    decks=ended.decks,
-                    learner_seat=seat,
-                    learner_result=seat_0_result if seat == 0 else 1.0 - seat_0_result,
-                )
-            )
+            finished.append(_game_result(ended, game=game, learner_seat=int(learner_seat[ended.slot])))
             finished_learner_rows += learner_rows.pop(game, 0)
             game_ids[ended.slot] = next_game
             next_game += 1
-            learner_seat[ended.slot] = int(torch.randint(0, 2, (1,), generator=generator))
-            history_count[ended.slot] = 0
+            learner_seat[ended.slot] = int(torch.randint(0, SEATS, (1,), generator=generator))
+            guess_count[ended.slot] = 0
         pending_decisions = batch.decisions()
 
-    finished, unfinished = _split(parts, results_by_game)
+    rollout, unfinished = _split(parts, finished)
     carried = Pending(
         rows=unfinished,
-        history=Guess(deck=history_deck, hand=history_hand),
-        history_count=history_count,
+        history=guesses,
+        history_count=guess_count,
         learner_seat=learner_seat,
         game_ids=game_ids,
         next_game=next_game,
     )
-    return Collected(rollout=finished, games=tuple(game_results), pending=carried)
+    return Collected(rollout=rollout, games=tuple(finished), pending=carried)

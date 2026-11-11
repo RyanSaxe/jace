@@ -18,6 +18,11 @@ from jace.play import Guess
 
 __all__ = ("PlayerRule", "choice_loss", "entropy", "guess_loss", "kl_to", "player_loss", "score_loss")
 
+# The guess's shares and chances are kept this far from 0, and chances this far from 1,
+# before taking a logarithm, so a guess of exactly 0 or 1 costs a large finite amount.
+_SMALLEST_SHARE = 1e-9
+_CHANCE_MARGIN = 1e-6
+
 
 @dataclass(frozen=True, slots=True)
 class PlayerRule:
@@ -112,8 +117,9 @@ def player_loss(
 
 def guess_loss(guess: Guess, *, deck_truth: Tensor, hand_truth: Tensor) -> Tensor:
     # guess.deck, guess.hand, deck_truth, hand_truth: [m, cards]. A confident wrong guess costs most.
-    deck = -(deck_truth * guess.deck.clamp_min(1e-9).log()).sum(dim=-1).mean()
-    return deck + functional.binary_cross_entropy(guess.hand.clamp(1e-6, 1.0 - 1e-6), hand_truth)
+    deck = -(deck_truth * guess.deck.clamp_min(_SMALLEST_SHARE).log()).sum(dim=-1).mean()
+    hand = guess.hand.clamp(_CHANCE_MARGIN, 1.0 - _CHANCE_MARGIN)
+    return deck + functional.binary_cross_entropy(hand, hand_truth)
 
 
 def score_loss(logits: Tensor, *, wins: Tensor, games: Tensor) -> Tensor:

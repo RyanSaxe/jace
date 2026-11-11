@@ -13,6 +13,23 @@ from dataclasses import dataclass
 
 __all__ = ("Dials", "Schedule", "phased_schedule", "power_decay", "ramp")
 
+# Ataraxos's schedules (its supplement, Table S7). The learning rate is
+# RATE_SCALE / iteration ** RATE_POWER kept within [RATE_FLOOR, RATE_CAP], and the pull
+# toward even odds is SPREAD_START / iteration ** SPREAD_POWER.
+_RATE_SCALE = 0.5
+_RATE_POWER = 1.1
+_RATE_FLOOR = 5e-6
+_RATE_CAP = 1e-4
+_SPREAD_START = 0.05
+_SPREAD_POWER = 0.3
+
+# First guesses with no source, to be replaced by measured values.
+_DRAFTER_RATE = 1e-5
+_DRAFTER_ENTROPY = 0.01
+_EXPLORE_SHARE = 0.1
+# The drafter's rate ramps up over this fraction of the iterations it was frozen for.
+_DRAFTER_WARM_UP = 0.1
+
 
 @dataclass(frozen=True, slots=True)
 class Dials:
@@ -65,14 +82,14 @@ def phased_schedule(*, drafter_starts: int, pull_ends: int) -> Schedule:
     """
 
     def schedule(iteration: int) -> Dials:
-        warm = drafter_starts + max(1, drafter_starts // 10)
+        warm = drafter_starts + max(1, round(drafter_starts * _DRAFTER_WARM_UP))
         return Dials(
-            player_rate=power_decay(iteration, scale=0.5, power=1.1, low=5e-6, high=1e-4),
-            spread=power_decay(iteration, scale=0.05, power=0.3, low=0.0, high=0.05),
-            drafter_rate=ramp(iteration, start=drafter_starts, end=warm, first=0.0, last=1e-5),
+            player_rate=power_decay(iteration, scale=_RATE_SCALE, power=_RATE_POWER, low=_RATE_FLOOR, high=_RATE_CAP),
+            spread=power_decay(iteration, scale=_SPREAD_START, power=_SPREAD_POWER, low=0.0, high=_SPREAD_START),
+            drafter_rate=ramp(iteration, start=drafter_starts, end=warm, first=0.0, last=_DRAFTER_RATE),
             human_pull=ramp(iteration, start=drafter_starts, end=pull_ends, first=1.0, last=0.0),
-            drafter_entropy=0.01,
-            explore_share=0.1,
+            drafter_entropy=_DRAFTER_ENTROPY,
+            explore_share=_EXPLORE_SHARE,
         )
 
     return schedule

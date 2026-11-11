@@ -16,7 +16,7 @@ import numpy as np
 import numpy.typing as npt
 
 from jace.cards import Deck
-from jace.engine.batch import Decisions, Finished, HiddenCards, Outcome
+from jace.engine.batch import SEATS, Decisions, Finished, HiddenCards, Outcome
 
 __all__ = ("HAND_SIZE", "TOY_CARDS", "ToyBatch")
 
@@ -37,7 +37,7 @@ class ToyBatch:
     def __init__(self, matchups: Callable[[], tuple[Deck, Deck]], *, games: int, seed: int) -> None:
         self._matchups: Callable[[], tuple[Deck, Deck]] = matchups
         self._rng: random.Random = random.Random(seed)
-        self._hands: npt.NDArray[np.int64] = np.zeros((games, 2, HAND_SIZE), dtype=np.int64)
+        self._hands: npt.NDArray[np.int64] = np.zeros((games, SEATS, HAND_SIZE), dtype=np.int64)
         self._first_pick: npt.NDArray[np.int64] = np.full(games, -1, dtype=np.int64)
         self._decks: list[tuple[Deck, Deck]] = []
         for slot in range(games):
@@ -72,7 +72,7 @@ class ToyBatch:
         return tuple(finished)
 
     def hidden_cards(self) -> HiddenCards:
-        hands = np.zeros((len(self._hands), 2, TOY_CARDS), dtype=np.int64)
+        hands = np.zeros((len(self._hands), SEATS, TOY_CARDS), dtype=np.int64)
         np.put_along_axis(hands, self._hands, 1, axis=2)
         return HiddenCards(hands=hands, libraries=np.zeros_like(hands))
 

@@ -17,7 +17,10 @@ import numpy.typing as npt
 
 from jace.cards import Deck
 
-__all__ = ("Board", "Decisions", "Finished", "GameBatch", "HiddenCards", "Outcome")
+__all__ = ("SEATS", "Board", "Decisions", "Finished", "GameBatch", "HiddenCards", "Outcome")
+
+# Every game has two players, seat 0 and seat 1.
+SEATS = 2
 
 # One named array per kind of thing a seat can see, each with a leading batch axis.
 type Board = Mapping[str, npt.NDArray[np.generic]]
