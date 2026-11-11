@@ -1,102 +1,90 @@
 # jace
 
 jace learns to draft, build decks and play Magic: The Gathering by self-play.
-It is a Python 3.12 and PyTorch project that plays its games on the engine
-from [manabot](https://github.com/loopflowstudio/manabot). A drafter picks
-cards, a deck builder turns each pool of picked cards into a deck, and a
-player plays the games. The results of those games train all three.
+It plays its games on the engine from
+[manabot](https://github.com/loopflowstudio/manabot).
 
-> **Status: early.** A first version of every module exists and is tested.
-> Nothing has been trained beyond single update steps, and the whole limited
-> loop has run only on a toy game. [Status](docs/status.md) lists what works
-> and what is not built yet.
+> **Status: early.** Every module has a first version with tests. Nothing has
+> been trained on Magic yet. [Status](docs/status.md) lists what works.
 
 ## Get started
 
-jace needs Python 3.12, [uv](https://docs.astral.sh/uv/) and a Rust
-toolchain, because installing it builds manabot's engine from source.
+You need Python 3.12, [uv](https://docs.astral.sh/uv/) and a Rust toolchain.
+Installing builds manabot's engine from source.
 
 ```sh
 git clone https://github.com/RyanSaxe/jace.git
 cd jace
 uv sync
 uv run pytest -q
+```
+
+To see training work, run the smallest example. It needs no game engine:
+
+```sh
 uv run python -m jace.loops.toy
 ```
 
-The last command runs the smallest example loop. It trains a player on High
-Card, a toy game where each seat holds three cards, picks one, and the higher
-pick wins. It prints how often the player picked its highest card, which is
-the best play:
-
 ```text
 iteration  1  best card 0.36  win rate 0.56
-iteration  5  best card 0.41  win rate 0.53
-iteration 10  best card 0.44  win rate 0.58
-iteration 15  best card 0.51  win rate 0.59
 iteration 20  best card 0.59  win rate 0.60
-iteration 25  best card 0.65  win rate 0.69
-iteration 30  best card 0.69  win rate 0.74
-iteration 35  best card 0.69  win rate 0.72
 iteration 40  best card 0.78  win rate 0.74
 ```
 
-[Install](docs/getting-started/install.md) covers the requirements and the
-pre-commit hook.
+The player learns a toy game where the highest card wins. The output above
+shows three of its nine lines.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    schedule["Schedule: this iteration's dials"] --> draft["Draft pods"]
-    draft --> build["Build a deck from each pool"]
-    build --> play["Play the decks"]
-    play --> learn["Update every model"]
-    learn --> schedule
+    draft["Draft"] -->|pools| build["Build decks"]
+    build -->|decks| play["Play games"]
+    play -->|results| learn["Train every model"]
 ```
 
-One iteration of limited training runs those five steps. A schedule gives the
-iteration its dials, such as learning rates and how much to explore. The
-drafter drafts several pods, the deck builder builds a deck from each seat's
-pool, and the player plays the decks against each other. The game results
-then update the player, the model that guesses the opponent's hidden cards,
-the deck score, the deck builder and the drafter.
+Training repeats these four steps. Five models take part, and all of them
+read cards through one shared card embedding.
 
-jace has no trainer class and no framework. A training loop is a short
-function you write from the modules below, and `jace.loops.limited` is one
-example. Constructed play is the same code without `jace.draft`.
+| Model        | Job                                      |
+| ------------ | ---------------------------------------- |
+| Drafter      | Picks a card from each pack              |
+| Deck builder | Proposes decks from a pool of picks      |
+| Deck score   | Predicts how often a deck wins           |
+| Guess model  | Predicts the opponent's deck and hand    |
+| Player       | Chooses each action in a game            |
 
-| Module          | Owns                                                                                                    |
-| --------------- | ------------------------------------------------------------------------------------------------------- |
-| `jace.cards`    | Card records, the pool that gives each card its id, and the one card embedding every model reads        |
-| `jace.engine`   | `GameBatch`, the interface every caller plays games through, implemented on manabot and on a toy game   |
-| `jace.draft`    | Boosters, the draft pod, whole drafts across pods, and the drafter model                                |
-| `jace.decks`    | The deck score, and a deck builder that proposes whole decks and improves them by swaps                 |
-| `jace.play`     | The guess model, which predicts the opponent's deck and hand, and the player model                      |
-| `jace.train`    | The pieces a loop is written from: game collection, advantages, losses and the update step              |
-| `jace.eval`     | A win rate with a range, and a check that the guess model's stated chances come true                    |
-| `jace.tracking` | A run's record as plain files                                                                           |
-| `jace.loops`    | The example loops, on the toy game and for limited, and the schedules that set a loop's dials           |
-| `jace.modules`  | Two helpers every model shares                                                                          |
+jace has no trainer class. A training loop is a short function you write
+from the package's pieces, and
+[`jace.loops.limited`](src/jace/loops/limited.py) is the example to read
+first. Constructed play is the same code without the draft step.
+
+## Modules
+
+| Module          | Holds                                        |
+| --------------- | -------------------------------------------- |
+| `jace.cards`    | Card records and the shared card embedding   |
+| `jace.engine`   | `GameBatch`, the one way games are played    |
+| `jace.draft`    | Boosters, the draft pod, the drafter         |
+| `jace.decks`    | The deck score and the deck builder          |
+| `jace.play`     | The guess model and the player               |
+| `jace.train`    | Game collection, losses, the update step     |
+| `jace.eval`     | Win rates and the guess model's check        |
+| `jace.tracking` | Run records as plain files                   |
+| `jace.loops`    | Example loops and schedules                  |
 
 ## Documentation
 
-- [Install](docs/getting-started/install.md) lists the requirements and
-  explains how to install jace, run the tests and run the example.
-- [Architecture](docs/concepts/architecture.md) explains what each module
-  owns, which module imports which, and the `GameBatch` interface.
-- [Models](docs/concepts/models.md) explains the card embedding and the five
-  models that read it.
-- [Training](docs/concepts/training.md) explains game collection, the
-  losses, the player's update rule and schedules.
-- [Write a loop](docs/guides/write-a-loop.md) walks through the limited loop
-  and explains how to change it.
-- [Run records](docs/reference/run-records.md) describes the files a run
-  writes to disk.
-- [Status](docs/status.md) lists what works today, how it was checked, and
-  what is not built yet.
-- [Contributing](docs/contributing/README.md) explains the checks, the
-  layout and the design rules.
+| Read                                              | To learn                                  |
+| ------------------------------------------------- | ----------------------------------------- |
+| [Install](docs/getting-started/install.md)        | Requirements, tests, the pre-commit hook  |
+| [Architecture](docs/concepts/architecture.md)     | What each module owns and imports         |
+| [Models](docs/concepts/models.md)                 | The card embedding and the five models    |
+| [Training](docs/concepts/training.md)             | Game collection, losses and schedules     |
+| [Write a loop](docs/guides/write-a-loop.md)       | How the limited loop works and changes    |
+| [Run records](docs/reference/run-records.md)      | The files a run writes                    |
+| [Status](docs/status.md)                          | What works today and what is not built    |
+| [Contributing](docs/contributing/README.md)       | The checks and the design rules           |
 
 ## Licence
 
