@@ -7,7 +7,7 @@ can change without touching them.
 
 import pytest
 
-from mtg_rl.draft import (
+from jace.draft import (
     Complete,
     DraftFormat,
     IllegalPickError,

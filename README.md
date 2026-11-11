@@ -1,4 +1,4 @@
-# mtg-rl
+# jace
 
 Learn to draft, build decks and play Magic: The Gathering by self-play.
 
@@ -12,14 +12,14 @@ drafter, because the deck builder and the player do not depend on it.
 
 ## Status
 
-The repository holds the first module, `mtg_rl.draft`, which runs a draft pod
+The repository holds the first module, `jace.draft`, which runs a draft pod
 as an explicit state machine. Nothing is trained yet.
 
 ## Layout
 
 | Module | Holds |
 |---|---|
-| `mtg_rl.draft` | The draft pod: seats, packs, passing and pools |
+| `jace.draft` | The draft pod: seats, packs, passing and pools |
 
 Modules for cards, the engine, decks, play, training and evaluation are added
 as each is built.
@@ -42,3 +42,9 @@ ast-grep rules in `.byor/rules`, ruff, ty, and three documentation checks.
 - Every state machine is explicit. A state is an immutable value with its own
   type, and each transition is one function from a state to the next.
 - A module's public interface is its `__all__`. Tests use only that interface.
+
+## Notice
+
+jace is unofficial Fan Content permitted under the Fan Content Policy. Not
+approved/endorsed by Wizards. Portions of the materials used are property of
+Wizards of the Coast. ©Wizards of the Coast LLC.

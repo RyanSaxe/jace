@@ -1,0 +1,20 @@
+# Managed by BYOR. Manual edits may be overwritten.
+name: byor gate
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  byor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uvx --from ast-grep-cli==0.42.3 ast-grep scan --error
+      - run: uv run .byor/scripts/ruff.py
+      - run: uvx ty check --output-format concise --no-progress --color never --error all
+      - run: uv run .byor/scripts/no-suppression-comments.py
+      - run: uv run .byor/scripts/module-contract.py
+      - run: uv run .byor/scripts/no-thin-docstrings.py

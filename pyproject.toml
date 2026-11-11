@@ -1,5 +1,5 @@
 [project]
-name = "mtg-rl"
+name = "jace"
 version = "0.1.0"
 description = "Learn to draft, build decks and play Magic: The Gathering by self-play"
 readme = "README.md"

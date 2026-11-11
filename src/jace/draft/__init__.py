@@ -5,7 +5,7 @@ seat should take. Pick policies live elsewhere and talk to a pod only through
 the states and the transition exported here.
 """
 
-from mtg_rl.draft.pod import (
+from jace.draft.pod import (
     CardId,
     Complete,
     DraftFormat,
