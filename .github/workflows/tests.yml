@@ -1,0 +1,16 @@
+name: tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      # Building manabot's engine needs a Rust toolchain, which the runner image provides.
+      - run: uv sync
+      - run: uv run pytest -q
