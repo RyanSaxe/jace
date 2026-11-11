@@ -31,3 +31,8 @@ repos:
         entry: uv run .byor/scripts/no-thin-docstrings.py
         language: system
         files: \.(py|pyi)$
+      - id: byor-max-file-lines
+        name: max-file-lines
+        entry: uv run tools/max_file_lines.py
+        language: system
+        files: \.(py|pyi)$
