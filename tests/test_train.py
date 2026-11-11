@@ -65,7 +65,7 @@ def test_a_game_still_running_when_collect_stops_is_returned_whole_by_a_later_ca
     games_carried = 0
     pending = None
     for _ in range(4):
-        rollout, pending = collect(
+        collected = collect(
             batch,
             pending,
             learner=_uniform_policy,
@@ -76,7 +76,8 @@ def test_a_game_still_running_when_collect_stops_is_returned_whole_by_a_later_ca
             decisions=20,
             generator=generator,
         )
-        rollouts.append(rollout)
+        pending = collected.pending
+        rollouts.append(collected.rollout)
         games_carried += 0 if pending.rows is None else len(pending.rows.games.unique())
 
     assert games_carried > 0
@@ -106,7 +107,7 @@ def test_a_player_learns_to_pick_its_highest_card() -> None:
     best_pick_rates = []
     pending = None
     for _ in range(40):
-        rollout, pending = collect(
+        collected = collect(
             batch,
             pending,
             learner=policy,
@@ -117,6 +118,7 @@ def test_a_player_learns_to_pick_its_highest_card() -> None:
             decisions=512,
             generator=generator,
         )
+        rollout, pending = collected.rollout, collected.pending
         mine = rollout.learner
         best_pick_rates.append(
             float((rollout.boards["hand"][mine].argmax(dim=-1) == rollout.actions[mine]).float().mean())

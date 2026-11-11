@@ -15,10 +15,11 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from jace.cards import Deck
 from jace.engine import GameBatch, Outcome
 from jace.play import Boards, Earlier, Guess, Guesser, Policy
 
-__all__ = ("Pending", "Rollout", "collect", "select")
+__all__ = ("Collected", "GameResult", "Pending", "Rollout", "collect", "select")
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +69,24 @@ class Pending:
     learner_seat: Tensor
     game_ids: Tensor
     next_game: int
+
+
+@dataclass(frozen=True, slots=True)
+class GameResult:
+    game: int
+    decks: tuple[Deck, Deck]
+    learner_seat: int
+    # The learner's result: 1 for a win, 0.5 for a draw, 0 for a loss.
+    learner_result: float
+
+
+@dataclass(frozen=True, slots=True)
+class Collected:
+    # rollout: the decisions of the games that finished. games: one entry per finished game.
+    rollout: Rollout
+    games: tuple[GameResult, ...]
+    # pending: pass it to the next `collect` call on the same batch.
+    pending: Pending
 
 
 def select(rollout: Rollout, rows: Tensor) -> Rollout:
@@ -178,14 +197,15 @@ def collect(
     history: int,
     decisions: int,
     generator: torch.Generator,
-) -> tuple[Rollout, Pending]:
+) -> Collected:
     """Step `batch` until finished games hold at least `decisions` learner decisions.
 
     Pass `pending=None` for a batch that has just been started and the
     `Pending` from the previous call afterwards. `cards` is the number of
     cards in the pool and `history` is how many earlier guesses the guesser
     is shown. The learner's seat is drawn at random for each new game.
-    Returns the rollout of finished games and the state to continue from.
+    Returns the decisions and results of the finished games, and the state
+    to continue from.
     """
     pending_decisions = batch.decisions()
     slots = len(pending_decisions.seats)
@@ -195,6 +215,7 @@ def collect(
     history_count = state.history_count.clone()
     parts: list[Rollout] = [] if state.rows is None else [state.rows]
     results_by_game: dict[int, float] = {}
+    game_results: list[GameResult] = []
     learner_rows = _learner_rows(state.rows)
     finished_learner_rows = 0
     slot_index = torch.arange(slots)
@@ -234,7 +255,17 @@ def collect(
 
         for ended in batch.act(actions.numpy()):
             game = int(game_ids[ended.slot])
-            results_by_game[game] = RESULT_FOR_SEAT_0[ended.outcome]
+            seat_0_result = RESULT_FOR_SEAT_0[ended.outcome]
+            results_by_game[game] = seat_0_result
+            seat = int(learner_seat[ended.slot])
+            game_results.append(
+                GameResult(
+                    game=game,
+                    decks=ended.decks,
+                    learner_seat=seat,
+                    learner_result=seat_0_result if seat == 0 else 1.0 - seat_0_result,
+                )
+            )
             finished_learner_rows += learner_rows.pop(game, 0)
             game_ids[ended.slot] = next_game
             next_game += 1
@@ -251,4 +282,4 @@ def collect(
         game_ids=game_ids,
         next_game=next_game,
     )
-    return finished, carried
+    return Collected(rollout=finished, games=tuple(game_results), pending=carried)

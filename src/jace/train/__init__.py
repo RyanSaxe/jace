@@ -7,12 +7,14 @@ what is trained when, where decks come from, or how a dial changes over
 training.
 """
 
-from jace.train.collect import Pending, Rollout, collect, select
+from jace.train.collect import Collected, GameResult, Pending, Rollout, collect, select
 from jace.train.losses import PlayerRule, choice_loss, entropy, guess_loss, kl_to, player_loss, score_loss
 from jace.train.sequences import Sequences, advantages, earlier_guesses, sequences
 from jace.train.update import Metrics, apply, update_guess, update_player
 
 __all__ = (
+    "Collected",
+    "GameResult",
     "Metrics",
     "Pending",
     "PlayerRule",
