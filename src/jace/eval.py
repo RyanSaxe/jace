@@ -14,7 +14,10 @@ from torch import Tensor
 
 from jace.play import Guess
 
-__all__ = ("GuessReport", "WinRate", "check_guess", "learner_results", "win_rate")
+__all__ = ("CHANCE_RANGES", "GuessReport", "WinRate", "check_guess", "learner_results", "win_rate")
+
+# A guess is checked in this many equal ranges of stated chance: 0 to 10%, 10 to 20%, and so on.
+CHANCE_RANGES = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,8 +34,8 @@ class GuessReport:
 
     `loss` and `base_rate_loss` are the average log loss of the guess and of
     a guess that gives every card its overall frequency; the model is useful
-    only when `loss` is lower. `stated` and `observed` hold, for each of ten
-    equal ranges of stated chance, the mean chance the model stated and how
+    only when `loss` is lower. `stated` and `observed` hold, for each of the
+    `CHANCE_RANGES` equal ranges of stated chance, the mean chance the model stated and how
     often the card was really in hand; they match when the model is honest.
     A range with no guesses in it is NaN in both.
     """
@@ -76,10 +79,11 @@ def check_guess(guess: Guess, *, hand_truth: Tensor) -> GuessReport:
     # guess.hand, hand_truth: [n, cards]. Scores every (decision, card) pair.
     stated = guess.hand.flatten()
     truth = hand_truth.flatten()
-    bucket = (stated * 10).long().clamp_max(9)
-    counts = torch.zeros(10).scatter_add(0, bucket, torch.ones_like(stated))
-    stated_means = torch.zeros(10).scatter_add(0, bucket, stated) / counts
-    observed_means = torch.zeros(10).scatter_add(0, bucket, truth) / counts
+    chance_range = (stated * CHANCE_RANGES).long().clamp_max(CHANCE_RANGES - 1)
+    empty = torch.zeros(CHANCE_RANGES)
+    counts = empty.scatter_add(0, chance_range, torch.ones_like(stated))
+    stated_means = empty.scatter_add(0, chance_range, stated) / counts
+    observed_means = empty.scatter_add(0, chance_range, truth) / counts
     return GuessReport(
         loss=_log_loss(stated, truth),
         base_rate_loss=_log_loss(truth.mean().expand_as(truth), truth),
