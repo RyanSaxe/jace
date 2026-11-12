@@ -18,7 +18,7 @@ import random
 import sys
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -55,10 +55,8 @@ _MIN_LANDS = 15
 _MAX_LANDS = 18
 _SEATS_IN_A_POD = 8
 _BOOSTERS_EACH = 3
-# Ataraxos's player rule: learn only from the quarter of decisions with the largest advantages.
+# Ataraxos's player rule. Its `keep_quantile` and `spread` are replaced by the arguments and the schedule.
 _PLAYER_RULE = PlayerRule(clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.75, keep_floor=0.0, value_weight=0.5)
-_LAM_ADVANTAGE = 0.5
-_LAM_VALUE = 0.8
 _RANGE_RESAMPLES = 1000
 _SCORE_CHUNK = 1024
 _SLICE_ROWS = 512
@@ -100,6 +98,10 @@ def _arguments(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--deck-heads", type=int, default=4)
     parser.add_argument("--embedding-hidden", type=int, default=256)
     parser.add_argument("--rate", type=float, default=1e-4, help="the learning rate of the models with no schedule")
+    parser.add_argument("--player-rate", type=float, help="a fixed player learning rate in place of the schedule's")
+    parser.add_argument("--lam-advantage", type=float, default=0.5, help="how far back a result's credit reaches")
+    parser.add_argument("--lam-value", type=float, default=0.8)
+    parser.add_argument("--keep-quantile", type=float, default=0.75, help="learn from decisions above this quantile")
     parser.add_argument("--held-out-share", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--jace-commit", default="unknown")
@@ -322,9 +324,9 @@ def main(argv: Sequence[str]) -> None:
         history=arguments.history,
         slice_rows=_SLICE_ROWS,
         max_grad_norm=1.0,
-        player_rule=_PLAYER_RULE,
-        lam_advantage=_LAM_ADVANTAGE,
-        lam_value=_LAM_VALUE,
+        player_rule=replace(_PLAYER_RULE, keep_quantile=arguments.keep_quantile),
+        lam_advantage=arguments.lam_advantage,
+        lam_value=arguments.lam_value,
     )
     learners = Learners(
         policy=models.player.policy,
@@ -338,10 +340,13 @@ def main(argv: Sequence[str]) -> None:
     schedule = phased_schedule(drafter_starts=arguments.drafter_starts, pull_ends=arguments.pull_ends)
 
     def iterate(iteration: int) -> dict[str, float]:
+        dials = schedule(iteration)
+        if arguments.player_rate is not None:
+            dials = replace(dials, player_rate=arguments.player_rate)
         metrics = limited_iteration(
             setup,
             learners,
-            dials=schedule(iteration),
+            dials=dials,
             opponent=models.player.policy,
             other_seats=(),
             start=start,
