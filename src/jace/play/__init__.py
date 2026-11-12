@@ -5,8 +5,21 @@ chooses actions with that guess as input. Code that runs games depends only
 on the `Policy` and `Guesser` function types, never on a model class.
 """
 
+from jace.play.device import guesser_on, policy_on
 from jace.play.guess import GuessModel
 from jace.play.player import PlayerModel, as_boards, random_policy
 from jace.play.types import Boards, Earlier, Guess, Guesser, Policy
 
-__all__ = ("Boards", "Earlier", "Guess", "GuessModel", "Guesser", "PlayerModel", "Policy", "as_boards", "random_policy")
+__all__ = (
+    "Boards",
+    "Earlier",
+    "Guess",
+    "GuessModel",
+    "Guesser",
+    "PlayerModel",
+    "Policy",
+    "as_boards",
+    "guesser_on",
+    "policy_on",
+    "random_policy",
+)

@@ -270,7 +270,8 @@ def save_checkpoint(run: Running, *, model: ModelName, update: int, module: nn.M
     if path.exists():
         raise CheckpointExistsError(path)
     unfinished = path.with_suffix(".partial")
-    torch.save(module.state_dict(), unfinished)
+    # Saved from the CPU, so a checkpoint loads on a machine without the device it was trained on.
+    torch.save({name: value.cpu() for name, value in module.state_dict().items()}, unfinished)
     sha256 = _sha256(unfinished)
     unfinished.rename(path)
     _append(path.parent / "index.jsonl", {"model": model, "update": update, "sha256": sha256})

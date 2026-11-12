@@ -20,7 +20,7 @@ import random
 import sys
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -31,8 +31,8 @@ from jace.cards import CardEmbedding, Deck, own_parameters
 from jace.data import SetCards, card_table, load_decks, read_set
 from jace.engine import SEATS
 from jace.engine.manabot import engine_card_ids, engine_cards, land_and_spell_actions, start_batch
-from jace.loops.entry_points import RunArguments, add_run_flags, playable_decks, start_run
-from jace.play import GuessModel, PlayerModel, as_boards
+from jace.loops.entry_points import RunArguments, add_run_flags, device_named, playable_decks, start_run
+from jace.play import Guess, GuessModel, PlayerModel, as_boards, guesser_on, policy_on
 from jace.tracking import (
     CheckpointRef,
     ModelName,
@@ -86,6 +86,7 @@ class _Arguments(RunArguments):
     play_heads: int
     guess_cards: int
     embedding_hidden: int
+    device: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +131,7 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument("--play-heads", type=int, default=4)
     parser.add_argument("--guess-cards", type=int, default=8)
     parser.add_argument("--embedding-hidden", type=int, default=256)
+    parser.add_argument("--device", default="auto", help="where the update runs: cpu, mps or cuda; auto takes mps")
     return _Arguments(**vars(parser.parse_args(argv)))
 
 
@@ -233,10 +235,21 @@ def _iterate(
     # One round of games and one update of the player and the guess model. Returns the
     # iteration's metrics, its rollout and the workers for the next round.
     began = time.perf_counter()
-    weights = {name: module.state_dict() for name, module in _by_name(models).items()}
+    # The workers play on the CPU, whatever device the update runs on.
+    weights = {
+        name: {key: value.cpu() for key, value in module.state_dict().items()}
+        for name, module in _by_name(models).items()
+    }
+    device = models.embedding.starting.device
     gathered = gather(workers, weights=weights, decisions=arguments.decisions, stall_seconds=arguments.stall_seconds)
     collected = time.perf_counter()
     rollout = gathered.rollout
+    # The model's inputs go to its device once, so every slice of every pass is cut there.
+    on_device = replace(
+        rollout,
+        boards={name: board.to(device) for name, board in rollout.boards.items()},
+        guesses=Guess(deck=rollout.guesses.deck.to(device), hand=rollout.guesses.hand.to(device)),
+    )
     rule = PlayerRule(
         clip=_CLIP,
         stay=_STAY,
@@ -247,8 +260,8 @@ def _iterate(
         normalize=arguments.normalize,
     )
     player = update_player(
-        models.player.policy,
-        rollout,
+        policy_on(models.player.policy, device),
+        on_device,
         rule=rule,
         lam_advantage=arguments.lam_advantage,
         lam_value=arguments.lam_value,
@@ -259,8 +272,8 @@ def _iterate(
         generator=generator if arguments.shuffle else None,
     )
     guess = update_guess(
-        models.guess.guess,
-        rollout,
+        guesser_on(models.guess.guess, device),
+        on_device,
         history=arguments.history,
         slice_rows=_SLICE_ROWS,
         max_grad_norm=_MAX_GRAD_NORM,
@@ -348,9 +361,12 @@ def main(argv: Sequence[str]) -> None:
         load_checkpoint(arguments.embedding_run.parent, ref, into=models.embedding, keeping=None)
         inputs = (ref,)
     done = 0 if arguments.resume is None else _resume(arguments.resume, models)
+    device = device_named(arguments.device)
+    for module in _by_name(models).values():
+        module.to(device)
     clock = functools.partial(datetime.now, UTC)
     if arguments.resume is None:
-        folder, curve_file = start_run(arguments, device=torch.device("cpu"), inputs=inputs, clock=clock)
+        folder, curve_file = start_run(arguments, device=device, inputs=inputs, clock=clock)
     else:
         folder, curve_file = arguments.resume, arguments.resume.with_name(f"{arguments.resume.name}.curve.json")
     # A resumed run must not replay the games it already played.
