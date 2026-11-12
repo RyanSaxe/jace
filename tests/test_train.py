@@ -6,9 +6,14 @@ right decisions, games are never lost or split between calls, and a player
 actually gets better at a game whose best play is known.
 """
 
+from typing import override
+
+import numpy as np
+import numpy.typing as npt
 import torch
 from torch import Tensor, nn
 
+from jace.engine import Finished, Outcome
 from jace.engine.toy import HAND_SIZE, TOY_CARDS, ToyBatch
 from jace.modules import run
 from jace.play import Boards, Earlier, Guess
@@ -136,3 +141,40 @@ def test_a_player_learns_to_pick_its_highest_card() -> None:
 
     assert best_pick_rates[0] < 0.45
     assert best_pick_rates[-1] > 0.65
+
+
+class _AbandonsSlotZero(ToyBatch):
+    """The toy game, except that every game in slot 0 is reported as abandoned when it ends.
+
+    It stands in for an engine that cannot finish some games, which the toy
+    engine never does. The other slots finish with real results, so a test
+    can tell the two kinds of ending apart.
+    """
+
+    @override
+    def act(self, actions: npt.NDArray[np.int64]) -> tuple[Finished, ...]:
+        return tuple(
+            Finished(slot=0, outcome=Outcome.ABANDONED, decks=ended.decks) if ended.slot == 0 else ended
+            for ended in super().act(actions)
+        )
+
+
+def test_an_abandoned_game_is_counted_and_none_of_its_decisions_are_returned() -> None:
+    collected = collect(
+        _AbandonsSlotZero(lambda: ((0,), (1,)), games=4, seed=5),
+        None,
+        learner=_uniform_policy,
+        opponent=_uniform_policy,
+        guesser=_blank_guesser,
+        cards=TOY_CARDS,
+        history=HISTORY,
+        decisions=40,
+        generator=torch.Generator().manual_seed(5),
+    )
+
+    finished = {game.game for game in collected.games}
+    assert collected.abandoned > 0
+    assert set(collected.rollout.games.tolist()) == finished
+    assert not bool(collected.rollout.results.isnan().any())
+    if collected.pending.rows is not None:
+        assert finished.isdisjoint(collected.pending.rows.games.tolist())
