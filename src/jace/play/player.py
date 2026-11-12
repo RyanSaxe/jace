@@ -13,7 +13,7 @@ from torch import Tensor, nn
 
 from jace.cards import CardEmbedding
 from jace.engine import Decisions
-from jace.modules import run, transformer
+from jace.modules import encode_real, run, transformer
 from jace.play.tokens import EntityEncoder, board_tokens
 from jace.play.types import Boards, Guess, Policy
 
@@ -93,17 +93,21 @@ class PlayerModel(nn.Module):
         guessed = run(self.guessed_card, card_table[likeliest]) + run(self.guessed_chance, chances[..., None])
         sequence = torch.cat((entities, guessed), dim=1)
         mask = torch.cat((tokens.entity_mask, torch.ones_like(likeliest, dtype=torch.bool)), dim=1)
-        encoded = self.encoder.forward(sequence, src_key_padding_mask=~mask)
+        encoded = encode_real(self.encoder, sequence, mask=mask)
 
         real = mask[..., None]  # bool [b, entities + guessed, 1]
         summary = (encoded * real).sum(dim=1) / real.sum(dim=1)  # [b, width]
 
-        focused = _focus_vectors(encoded[:, : entities.shape[1]], tokens.action_focus)
-        max_actions = focused.shape[1]
+        # The engine fills action slots from the front, so the slots past the longest list are all empty.
+        offered = int(tokens.action_mask.sum(dim=1).max())
+        focused = _focus_vectors(encoded[:, : entities.shape[1]], tokens.action_focus[:, :offered])
         scored = torch.cat(
-            (run(self.actions, tokens.actions), focused, summary[:, None].expand(-1, max_actions, -1)), dim=-1
-        )  # [b, max_actions, scored vectors * width]
-        logits = run(self.action_head, scored).squeeze(-1).masked_fill(~tokens.action_mask, -torch.inf)
+            (run(self.actions, tokens.actions[:, :offered]), focused, summary[:, None].expand(-1, offered, -1)),
+            dim=-1,
+        )  # [b, offered, scored vectors * width]
+        logits = torch.full_like(tokens.action_mask, -torch.inf, dtype=scored.dtype)
+        logits[:, :offered] = run(self.action_head, scored).squeeze(-1)
+        logits = logits.masked_fill(~tokens.action_mask, -torch.inf)
         return logits, run(self.value_head, summary).squeeze(-1).sigmoid()
 
 

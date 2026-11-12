@@ -14,7 +14,7 @@ import torch
 from torch import Tensor, nn
 
 from jace.cards import CardEmbedding
-from jace.modules import run, transformer
+from jace.modules import encode_real, run, transformer
 from jace.play.tokens import EntityEncoder, board_tokens
 from jace.play.types import Boards, Earlier, Guess
 
@@ -94,7 +94,7 @@ class GuessModel(nn.Module):
         sequence = torch.cat((queries, entities, events, earlier_tokens), dim=1)
         query_mask = torch.ones(batch, _GUESS_PARTS, dtype=torch.bool, device=sequence.device)
         mask = torch.cat((query_mask, tokens.entity_mask, tokens.event_mask, earlier.mask), dim=1)
-        encoded = self.encoder.forward(sequence, src_key_padding_mask=~mask)
+        encoded = encode_real(self.encoder, sequence, mask=mask)
 
         keys = run(self.card_keys, card_table)  # [cards, width]
         scores = encoded[:, :_GUESS_PARTS] @ keys.T * self.width**-0.5  # [b, guess parts, cards]
