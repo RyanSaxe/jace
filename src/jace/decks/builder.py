@@ -116,7 +116,18 @@ class DeckBuilderModel(nn.Module):
         return (query @ keys.T).masked_fill(available <= 0, float("-inf"))
 
 
-def model_proposer(model: DeckBuilderModel, *, rules: BuildRules, generator: torch.Generator) -> Proposer:
+def model_proposer(
+    model: DeckBuilderModel, *, rules: BuildRules, generator: torch.Generator, greedy: bool = False
+) -> Proposer:
+    """Propose legal decks by asking `model` for one card at a time.
+
+    Each deck may hold any land count the pool and `rules` allow, so the
+    model chooses it. A step samples the next card from the model's odds
+    over the legal cards. With `greedy` it takes the likeliest legal card
+    instead, so every proposal for a pool is the same deck and `generator`
+    is not used. That deck is the model's single best guess.
+    """
+
     def propose(pool_counts: Tensor, decks: int) -> Tensor:
         fewest, most = _land_range(pool_counts, rules=rules)
         lands = torch.full((decks,), fewest, device=pool_counts.device)
@@ -128,6 +139,7 @@ def model_proposer(model: DeckBuilderModel, *, rules: BuildRules, generator: tor
                 max_lands=lands + (most - fewest),
                 rules=rules,
                 generator=generator,
+                greedy=greedy,
             )
 
     return propose
@@ -156,6 +168,7 @@ def random_proposer(*, rules: BuildRules, generator: torch.Generator) -> Propose
             max_lands=lands,
             rules=rules,
             generator=generator,
+            greedy=False,
         )
 
     return propose
@@ -317,6 +330,7 @@ def _write_decks(
     max_lands: Tensor,
     rules: BuildRules,
     generator: torch.Generator,
+    greedy: bool,
 ) -> Tensor:
     # min_lands, max_lands: int64 [n], each deck's own land bounds, inside the range the pool allows.
     # Returns float [n, cards]. Every row is a legal deck because a step only offers moves that leave one reachable.
@@ -331,6 +345,9 @@ def _write_decks(
         may_add_spell = written - lands < rules.size - min_lands
         allowed = torch.where(is_land, may_add_land.unsqueeze(1), may_add_spell.unsqueeze(1)) & (available > 0)
         logits = next_card(available, decks).masked_fill(~allowed, float("-inf"))
-        choice = torch.multinomial(logits.softmax(dim=1), 1, generator=generator)  # int64 [n, 1]
+        if greedy:
+            choice = logits.argmax(dim=1, keepdim=True)  # int64 [n, 1]
+        else:
+            choice = torch.multinomial(logits.softmax(dim=1), 1, generator=generator)
         decks.scatter_add_(1, choice, one)
     return decks
