@@ -11,12 +11,12 @@ each module owns and how games reach the code that learns from them.
 | Module          | Owns                                                      |
 | --------------- | --------------------------------------------------------- |
 | `jace.cards`    | Card records, card ids and the shared card embedding      |
-| `jace.engine`   | `GameBatch`, the interface games are played through       |
+| `jace.engine`   | `GameBatch`, the interface games are played through, and the games that score two players |
 | `jace.play`     | The guess model and the player                            |
 | `jace.draft`    | Boosters, the draft pod and the drafter                   |
 | `jace.decks`    | The deck score and the deck builder                       |
 | `jace.train`    | Game collection, the losses and the update step           |
-| `jace.eval`     | Win rates and the check on the guess model                |
+| `jace.eval`     | Paired deals, win rates and the check on the guess model  |
 | `jace.data`     | Human drafts and decks from 17Lands, and card starting vectors |
 | `jace.loops`    | Training loops, schedules and the command-line entry points |
 | `jace.tracking` | A training run's record on disk                           |
@@ -47,10 +47,26 @@ starts the next matchup before `act` returns.
 
 Two things implement the interface:
 
-- `jace.engine.manabot` plays real Magic. It is the only file that imports
-  manabot, so a change in the engine reaches one file.
+- `jace.engine.manabot` plays real Magic through manabot's batched games.
 - `jace.engine.toy` plays High Card, a three-card game. Tests and the
   smallest example use it, so they need no engine.
+
+## Scoring plays one game at a time
+
+Scoring a player is the one thing that does not go through `GameBatch`.
+`jace.engine.scoring` plays a match between any two players, which can be
+jace checkpoints or manabot's scripted players. Each game runs alone, in a
+child process, for two reasons. manabot's scripted players read manabot's
+own game object. And the engine can enter a step that never returns, which
+only killing its process ends: `play_games` records such a game as hung
+and plays the rest.
+
+`jace.eval` decides which games a match holds and what they mean. `legs`
+lists every deal as four games, so each player holds each deck in each seat,
+and `score_match` gives a win rate whose range resamples whole deals.
+
+`jace.engine.manabot` and `jace.engine.scoring` are the only files that
+import manabot, so a change in the engine reaches two files.
 
 ## Pieces, not a framework
 
@@ -59,13 +75,14 @@ compute this loss, take this step. A training loop is a function you write
 by calling them. `jace.loops` holds two: `toy`, a player on High Card, and
 `limited`, one round of draft, build, play and learn.
 
-Three modules there run from the command line:
+Four modules there run from the command line:
 
-| Entry point                 | Trains                                          |
+| Entry point                 | Does                                            |
 | --------------------------- | ----------------------------------------------- |
-| `jace.loops.pretrain`       | The drafter, on human picks                     |
-| `jace.loops.pretrain_decks` | The deck score and the deck builder, on human decks |
-| `jace.loops.train_limited`  | Every model, on real games, from those checkpoints |
+| `jace.loops.pretrain`       | Trains the drafter, on human picks              |
+| `jace.loops.pretrain_decks` | Trains the deck score and the deck builder, on human decks |
+| `jace.loops.train_limited`  | Trains every model, on real games, from those checkpoints |
+| `jace.loops.score`          | Scores a run's checkpoints against each other and against manabot's scripted players |
 
 Because only `jace.loops` imports `jace.draft`, constructed play is the same
 code with the draft step left out.

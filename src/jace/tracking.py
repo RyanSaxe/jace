@@ -28,7 +28,8 @@ or infinite: logging one raises `ValueError`. The fields are:
                        manabot_commit, inputs (a list of checkpoint objects)
     state.jsonl        state, time, and error when the state is "failed"
     metrics.jsonl      model, update, metrics (an object of name to number)
-    evaluations.jsonl  checkpoint (an object), opponent, deals, rate, low, high
+    evaluations.jsonl  checkpoint (an object), opponent, deals, rate, low, high,
+                       and details (an object) when the evaluation recorded more
     index.jsonl        model, update, sha256
     checkpoint object  run_id, model, update, sha256
 
@@ -233,6 +234,25 @@ def writing(folder: Path, *, clock: Clock) -> Generator[Running]:
         os.close(lock)
 
 
+@contextmanager
+def evaluating(folder: Path) -> Generator[Running]:
+    """Take the writer lock of a run in any state, to add evaluations to it.
+
+    A checkpoint is scored after its run has ended, and `writing` refuses a
+    completed or failed run. This block holds the same lock and leaves the
+    run's state as it found it, so the `Running` it yields is for
+    `record_evaluation` only. Raises `RunLockedError` when a live process is
+    writing the run.
+    """
+    lock = _try_lock(folder)
+    if lock is None:
+        raise RunLockedError(folder)
+    try:
+        yield Running(folder=folder, lock=lock)
+    finally:
+        os.close(lock)
+
+
 def log_update(run: Running, *, model: ModelName, update: int, metrics: Mapping[str, float]) -> None:
     record = {"model": model, "update": update, "metrics": dict(metrics)}
     _append(run.folder / "metrics.jsonl", record)
@@ -258,9 +278,25 @@ def save_checkpoint(run: Running, *, model: ModelName, update: int, module: nn.M
 
 
 def record_evaluation(
-    run: Running, *, checkpoint: CheckpointRef, opponent: str, deals: int, rate: float, low: float, high: float
+    run: Running,
+    *,
+    checkpoint: CheckpointRef,
+    opponent: str,
+    deals: int,
+    rate: float,
+    low: float,
+    high: float,
+    details: Mapping[str, object] | None = None,
 ) -> None:
-    record = {
+    """Append one evaluation of `checkpoint` against `opponent` to the run's record.
+
+    `rate`, `low` and `high` are the checkpoint's win rate and the ends of
+    its range over `deals` deals. `details` holds whatever else the
+    evaluation measured, such as the games with no result or the guess
+    model's loss, as JSON values, and the line has no `details` field when
+    it is None. Raises `ValueError` when a number is NaN or infinite.
+    """
+    record: dict[str, object] = {
         "checkpoint": asdict(checkpoint),
         "opponent": opponent,
         "deals": deals,
@@ -268,6 +304,8 @@ def record_evaluation(
         "low": low,
         "high": high,
     }
+    if details is not None:
+        record["details"] = dict(details)
     _append(run.folder / "evaluations.jsonl", record)
 
 
@@ -395,6 +433,7 @@ __all__ = (
     "RunState",
     "Running",
     "create_run",
+    "evaluating",
     "latest_checkpoint",
     "load_checkpoint",
     "log_update",

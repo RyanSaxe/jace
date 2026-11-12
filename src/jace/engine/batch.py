@@ -32,6 +32,9 @@ class Outcome(enum.Enum):
     DRAW = 2
     # The engine could not continue the game, so it has no result and its decisions are discarded.
     ABANDONED = 3
+    # The game ran past a time limit and its process was killed, so it has no result. Only code that
+    # runs games under a time limit reports it; a `GameBatch` never does.
+    HUNG = 4
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,13 +13,22 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
+from torch import Tensor
 
-from jace.cards import Rarity
+from jace.cards import CardPool, Deck, Rarity
 from jace.data import SetCards
 from jace.decks import BuildRules
 from jace.tracking import CheckpointRef, Clock, Identity, create_run
 
-__all__ = ("ADAM_BETAS", "RunArguments", "add_run_flags", "device_named", "limited_rules", "start_run")
+__all__ = (
+    "ADAM_BETAS",
+    "RunArguments",
+    "add_run_flags",
+    "device_named",
+    "limited_rules",
+    "playable_decks",
+    "start_run",
+)
 
 # Adam's decay rates for pretraining on human data, as an earlier human-trained drafter set them.
 ADAM_BETAS = (0.9, 0.98)
@@ -89,6 +98,13 @@ def start_run(
     )
     folder = create_run(arguments.run_dir, identity, clock=clock)
     return folder, folder.with_name(f"{folder.name}.curve.json")
+
+
+def playable_decks(decks: Tensor, *, pool: CardPool, count: int) -> list[Deck]:
+    # decks: uint8 [n, cards]. The first `count` decks whose every card the engine can play.
+    playable = torch.tensor([bool(pool[card].program) for card in range(len(pool))])
+    usable = decks[(decks[:, ~playable] == 0).all(dim=1)][:count]
+    return [tuple(torch.repeat_interleave(torch.arange(len(pool)), row.long()).tolist()) for row in usable]
 
 
 def limited_rules(cards: SetCards) -> BuildRules:

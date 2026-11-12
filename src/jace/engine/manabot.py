@@ -1,7 +1,7 @@
 """`GameBatch` on manabot's engine, and the engine's card catalog as plain data.
 
-This is the only module that imports manabot, so a change in manabot's API is
-a change to this file alone. Decklists are closed, which means a seat's board
+Only this module and `jace.engine.scoring` import manabot, so a change in
+manabot's API reaches those two files. Decklists are closed, which means a seat's board
 never shows the opponent's deck and the guess model has to infer it. Boards
 are encoded at policy input version 8 because versions 6 and 7 refuse boards
 that hold certain continuous effects. Version 8 adds three arrays and leaves

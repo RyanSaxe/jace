@@ -28,7 +28,7 @@ Every `.jsonl` file holds one JSON object per line.
 | `identity.json`     | `format`, `run_id`, `created`, `config`, `seed`, `jace_commit`, `manabot_commit`, `inputs` |
 | `state.jsonl`       | `state`, `time`, and `error` when the state is `failed`             |
 | `metrics.jsonl`     | `model`, `update`, `metrics`                                        |
-| `evaluations.jsonl` | `checkpoint`, `opponent`, `deals`, `rate`, `low`, `high`            |
+| `evaluations.jsonl` | `checkpoint`, `opponent`, `deals`, `rate`, `low`, `high`, and `details` when the evaluation recorded more |
 | `index.jsonl`       | `model`, `update`, `sha256`                                         |
 
 `inputs` lists the checkpoints from other runs that this run started from.
@@ -62,6 +62,28 @@ with writing(folder, clock=clock) as run:
 Everything is written inside the `with` block. Leaving it records how the
 run ended: completed, failed with the error, or interrupted on Ctrl-C. A
 second process that tries to write the same run is refused.
+
+## Scoring a run that has ended
+
+```python
+with evaluating(run_folder) as run:
+    record_evaluation(run, checkpoint=reference, opponent="heuristic", deals=50, rate=0.31, low=0.26, high=0.36)
+```
+
+A checkpoint is scored after its run has ended, and `writing` refuses a
+completed or failed run. `evaluating` takes the same lock and leaves the
+run's state alone, so evaluations can be added to a run in any state that
+no process is writing.
+
+`jace.loops.score` writes one line for each checkpoint in each pair it
+plays. `rate` is the checkpoint's win rate over `deals` paired deals. Its
+`details` hold `games`, `abandoned` and `hung`, the `seed` and
+`game_seconds` of the scoring, `games_per_second`, and `guess`: the guess
+model's `loss` and `base_rate_loss` on those games with its `stated` and
+`observed` chances, where a range with no guess is null. A line whose
+`opponent` is `population` holds the checkpoint's win rate over all the
+other players it met, and in `details` its `rating` with `rating_low` and
+`rating_high`, the `anchor` player rated 1000 and the `opponents`.
 
 ## Reading a checkpoint
 

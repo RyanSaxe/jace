@@ -115,7 +115,7 @@ On an Apple M3 Max CPU:
 | Booster rarities            | The engine has no rarity. The Avatar booster's wildcard and foil odds are placeholders |
 | Scoring the other models in self-play | `train_limited` scores only the player, against random play |
 | A constructed loop          | Not written                                                |
-| Paired evaluation           | Win rates resample single games, which overstates certainty |
+| Scoring during training     | `train_limited` still scores the player on unpaired games against random play. `jace.loops.score` scores checkpoints afterwards on paired deals |
 | GPU                         | Only the pretraining on human picks and decks runs on one. `train_limited` uses the CPU |
 
 ## Known problems

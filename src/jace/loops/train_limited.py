@@ -28,14 +28,14 @@ from pathlib import Path
 import torch
 from torch import Tensor, nn
 
-from jace.cards import CardEmbedding, CardPool, Deck, Rarity, own_parameters
+from jace.cards import CardEmbedding, Deck, Rarity, own_parameters
 from jace.data import SetCards, card_table, load_decks, read_set
 from jace.decks import DeckBuilderModel, DeckScore
 from jace.draft import TLA_PLAY_BOOSTER, DrafterModel, DraftFormat
 from jace.engine import SEATS, GameBatch
 from jace.engine.manabot import engine_card_ids, engine_cards, start_batch
 from jace.eval import WinRate, win_rate
-from jace.loops.entry_points import RunArguments, add_run_flags, limited_rules, start_run
+from jace.loops.entry_points import RunArguments, add_run_flags, limited_rules, playable_decks, start_run
 from jace.loops.limited import Learners, LimitedSetup, StartBatch, limited_iteration
 from jace.loops.schedules import phased_schedule
 from jace.play import Boards, Guesser, GuessModel, PlayerModel, Policy, as_boards, random_policy
@@ -150,13 +150,6 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
         # A model's weights mean something only with the card embedding they were trained on.
         parser.error("--drafter-run and --decks-run need --embedding-run, the run whose card embedding the models read")
     return arguments
-
-
-def _human_decks(decks: Tensor, *, pool: CardPool, count: int) -> list[Deck]:
-    # decks: uint8 [n, cards]. The first `count` decks whose every card the engine can play.
-    playable = torch.tensor([bool(pool[card].program) for card in range(len(pool))])
-    usable = decks[(decks[:, ~playable] == 0).all(dim=1)][:count]
-    return [tuple(torch.repeat_interleave(torch.arange(len(pool)), row.long()).tolist()) for row in usable]
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,7 +340,7 @@ def main(argv: Sequence[str]) -> None:
     playable = {rarity: [card for card in pool.of_rarity(rarity) if pool[card].program] for rarity in Rarity}
     draft_format = DraftFormat(seats=_SEATS_IN_A_POD, rounds=_BOOSTERS_EACH, picks_per_round=len(TLA_PLAY_BOOSTER))
     human = load_decks(data.games, pool=pool, cache_dir=arguments.data_dir, held_out_share=arguments.held_out_share)
-    scoring_decks = _human_decks(human.decks[human.held_out], pool=pool, count=arguments.evaluate_decks)
+    scoring_decks = playable_decks(human.decks[human.held_out], pool=pool, count=arguments.evaluate_decks)
 
     def start(matchups: Callable[[], tuple[Deck, Deck]]) -> GameBatch:
         # Every batch needs its own seed, so this cannot be a partial application of `start_batch`.

@@ -27,7 +27,7 @@ uvx pre-commit run --all-files     # every check
 
 Two of the ast-grep rules protect the module boundaries:
 
-- Only `jace/engine/manabot.py` imports manabot.
+- Only `jace/engine/manabot.py` and `jace/engine/scoring.py` import manabot.
 - Only `jace.loops` imports `jace.draft`.
 
 The checks are managed with [byor](https://github.com/RyanSaxe/byor). To add
