@@ -4,14 +4,28 @@ A loop asks a schedule for the dials of each iteration, so how training
 changes over time is one function a user can read and replace. A phase is a
 stretch of iterations in which that function behaves one way, such as the
 drafter's rate staying at zero until the player has had time to learn. The
-shapes here follow Ataraxos, which lowers its learning rate and its pull
-toward even odds as a power of the iteration number.
+shapes of the limited schedule follow Ataraxos, which lowers its learning
+rate and its pull toward even odds as a power of the iteration number.
+Pretraining on human data has one dial, a factor on the learning rate, and
+`warm_up_then_decay` and `scale_rates` set it.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-__all__ = ("Dials", "Schedule", "phased_schedule", "power_decay", "ramp")
+from torch.optim import Optimizer
+
+__all__ = (
+    "Dials",
+    "RateScale",
+    "Schedule",
+    "current_rates",
+    "phased_schedule",
+    "power_decay",
+    "ramp",
+    "scale_rates",
+    "warm_up_then_decay",
+)
 
 # Ataraxos's schedules (its supplement, Table S7). The learning rate is
 # RATE_SCALE / iteration ** RATE_POWER kept within [RATE_FLOOR, RATE_CAP], and the pull
@@ -29,6 +43,11 @@ _DRAFTER_ENTROPY = 0.01
 _EXPLORE_SHARE = 0.1
 # The drafter's rate ramps up over this fraction of the iterations it was frozen for.
 _DRAFTER_WARM_UP = 0.1
+
+# Pretraining on human data: the rate rises from zero over this share of the steps, then falls
+# in a straight line to this share of its peak.
+_WARM_UP_SHARE = 0.05
+_LAST_RATE_SHARE = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +72,8 @@ class Dials:
 
 # iteration, counted from 1 -> that iteration's dials.
 type Schedule = Callable[[int], Dials]
+# step, counted from 1 -> the factor each optimizer's starting learning rate is multiplied by.
+type RateScale = Callable[[int], float]
 
 
 def power_decay(iteration: int, *, scale: float, power: float, low: float, high: float) -> float:
@@ -93,3 +114,33 @@ def phased_schedule(*, drafter_starts: int, pull_ends: int) -> Schedule:
         )
 
     return schedule
+
+
+def warm_up_then_decay(steps: int) -> RateScale:
+    """Build the rate scale the pretraining entry points use for a run of `steps` steps.
+
+    The factor rises in a straight line from zero to one over the first
+    twentieth of the steps, at least one step, and then falls in a straight
+    line to a tenth at the last step. Multiply an optimizer's peak learning
+    rate by it with `scale_rates`.
+    """
+    warm = max(1, round(steps * _WARM_UP_SHARE))
+
+    def rate_scale(step: int) -> float:
+        if step <= warm:
+            return step / warm
+        return ramp(step, start=warm, end=steps, first=1.0, last=_LAST_RATE_SHARE)
+
+    return rate_scale
+
+
+def current_rates(optimizers: Sequence[Optimizer]) -> tuple[float, ...]:
+    # The learning rate of every parameter group, in the order `scale_rates` takes them back.
+    return tuple(float(group["lr"]) for optimizer in optimizers for group in optimizer.param_groups)
+
+
+def scale_rates(optimizers: Sequence[Optimizer], starting_rates: Sequence[float], *, factor: float) -> None:
+    # Sets every parameter group's learning rate to its entry of `starting_rates` times `factor`.
+    groups = [group for optimizer in optimizers for group in optimizer.param_groups]
+    for group, rate in zip(groups, starting_rates, strict=True):
+        group["lr"] = rate * factor

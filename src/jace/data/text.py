@@ -17,21 +17,20 @@ from pathlib import Path
 import polars as pl
 import torch
 from torch import Tensor
-from transformers import AutoModel, AutoTokenizer
 
-__all__ = ("TEXT_MODEL", "TextEncoder", "card_texts", "hugging_face_encoder", "text_vectors")
+from jace.data.store import SMALLEST_SPREAD
+
+__all__ = ("TEXT_MODEL", "TextEncoder", "card_texts", "text_vectors")
 
 # texts -> float [texts, width], one row per text in the order given.
 type TextEncoder = Callable[[Sequence[str]], Tensor]
 
 # A 22.7 million parameter sentence-embedding model under the Apache 2.0 licence. It gives 384
-# numbers per text and is trained to be pooled by the mean over tokens, as `hugging_face_encoder` does.
+# numbers per text and is trained to be pooled by the mean over tokens, as
+# `jace.data.hugging_face.hugging_face_encoder` does.
 TEXT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 _OWN_NAME = "this card"
-_TEXTS_PER_BATCH = 64
-# A column whose values are all equal has a spread of zero. Dividing by this instead leaves it at zero.
-_SMALLEST_SPREAD = 1e-6
 _KEY_LENGTH = 16
 
 
@@ -73,7 +72,7 @@ def text_vectors(texts: Sequence[str], *, encode: TextEncoder, model_name: str, 
     path = cache_dir / f"text_vectors_{key}.pt"
     if not path.exists():
         raw = encode(texts).detach().float().cpu()  # [texts, width]
-        spread = raw.std(dim=0, correction=0).clamp_min(_SMALLEST_SPREAD)
+        spread = raw.std(dim=0, correction=0).clamp_min(SMALLEST_SPREAD)
         path.parent.mkdir(parents=True, exist_ok=True)
         unfinished = path.with_suffix(".partial")
         torch.save((raw - raw.mean(dim=0)) / spread, unfinished)
@@ -83,33 +82,3 @@ def text_vectors(texts: Sequence[str], *, encode: TextEncoder, model_name: str, 
         message = f"{path} does not hold one tensor; delete it to rebuild"
         raise TypeError(message)
     return vectors
-
-
-def hugging_face_encoder(model_name: str, *, device: torch.device) -> TextEncoder:
-    """Return an encoder that runs the Hugging Face model `model_name` on `device`.
-
-    The model and its tokenizer are loaded, and downloaded if this machine
-    has no copy, when the encoder is first called and not before, so a run
-    that finds its vectors in the cache never loads them. A text's vector is
-    the mean of the model's last hidden state over the text's tokens. A text
-    longer than the model's limit is cut off at the limit.
-    """
-
-    def encode(texts: Sequence[str]) -> Tensor:
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        if tokenizer is None:
-            message = f"Hugging Face has no tokenizer for {model_name}"
-            raise ValueError(message)
-        model = AutoModel.from_pretrained(model_name).to(device).eval()
-        rows: list[Tensor] = []
-        with torch.no_grad():
-            for start in range(0, len(texts), _TEXTS_PER_BATCH):
-                batch = tokenizer(
-                    list(texts[start : start + _TEXTS_PER_BATCH]), padding=True, truncation=True, return_tensors="pt"
-                ).to(device)
-                hidden = model(**batch).last_hidden_state  # [b, tokens, width]
-                real = batch["attention_mask"].unsqueeze(-1).to(hidden.dtype)  # [b, tokens, 1]
-                rows.append(((hidden * real).sum(dim=1) / real.sum(dim=1)).cpu())
-        return torch.cat(rows)
-
-    return encode

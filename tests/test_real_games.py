@@ -6,12 +6,12 @@ board the models cannot read or labels shaped for another card pool. It does
 not check that anything learns.
 """
 
+import functools
 import random
 
 import torch
-from torch import nn
 
-from jace.cards import CardEmbedding, CardPool, CardRecord, Deck, Rarity
+from jace.cards import CardEmbedding, CardPool, CardRecord, Deck, Rarity, own_parameters
 from jace.engine.manabot import engine_card_ids, engine_cards, start_batch
 from jace.play import GuessModel, PlayerModel, as_boards
 from jace.train import PlayerRule, collect, update_guess, update_player
@@ -48,8 +48,7 @@ def test_real_games_train_the_player_and_the_guess_model_for_one_step() -> None:
     )
     guess = GuessModel(embedding, engine_to_card=engine_to_card, sample=sample, width=32, layers=1, heads=2)
 
-    def own(module: nn.Module) -> list[nn.Parameter]:
-        return [parameter for name, parameter in module.named_parameters() if not name.startswith("embedding.")]
+    own = functools.partial(own_parameters, embedding=embedding)
 
     before = [parameter.detach().clone() for parameter in (*own(player), *own(guess))]
     embedding_optimizer = torch.optim.Adam(embedding.parameters(), lr=1e-3)

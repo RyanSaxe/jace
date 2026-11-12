@@ -27,12 +27,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 from torch.optim import Optimizer
 
 from jace import modules
-from jace.cards import CardEmbedding, Rarity
-from jace.data import HumanDecks, SetCards, card_table, load_decks, read_set
+from jace.cards import CardEmbedding, own_parameters
+from jace.data import RESULT_FLOOR, HumanDecks, card_table, load_decks, read_set
 from jace.decks import (
     BuildRules,
     DeckBuilderModel,
@@ -43,9 +43,9 @@ from jace.decks import (
     random_proposer,
     writing_steps,
 )
-from jace.loops.pretrain import RateScale
-from jace.loops.schedules import ramp
-from jace.tracking import CheckpointRef, Identity, Running, create_run, load_checkpoint, log_update, save_checkpoint
+from jace.loops.entry_points import ADAM_BETAS, RunArguments, add_run_flags, device_named, limited_rules, start_run
+from jace.loops.schedules import RateScale, current_rates, scale_rates, warm_up_then_decay
+from jace.tracking import CheckpointRef, Running, latest_checkpoint, load_checkpoint, log_update, save_checkpoint
 from jace.tracking import writing as writing_run
 from jace.train import apply, choice_loss, score_loss
 
@@ -56,30 +56,18 @@ __all__ = (
     "ScorePoint",
     "allowed_by",
     "deck_overlap",
-    "limited_rules",
     "main",
     "pretrain_deck_builder",
     "pretrain_deck_score",
     "score_fit",
 )
 
-# A limited deck is 40 cards. 99.8% of the human Avatar decks hold 15 to 18 lands.
-_DECK_SIZE = 40
-_MIN_LANDS = 15
-_MAX_LANDS = 18
 # A deck's actual win rate is compared with its predicted one only when it played this many games.
 _GAMES_FOR_A_RATE = 5
 # Held-out decks scored in one call.
 _SCORE_CHUNK = 1024
-# A deck from an event that went badly still counts this much, as the pick weights of `jace.data` have it.
-_RESULT_FLOOR = 0.5
 # Keeps the correlation finite when every prediction is the same.
-_SMALLEST_SPREAD = 1e-12
-# The entry point's rate rises from zero over this share of the steps, then falls in a straight
-# line to this share of its peak, as in `jace.loops.pretrain`.
-_WARM_UP_SHARE = 0.05
-_LAST_RATE_SHARE = 0.1
-_ADAM_BETAS = (0.9, 0.98)
+_SMALLEST_CORRELATION_SCALE = 1e-12
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,18 +121,6 @@ class BuilderPoint:
     overlap: float
 
 
-def limited_rules(cards: SetCards) -> BuildRules:
-    is_land = cards.features[:, cards.feature_names.index("type_land")] > 0  # bool [cards]
-    basics = cards.pool.of_rarity(Rarity.BASIC)
-    return BuildRules(
-        size=_DECK_SIZE,
-        basics=basics,
-        nonbasic_lands=frozenset(is_land.nonzero().squeeze(1).tolist()) - frozenset(basics),
-        min_lands=_MIN_LANDS,
-        max_lands=_MAX_LANDS,
-    )
-
-
 def allowed_by(rules: BuildRules, decks: HumanDecks) -> Tensor:
     # Returns bool [drafts]: the human decks with exactly `rules.size` cards and a land count the rules allow.
     counts = decks.decks.long()
@@ -178,15 +154,13 @@ def pretrain_deck_score(
     games = wins + decks.losses.to(device).float()
     training = (~decks.held_out).nonzero().squeeze(1)
     held_out = decks.held_out.nonzero().squeeze(1)[: settings.evaluate_decks]
-    starting_rates = [group["lr"] for optimizer in optimizers for group in optimizer.param_groups]
+    starting_rates = current_rates(optimizers)
     curve: list[ScorePoint] = []
     loss_sum = 0.0
     for step in range(1, settings.steps + 1):
         chosen = training[torch.randint(len(training), (settings.decks_per_step,), generator=generator)].to(device)
         loss = score_loss(modules.run(model, counts[chosen]), wins=wins[chosen], games=games[chosen])
-        groups = [group for optimizer in optimizers for group in optimizer.param_groups]
-        for group, rate in zip(groups, starting_rates, strict=True):
-            group["lr"] = rate * rate_scale(step)
+        scale_rates(optimizers, starting_rates, factor=rate_scale(step))
         apply(loss, optimizers, max_grad_norm=settings.max_grad_norm)
         loss_sum += float(loss.detach())
         if step % settings.evaluate_every == 0 or step == settings.steps:
@@ -216,7 +190,7 @@ def score_fit(score: Scorer, decks: HumanDecks, *, rows: Tensor, device: torch.d
     enough = games >= _GAMES_FOR_A_RATE
     chance = predicted.sigmoid()[enough] - predicted.sigmoid()[enough].mean()
     rate = (wins / games.clamp_min(1.0))[enough] - (wins / games.clamp_min(1.0))[enough].mean()
-    spread = (chance.pow(2).sum() * rate.pow(2).sum()).sqrt().clamp_min(_SMALLEST_SPREAD)
+    spread = (chance.pow(2).sum() * rate.pow(2).sum()).sqrt().clamp_min(_SMALLEST_CORRELATION_SCALE)
     return ScoreFit(log_loss=float(log_loss), correlation=float((chance * rate).sum() / spread), decks=len(rows))
 
 
@@ -237,7 +211,8 @@ def pretrain_deck_builder(
     order and trains on every prefix of every order: given the cards written
     so far and the rest of the pool, the target is the card the order adds
     next. A deck's examples weigh the share of games its event won, kept at
-    or above a half, and the weights of a batch average one. Only decks that
+    or above `jace.data.RESULT_FLOOR` as the pick weights are, and the
+    weights of a batch average one. Only decks that
     `allowed_by(rules, decks)` accepts are used, for training and measuring.
 
     `optimizers` and `rate_scale` are as in `pretrain_deck_score`.
@@ -249,9 +224,9 @@ def pretrain_deck_builder(
     training = (allowed & ~decks.held_out).nonzero().squeeze(1)
     held_out = (allowed & decks.held_out).nonzero().squeeze(1)[: settings.evaluate_decks]
     wins = decks.wins.float()
-    result = (wins / (wins + decks.losses.float()).clamp_min(1.0)).clamp_min(_RESULT_FLOOR)  # [drafts]
+    result = (wins / (wins + decks.losses.float()).clamp_min(1.0)).clamp_min(RESULT_FLOOR)  # [drafts]
     best_guess = model_proposer(model, rules=rules, generator=torch.Generator(device=device), greedy=True)
-    starting_rates = [group["lr"] for optimizer in optimizers for group in optimizer.param_groups]
+    starting_rates = current_rates(optimizers)
     curve: list[BuilderPoint] = []
     loss_sum = 0.0
     for step in range(1, settings.steps + 1):
@@ -262,9 +237,7 @@ def pretrain_deck_builder(
         weights = result[chosen].repeat_interleave(rules.size)  # [b * size], in the order of the steps
         logits = modules.run(model, available.to(device), partial.to(device))
         loss = choice_loss(logits, added.to(device), weights=(weights / weights.mean()).to(device))
-        groups = [group for optimizer in optimizers for group in optimizer.param_groups]
-        for group, rate in zip(groups, starting_rates, strict=True):
-            group["lr"] = rate * rate_scale(step)
+        scale_rates(optimizers, starting_rates, factor=rate_scale(step))
         apply(loss, optimizers, max_grad_norm=settings.max_grad_norm)
         loss_sum += float(loss.detach())
         if step % settings.evaluate_every == 0 or step == settings.steps:
@@ -302,63 +275,44 @@ def deck_overlap(
     return float(torch.stack(shares).mean())
 
 
-def _arguments(argv: Sequence[str]) -> argparse.Namespace:
+@dataclass(frozen=True, slots=True)
+class _Arguments(RunArguments):
+    device: str
+    score_steps: int
+    builder_steps: int
+    embedding_run: Path | None
+    freeze_embedding: bool
+    score_decks_per_step: int
+    builder_decks_per_step: int
+    score_evaluate_every: int
+    builder_evaluate_every: int
+    builder_evaluate_decks: int
+    width: int
+    layers: int
+    heads: int
+    embedding_hidden: int
+    rate: float
+
+
+def _arguments(argv: Sequence[str]) -> _Arguments:
     parser = argparse.ArgumentParser(description="Train the deck score and the deck builder on human decks.")
-    parser.add_argument("--data-dir", type=Path, required=True, help="where the processed tensors are cached")
-    parser.add_argument("--run-dir", type=Path, required=True, help="the folder that holds run folders")
+    add_run_flags(parser)
     parser.add_argument("--device", default="auto", help="cpu, mps or cuda; auto takes mps when it is available")
     parser.add_argument("--score-steps", type=int, required=True, help="training steps of the deck score")
     parser.add_argument("--builder-steps", type=int, required=True, help="training steps of the deck builder")
-    parser.add_argument("--embedding-run", help="a run under --run-dir whose embedding checkpoint to start from")
-    parser.add_argument("--embedding-update", type=int, help="the update of that embedding checkpoint")
+    parser.add_argument("--embedding-run", type=Path, help="a run folder whose newest card embedding to start from")
     parser.add_argument("--freeze-embedding", action="store_true", help="train the two models and not the embedding")
-    parser.add_argument("--set", default="TLA", help="the card set, already downloaded with `spells add`")
     parser.add_argument("--score-decks-per-step", type=int, default=256)
     parser.add_argument("--builder-decks-per-step", type=int, default=32, help="each deck is 40 training examples")
     parser.add_argument("--score-evaluate-every", type=int, default=250)
     parser.add_argument("--builder-evaluate-every", type=int, default=500)
     parser.add_argument("--builder-evaluate-decks", type=int, default=300, help="held-out pools built per measurement")
-    parser.add_argument("--held-out-share", type=float, default=0.1)
     parser.add_argument("--width", type=int, default=128)
     parser.add_argument("--layers", type=int, default=3)
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--embedding-hidden", type=int, default=256)
     parser.add_argument("--rate", type=float, default=5e-4, help="the peak learning rate of every optimizer")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--jace-commit", default="unknown")
-    parser.add_argument("--manabot-commit", default="unknown")
-    return parser.parse_args(argv)
-
-
-def _embedding_input(arguments: argparse.Namespace) -> tuple[CheckpointRef, ...]:
-    # The checkpoint's digest is read from the run's `checkpoints/index.jsonl`, which `jace.tracking` lays out.
-    if arguments.embedding_run is None:
-        return ()
-    index = arguments.run_dir / arguments.embedding_run / "checkpoints" / "index.jsonl"
-    lines = [json.loads(line) for line in index.read_text().splitlines()]
-    digests = [
-        line["sha256"]
-        for line in lines
-        if line["model"] == "embedding" and line["update"] == arguments.embedding_update
-    ]
-    if not digests:
-        message = f"{index} lists no embedding checkpoint at update {arguments.embedding_update}"
-        raise FileNotFoundError(message)
-    reference = CheckpointRef(
-        run_id=arguments.embedding_run, model="embedding", update=arguments.embedding_update, sha256=digests[-1]
-    )
-    return (reference,)
-
-
-def _rate_scale(steps: int) -> RateScale:
-    warm = max(1, round(steps * _WARM_UP_SHARE))
-
-    def rate_scale(step: int) -> float:
-        if step <= warm:
-            return step / warm
-        return ramp(step, start=warm, end=max(steps, warm + 1), first=1.0, last=_LAST_RATE_SHARE)
-
-    return rate_scale
+    return _Arguments(**vars(parser.parse_args(argv)))
 
 
 def main(argv: Sequence[str]) -> None:
@@ -373,34 +327,35 @@ def main(argv: Sequence[str]) -> None:
     overlap of one random legal deck from each pool.
     """
     arguments = _arguments(argv)
-    mps = arguments.device == "auto" and torch.backends.mps.is_available()
-    device = torch.device("mps" if mps else "cpu" if arguments.device == "auto" else arguments.device)
+    device = device_named(arguments.device)
     torch.manual_seed(arguments.seed)
-    data = read_set(arguments.set)
+    data = read_set(arguments.set_code)
     # The pool is used here for card names only, so no engine programs are attached.
     cards = card_table(data.attributes, data.statistics, programs={})
     decks = load_decks(
         data.games, pool=cards.pool, cache_dir=arguments.data_dir, held_out_share=arguments.held_out_share
     )
     rules = limited_rules(cards)
-    inputs = _embedding_input(arguments)
     embedding = CardEmbedding(cards.features, hidden=arguments.embedding_hidden, offset_bound=None)
-    for reference in inputs:
-        load_checkpoint(arguments.run_dir, reference, into=embedding)
+    inputs: tuple[CheckpointRef, ...] = ()
+    if arguments.embedding_run is not None:
+        inputs = (latest_checkpoint(arguments.embedding_run, "embedding"),)
+        load_checkpoint(arguments.embedding_run.parent, inputs[0], into=embedding, keeping=None)
     shape = {"width": arguments.width, "layers": arguments.layers, "heads": arguments.heads}
     score = DeckScore(embedding, **shape).to(device)
     builder = DeckBuilderModel(embedding, **shape).to(device)
 
-    def optimizers(model: torch.nn.Module) -> list[Optimizer]:
-        own = [parameter for name, parameter in model.named_parameters() if not name.startswith("cards.embedding.")]
-        trained = [own] if arguments.freeze_embedding else [own, list(embedding.parameters())]
-        return [torch.optim.Adam(parameters, lr=arguments.rate, betas=_ADAM_BETAS) for parameters in trained]
+    def optimizers(model: nn.Module) -> list[Optimizer]:
+        own = own_parameters(model, embedding)
+        trained = [own] if arguments.freeze_embedding else [own, tuple(embedding.parameters())]
+        return [torch.optim.Adam(parameters, lr=arguments.rate, betas=ADAM_BETAS) for parameters in trained]
 
+    held_out = decks.held_out.nonzero().squeeze(1)
     score_settings = DeckSettings(
         steps=arguments.score_steps,
         decks_per_step=arguments.score_decks_per_step,
         evaluate_every=arguments.score_evaluate_every,
-        evaluate_decks=len(decks.held_out),
+        evaluate_decks=len(held_out),
         max_grad_norm=1.0,
     )
     builder_settings = DeckSettings(
@@ -411,15 +366,7 @@ def main(argv: Sequence[str]) -> None:
         max_grad_norm=1.0,
     )
     clock = functools.partial(datetime.now, UTC)
-    config = {name: str(value) if isinstance(value, Path) else value for name, value in vars(arguments).items()}
-    identity = Identity(
-        config={**config, "device": device.type},
-        seed=arguments.seed,
-        jace_commit=arguments.jace_commit,
-        manabot_commit=arguments.manabot_commit,
-        inputs=inputs,
-    )
-    folder = create_run(arguments.run_dir, identity, clock=clock)
+    folder, curve_file = start_run(arguments, device=device, inputs=inputs, clock=clock)
     generator = torch.Generator().manual_seed(arguments.seed)
     started = time.perf_counter()
     with writing_run(folder, clock=clock) as running:
@@ -427,7 +374,7 @@ def main(argv: Sequence[str]) -> None:
             score,
             decks,
             optimizers=optimizers(score),
-            rate_scale=_rate_scale(arguments.score_steps),
+            rate_scale=warm_up_then_decay(arguments.score_steps),
             settings=score_settings,
             run=running,
             generator=generator,
@@ -438,7 +385,7 @@ def main(argv: Sequence[str]) -> None:
             decks,
             rules=rules,
             optimizers=optimizers(builder),
-            rate_scale=_rate_scale(arguments.builder_steps),
+            rate_scale=warm_up_then_decay(arguments.builder_steps),
             settings=builder_settings,
             run=running,
             generator=generator,
@@ -452,7 +399,6 @@ def main(argv: Sequence[str]) -> None:
     training = ~decks.held_out
     games = decks.wins.double() + decks.losses.double()
     mean_rate = decks.wins[training].double().sum() / games[training].sum()
-    held_out = decks.held_out.nonzero().squeeze(1)
     cpu = torch.device("cpu")
     overall = score_fit(lambda counts: mean_rate.logit().expand(len(counts)), decks, rows=held_out, device=cpu)
     allowed = allowed_by(rules, decks)
@@ -482,7 +428,6 @@ def main(argv: Sequence[str]) -> None:
             "curve": [asdict(point) for point in builder_curve],
         },
     }
-    curve_file = arguments.run_dir / f"{folder.name}.curve.json"
     curve_file.write_text(json.dumps(summary, indent=2) + "\n")
     sys.stdout.write(json.dumps({**summary, "curve_file": str(curve_file)}, indent=2))
     sys.stdout.write("\n")

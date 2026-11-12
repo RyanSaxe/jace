@@ -4,7 +4,7 @@
 
 | Need             | Why                                                       |
 | ---------------- | --------------------------------------------------------- |
-| Python 3.12      | manabot supports only 3.12                                |
+| Python 3.13      | The one version `pyproject.toml` allows                   |
 | [uv](https://docs.astral.sh/uv/) | It installs jace and runs every command   |
 | A Rust toolchain | Installing builds manabot's engine from source            |
 
@@ -18,7 +18,7 @@ uv run pytest -q
 ```
 
 The first `uv sync` compiles manabot's engine, which takes a few minutes.
-The tests then run in about three seconds, and 45 should pass.
+The tests then run in a few seconds.
 
 ## Run the example
 

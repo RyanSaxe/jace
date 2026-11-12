@@ -41,8 +41,9 @@ model produces a query vector and scores each candidate by its embedding.
 A card the model has never seen still has an embedding, so it can be
 scored. This is how jace is meant to reach a new set without retraining.
 
-The starting vectors are meant to come from a card's rules text and its
-engine program. That step is not built: the tests use random vectors.
+A starting vector can be made from a card's printed text, from its engine
+program or from its 17Lands statistics. The first two exist before anyone
+has played the card. [Data](../reference/data.md) describes all three.
 
 ## A guess of the opponent's cards
 
@@ -59,8 +60,8 @@ teaches the model to say how sure it is.
 
 ## Exploring on a schedule
 
-The drafter and the deck builder are meant to start from human data, which
-puts them near how people already play. Without exploring, they stay there.
+The drafter and the deck builder start from human data, which puts them
+near how people already play. Without exploring, they stay there.
 So the amount of exploring is explicit:
 
 - The player and the drafter sample their choices.
@@ -70,5 +71,5 @@ So the amount of exploring is explicit:
 A schedule sets these values, and the learning rates, for every iteration.
 [Training](training.md#dials-on-a-schedule) shows one.
 
-Loading human data and pretraining on it are not built yet.
-[Status](../status.md) lists what is.
+[Status](../status.md) has the results of pretraining on human data and of
+the first run of the whole loop.

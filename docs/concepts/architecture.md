@@ -17,8 +17,12 @@ each module owns and how games reach the code that learns from them.
 | `jace.decks`    | The deck score and the deck builder                       |
 | `jace.train`    | Game collection, the losses and the update step           |
 | `jace.eval`     | Win rates and the check on the guess model                |
-| `jace.loops`    | Example training loops and schedules                      |
+| `jace.data`     | Human drafts and decks from 17Lands, and card starting vectors |
+| `jace.loops`    | Training loops, schedules and the command-line entry points |
 | `jace.tracking` | A training run's record on disk                           |
+
+The diagram leaves out `jace.data`. It imports only `jace.cards`, and only
+`jace.loops` imports it.
 
 ## Games go through one interface
 
@@ -52,7 +56,16 @@ Two things implement the interface:
 
 jace has no trainer class. `jace.train` holds functions: play these games,
 compute this loss, take this step. A training loop is a function you write
-by calling them, and `jace.loops` holds two examples.
+by calling them. `jace.loops` holds two: `toy`, a player on High Card, and
+`limited`, one round of draft, build, play and learn.
+
+Three modules there run from the command line:
+
+| Entry point                 | Trains                                          |
+| --------------------------- | ----------------------------------------------- |
+| `jace.loops.pretrain`       | The drafter, on human picks                     |
+| `jace.loops.pretrain_decks` | The deck score and the deck builder, on human decks |
+| `jace.loops.train_limited`  | Every model, on real games, from those checkpoints |
 
 Because only `jace.loops` imports `jace.draft`, constructed play is the same
 code with the draft step left out.

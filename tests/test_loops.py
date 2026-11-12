@@ -6,12 +6,13 @@ fit together; it says nothing about how well anything learns, which the
 tests of each piece cover.
 """
 
+import functools
 import random
 
 import torch
 from torch import Tensor, nn
 
-from jace.cards import CardEmbedding, CardPool, CardRecord, Rarity
+from jace.cards import CardEmbedding, CardPool, CardRecord, Rarity, own_parameters
 from jace.decks import BuildRules, DeckBuilderModel, DeckScore
 from jace.draft import DrafterModel, DraftFormat
 from jace.engine.toy import HAND_SIZE, TOY_CARDS, ToyBatch
@@ -46,8 +47,7 @@ def test_one_limited_iteration_updates_every_model() -> None:
         output = run(guess, torch.cat([boards["hand"], boards["seen"]], dim=-1))
         return Guess(deck=output[:, :TOY_CARDS].softmax(dim=-1), hand=output[:, TOY_CARDS:].sigmoid())
 
-    def own(module: nn.Module) -> list[nn.Parameter]:
-        return [parameter for name, parameter in module.named_parameters() if "embedding." not in name]
+    own = functools.partial(own_parameters, embedding=embedding)
 
     trained = {
         "player": player,

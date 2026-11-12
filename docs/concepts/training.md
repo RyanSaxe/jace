@@ -79,6 +79,18 @@ drafter learns from its decks' win rates.
 `apply` takes the step for every optimizer it is given. The card embedding
 has its own optimizer, passed alongside the model's.
 
+A model holds the embedding as a submodule, so `model.parameters()`
+includes the embedding's. Build the model's optimizer from
+`own_parameters`, which leaves them out. Otherwise one loss steps the
+embedding twice:
+
+```python
+optimizers = [
+    torch.optim.Adam(own_parameters(model, embedding), lr=rate),
+    torch.optim.Adam(embedding.parameters(), lr=rate),
+]
+```
+
 ## Dials on a schedule
 
 A schedule is a function from the iteration number to that iteration's

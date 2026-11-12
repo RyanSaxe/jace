@@ -16,7 +16,7 @@ from torch.nn import functional
 
 from jace.modules import run
 
-__all__ = ("CardEmbedding",)
+__all__ = ("CardEmbedding", "own_parameters")
 
 
 class CardEmbedding(nn.Module):
@@ -57,3 +57,17 @@ class CardEmbedding(nn.Module):
         # Added to a loss, it is the penalty that keeps the embedding near its start.
         change = run(self.head, self.starting)
         return change.pow(2).sum(dim=-1).mean()
+
+
+def own_parameters(model: nn.Module, embedding: CardEmbedding) -> tuple[nn.Parameter, ...]:
+    """Return the parameters of `model` that are not the shared embedding's.
+
+    A model that reads cards holds the embedding as a submodule, so
+    `model.parameters()` includes the embedding's parameters. The embedding
+    is trained by its own optimizer, and a parameter held by two optimizers
+    is stepped twice for one loss. Build a model's optimizer from this. The
+    embedding is recognised by identity, so it may sit at any depth and
+    under any attribute name.
+    """
+    shared = {id(parameter) for parameter in embedding.parameters()}
+    return tuple(parameter for parameter in model.parameters() if id(parameter) not in shared)

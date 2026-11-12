@@ -63,5 +63,18 @@ Everything is written inside the `with` block. Leaving it records how the
 run ended: completed, failed with the error, or interrupted on Ctrl-C. A
 second process that tries to write the same run is refused.
 
-`load_checkpoint` checks a file's hash against its reference before loading
-it, and refuses a file that does not match.
+## Reading a checkpoint
+
+```python
+reference = latest_checkpoint(run_folder, "drafter")
+load_checkpoint(run_folder.parent, reference, into=drafter, keeping=embedding)
+```
+
+`latest_checkpoint` returns the reference of a model's newest checkpoint in
+a run. `load_checkpoint` checks the file's hash against the reference
+before loading it, and refuses a file that does not match.
+
+A model's checkpoint also holds the card embedding the model was saved
+with. `keeping` names a module the load must leave as it was, so loading a
+model never replaces the shared embedding. Load the embedding from its own
+checkpoint, with `keeping=None`.

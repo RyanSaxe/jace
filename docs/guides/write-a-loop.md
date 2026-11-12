@@ -51,8 +51,15 @@ if dials.drafter_rate > 0:
 | Play  | Random pairs of those decks play until enough decisions are collected     |
 | Learn | The player, guess model, deck score, builder and drafter each take a step |
 
-The loop has only run on the toy game, in a test. It has not trained
-anything on Magic.
+`jace.loops.train_limited` runs this loop on real games. It builds the
+models, loads checkpoints trained on human data, calls `limited_iteration`
+once per iteration and scores the player against random play:
+
+```sh
+uv run python -m jace.loops.train_limited --help
+```
+
+[Status](../status.md) has what it has trained so far.
 
 ## What you hand it
 
@@ -67,6 +74,10 @@ anything on Magic.
 
 The player and the guess model arrive as functions, so the same loop runs
 on manabot and on the toy game.
+
+Build each model's optimizer from `own_parameters(model, embedding)`. The
+embedding then sits only in its own optimizer, and one update steps it
+once.
 
 ## Changing it
 

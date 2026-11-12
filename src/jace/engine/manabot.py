@@ -78,8 +78,10 @@ def engine_cards() -> tuple[EngineCard, ...]:
     """List every card the engine accepts in a deck, in engine definition order.
 
     The engine supplies a printed name, a set key, a Scryfall id, rules text
-    and learning tokens. It has no rarity, so the caller must join rarity
-    from Scryfall or 17Lands by `scryfall_id` before building a `CardPool`.
+    and learning tokens. It has no rarity, so the caller joins rarity from
+    another source before building a `CardPool`. `jace.data.card_table`
+    joins by printed name; `scryfall_id` is here for a caller that needs an
+    exact printing.
     Tokens, back faces and rules fixtures are left out because no deck may
     hold them.
     """

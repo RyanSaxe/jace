@@ -18,11 +18,9 @@ import torch
 from torch import Tensor
 
 from jace.cards import CardPool
+from jace.data.store import SMALLEST_SPREAD
 
 __all__ = ("NoProgramsError", "program_vectors")
-
-# A column whose values are all equal has a spread of zero. Dividing by this instead leaves it at zero.
-_SMALLEST_SPREAD = 1e-6
 
 
 class NoProgramsError(ValueError):
@@ -52,10 +50,10 @@ def program_vectors(pool: CardPool, *, width: int) -> Tensor:
     # An entry every card has gets weight zero; one that a single card has gets the most.
     rarity = (len(known) / (table > 0).sum(dim=0)).log()  # [vocabulary]
     weighted = table.log1p() * rarity
-    weighted = weighted / weighted.pow(2).sum(dim=1, keepdim=True).sqrt().clamp_min(_SMALLEST_SPREAD)
+    weighted = weighted / weighted.pow(2).sum(dim=1, keepdim=True).sqrt().clamp_min(SMALLEST_SPREAD)
     left, strengths, _ = torch.linalg.svd(weighted - weighted.mean(dim=0), full_matrices=False)
     reduced = (left * strengths)[:, :width]  # [known, columns]
-    spread = reduced.std(dim=0, correction=0).clamp_min(_SMALLEST_SPREAD)
+    spread = reduced.std(dim=0, correction=0).clamp_min(SMALLEST_SPREAD)
     vectors = torch.zeros(len(pool), reduced.shape[1] + 1)
     vectors[:, -1] = 1.0
     vectors[known] = torch.cat([reduced / spread, torch.zeros(len(known), 1)], dim=1)

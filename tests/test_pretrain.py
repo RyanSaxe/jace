@@ -12,7 +12,7 @@ from pathlib import Path
 
 import torch
 
-from jace.cards import CardEmbedding
+from jace.cards import CardEmbedding, own_parameters
 from jace.data import HumanDrafts
 from jace.draft import DrafterModel
 from jace.loops.pretrain import PretrainSettings, pick_accuracy, pretrain_drafter
@@ -63,8 +63,10 @@ def test_pretraining_on_picks_that_follow_a_rule_learns_the_rule_on_held_out_dra
     generator = torch.Generator().manual_seed(0)
     drafts = _lowest_card_drafts(64, generator=generator)
     model = _model()
-    own = [parameter for name, parameter in model.named_parameters() if not name.startswith("embedding.")]
-    optimizers = [torch.optim.Adam(own, lr=1e-2), torch.optim.Adam(model.embedding.parameters(), lr=1e-2)]
+    optimizers = [
+        torch.optim.Adam(own_parameters(model, model.embedding), lr=1e-2),
+        torch.optim.Adam(model.embedding.parameters(), lr=1e-2),
+    ]
     settings = PretrainSettings(steps=60, drafts_per_step=16, evaluate_every=20, evaluate_drafts=16, max_grad_norm=1.0)
     identity = Identity(config={}, seed=0, jace_commit="test", manabot_commit="test", inputs=())
     clock = functools.partial(datetime, 2026, 1, 1, tzinfo=UTC)

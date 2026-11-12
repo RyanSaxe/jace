@@ -26,7 +26,7 @@ from torch import Tensor
 from jace.cards import CardPool
 from jace.data.store import SPLIT_KEYS, Tensors, cached, card_columns, split_keys
 
-__all__ = ("HumanDrafts", "PoolAtSecondPickError", "load_drafts")
+__all__ = ("RESULT_FLOOR", "HumanDrafts", "PoolAtSecondPickError", "load_drafts")
 
 _CACHE_FILE = "drafts.pt"
 # Pick rows read into memory at a time. Each row holds one int8 per card for the pack.
@@ -42,8 +42,8 @@ _UNKNOWN_WIN_RATE = 0.5
 # rank and win rate count together and no player's picks are ignored.
 _SKILL_POWER = 2.0
 _SKILL_FLOOR = 0.1
-# The share of an event's matches that were won, kept at or above this.
-_RESULT_FLOOR = 0.5
+# An event's result weighs its picks and its deck by the share it won, kept at or above this.
+RESULT_FLOOR = 0.5
 # Pick x of a round weighs (ln x + 1) / x ** _POSITION_POWER: low for the first pick, highest
 # for the second, then falling, with the eighth pick about equal to the first.
 _POSITION_POWER = math.e / 5
@@ -89,7 +89,7 @@ def load_drafts(rows: pl.LazyFrame, *, pool: CardPool, cache_dir: Path, held_out
     rank_scores = torch.tensor([*_RANK_SCORES.values(), _UNKNOWN_RANK_SCORE])
     skill = win_rate.pow(_SKILL_POWER - rank_scores[saved["rank"].long()]).clamp(_SKILL_FLOOR, 1.0)
     matches = (saved["wins"] + saved["losses"]).float()
-    result = (saved["wins"] / matches.clamp_min(1.0)).clamp(_RESULT_FLOOR, 1.0)
+    result = (saved["wins"] / matches.clamp_min(1.0)).clamp(RESULT_FLOOR, 1.0)
     picks_per_round = packs.shape[2]
     pick_in_round = torch.arange(packs.shape[1]) % picks_per_round + 1
     position = (pick_in_round.log() + 1) / pick_in_round.pow(_POSITION_POWER)

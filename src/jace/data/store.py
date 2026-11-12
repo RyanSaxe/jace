@@ -1,4 +1,4 @@
-"""Helpers the draft and deck loaders share: the on-disk cache, card columns and the split.
+"""Helpers the modules of `jace.data` share: the on-disk cache, card columns, the split and one constant.
 
 The 17Lands files hold one column per card, so reading them takes seconds
 and gigabytes. Each loader therefore reads once and saves plain tensors,
@@ -18,10 +18,20 @@ from torch import Tensor
 
 from jace.cards import CardPool
 
-__all__ = ("SPLIT_KEYS", "CardColumnsError", "StaleCacheError", "cached", "card_columns", "split_keys")
+__all__ = (
+    "SMALLEST_SPREAD",
+    "SPLIT_KEYS",
+    "CardColumnsError",
+    "StaleCacheError",
+    "cached",
+    "card_columns",
+    "split_keys",
+)
 
 # A draft's split key is in [0, SPLIT_KEYS). Drafts with a key below `share * SPLIT_KEYS` are held out.
 SPLIT_KEYS = 1000
+# A column whose values are all equal has a spread of zero. Dividing by this instead leaves it at zero.
+SMALLEST_SPREAD = 1e-6
 
 type Tensors = Mapping[str, Tensor]
 

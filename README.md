@@ -4,8 +4,10 @@ jace learns to draft, build decks and play Magic: The Gathering by playing
 against itself. It plays its games on the engine from
 [manabot](https://github.com/loopflowstudio/manabot).
 
-> **Status: early.** Every part below has a first version with tests. Nothing
-> has been trained on Magic yet. [Status](docs/status.md) says what works.
+> **Status: early.** Every part below has a first version with tests. The
+> drafter and the deck models have been trained on human data, and one short
+> run of the whole loop on real games taught a player to beat random play.
+> [Status](docs/status.md) has the measurements.
 
 ## The approach
 
@@ -41,14 +43,14 @@ Three ideas hold the design together:
 
 ## Try it
 
-You need Python 3.12, [uv](https://docs.astral.sh/uv/) and a Rust toolchain,
+You need Python 3.13, [uv](https://docs.astral.sh/uv/) and a Rust toolchain,
 because installing builds manabot's engine.
 
 ```sh
 git clone https://github.com/RyanSaxe/jace.git
 cd jace
 uv sync
-uv run pytest -q                   # 45 tests, about 3 seconds
+uv run pytest -q                   # the tests
 uv run python -m jace.loops.toy    # train a player on a toy game
 ```
 
@@ -71,6 +73,7 @@ iteration 40  best card 0.78  win rate 0.74
 | [Training](docs/concepts/training.md)          | From played games to a gradient step           |
 | [Write a loop](docs/guides/write-a-loop.md)    | How to assemble and change a training loop     |
 | [Run records](docs/reference/run-records.md)   | The files a training run writes                |
+| [Data](docs/reference/data.md)                 | The human data jace reads and its source       |
 | [Status](docs/status.md)                       | What works today and what is not built         |
 | [Contributing](docs/contributing/README.md)    | Set-up, checks and the design rules            |
 

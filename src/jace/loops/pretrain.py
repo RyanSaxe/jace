@@ -23,13 +23,12 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 
 import torch
 from torch import Tensor
 from torch.optim import Optimizer
 
-from jace.cards import CardEmbedding, Rarity
+from jace.cards import CardEmbedding, Rarity, own_parameters
 from jace.data import (
     TEXT_MODEL,
     HumanDrafts,
@@ -37,46 +36,40 @@ from jace.data import (
     SetData,
     card_table,
     card_texts,
-    hugging_face_encoder,
     load_drafts,
     program_vectors,
     read_set,
     text_vectors,
 )
+from jace.data.hugging_face import hugging_face_encoder
 from jace.draft import DrafterModel
 from jace.engine.manabot import engine_cards
-from jace.loops.schedules import ramp
-from jace.tracking import Identity, Running, create_run, log_update, save_checkpoint, writing
+from jace.loops.entry_points import ADAM_BETAS, RunArguments, add_run_flags, device_named, start_run
+from jace.loops.schedules import RateScale, current_rates, scale_rates, warm_up_then_decay
+from jace.tracking import Running, log_update, save_checkpoint, writing
 from jace.train import apply, choice_loss
 
 __all__ = (
     "CurvePoint",
+    "NonFiniteScoreError",
     "PickAccuracy",
     "PickPriors",
     "PickScorer",
     "PretrainSettings",
-    "RateScale",
     "main",
     "pick_accuracy",
     "pretrain_drafter",
 )
 
 # (seen [b, t, cards] 0/1, picks int64 [b, t]) -> float [b, t, cards]: a score for every card at
-# every step, with cards outside the pack at -inf. `DrafterModel.whole_draft` is one.
+# every step, finite for a card in the pack and -inf for every other. `DrafterModel.whole_draft` is one.
 type PickScorer = Callable[[Tensor, Tensor], Tensor]
-# step, counted from 1 -> the factor each optimizer's starting learning rate is multiplied by.
-type RateScale = Callable[[int], float]
 
 _TOP = (1, 2, 3)
-# The entry point's rate rises from zero over this share of the steps, then falls in a straight
-# line to this share of its peak.
-_WARM_UP_SHARE = 0.05
-_LAST_RATE_SHARE = 0.1
 # What a starting vector can be made from, in the order the parts are joined.
 _SOURCES = ("statistics", "text", "program")
 _PROGRAM_WIDTH = 64
-# Adam's decay rates, as the earlier human-trained drafter set them.
-_ADAM_BETAS = (0.9, 0.98)
+_EVALUATE_DRAFTS = 512
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +128,11 @@ class CurvePoint:
     top3: float
 
 
+class NonFiniteScoreError(ValueError):
+    def __init__(self) -> None:
+        super().__init__("the scorer gave a card in the pack a score that is NaN or infinite, so it ranks nothing")
+
+
 def pretrain_drafter(
     model: DrafterModel,
     drafts: HumanDrafts,
@@ -159,7 +157,7 @@ def pretrain_drafter(
     packs, picks, weights = drafts.packs.to(device), drafts.picks.to(device).long(), drafts.weights.to(device)
     training = (~drafts.held_out).nonzero().squeeze(1)
     held_out = drafts.held_out.nonzero().squeeze(1)
-    starting_rates = [group["lr"] for optimizer in optimizers for group in optimizer.param_groups]
+    starting_rates = current_rates(optimizers)
     curve: list[CurvePoint] = []
     loss_sum = 0.0
     for step in range(1, settings.steps + 1):
@@ -171,9 +169,7 @@ def pretrain_drafter(
         loss = choice_loss(logits, picked, weights=pick_weights)
         if priors is not None:
             loss = loss + _prior_loss(logits, picked, weights=pick_weights, priors=priors)
-        groups = [group for optimizer in optimizers for group in optimizer.param_groups]
-        for group, rate in zip(groups, starting_rates, strict=True):
-            group["lr"] = rate * rate_scale(step)
+        scale_rates(optimizers, starting_rates, factor=rate_scale(step))
         apply(loss, optimizers, max_grad_norm=settings.max_grad_norm)
         loss_sum += float(loss.detach())
         if step % settings.evaluate_every == 0 or step == settings.steps:
@@ -205,6 +201,11 @@ def pick_accuracy(
     weight; a first pick rebuilt from the pool is not counted. A pack with
     fewer cards than the rank asked for always counts as a hit, so the last
     pick of every round does. No gradients are kept.
+
+    A card that scores the same as the human's card counts as ranked above
+    it, so a scorer that cannot tell cards apart gets no credit for them.
+    Raises `NonFiniteScoreError` when a card in a pack gets a score that is
+    NaN or infinite, which is what a model that diverged returns.
     """
     hits = torch.zeros(len(_TOP), dtype=torch.int64)
     counted = 0
@@ -213,11 +214,13 @@ def pick_accuracy(
             chosen = rows[start : start + settings.evaluate_drafts]
             picks = drafts.picks[chosen].to(device).long()
             real = drafts.weights[chosen].to(device) > 0  # [b, t]
-            scores = score(_seen(drafts.packs[chosen].to(device), cards=cards), picks)  # [b, t, cards]
-            better = (scores > scores.gather(2, picks[:, :, None])).sum(dim=-1)[
-                real
-            ]  # [m], cards ranked above the pick
-            hits += torch.stack([(better < top).sum() for top in _TOP]).cpu()
+            seen = _seen(drafts.packs[chosen].to(device), cards=cards)
+            scores = score(seen, picks)  # [b, t, cards]
+            if not bool(scores[seen > 0].isfinite().all()):
+                raise NonFiniteScoreError
+            # [m], the other cards ranked level with the pick or above it. The pick is level with itself.
+            ahead = (scores >= scores.gather(2, picks[:, :, None])).sum(dim=-1)[real] - 1
+            hits += torch.stack([(ahead < top).sum() for top in _TOP]).cpu()
             counted += int(real.sum())
     top1, top2, top3 = (hits / max(counted, 1)).tolist()
     return PickAccuracy(top1=top1, top2=top2, top3=top3, picks=counted)
@@ -238,16 +241,31 @@ def _prior_loss(logits: Tensor, picked: Tensor, *, weights: Tensor, priors: Pick
     return (weights * (priors.rare_weight * rare + priors.mana_weight * costlier.clamp_min(0.0))).mean()
 
 
-def _arguments(argv: Sequence[str]) -> argparse.Namespace:
+@dataclass(frozen=True, slots=True)
+class _Arguments(RunArguments):
+    device: str
+    steps: int
+    drafts_per_step: int
+    evaluate_every: int
+    width: int
+    layers: int
+    heads: int
+    embedding_hidden: int
+    starting_vectors: str
+    text_model: str
+    rate: float
+    rare_penalty: float
+    mana_penalty: float
+    mana_margin: float
+
+
+def _arguments(argv: Sequence[str]) -> _Arguments:
     parser = argparse.ArgumentParser(description="Train the drafter on human picks from 17Lands.")
-    parser.add_argument("--data-dir", type=Path, required=True, help="where the processed tensors are cached")
-    parser.add_argument("--run-dir", type=Path, required=True, help="the folder that holds run folders")
+    add_run_flags(parser)
     parser.add_argument("--device", default="auto", help="cpu, mps or cuda; auto takes mps when it is available")
     parser.add_argument("--steps", type=int, required=True, help="training steps")
-    parser.add_argument("--set", default="TLA", help="the card set, already downloaded with `spells add`")
     parser.add_argument("--drafts-per-step", type=int, default=128)
     parser.add_argument("--evaluate-every", type=int, default=500)
-    parser.add_argument("--held-out-share", type=float, default=0.1)
     parser.add_argument("--width", type=int, default=256)
     parser.add_argument("--layers", type=int, default=4)
     parser.add_argument("--heads", type=int, default=8)
@@ -262,13 +280,10 @@ def _arguments(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--rare-penalty", type=float, default=0.0, help="weight of the rare-drafting prior, 0 for off")
     parser.add_argument("--mana-penalty", type=float, default=0.0, help="weight of the mana-cost prior, 0 for off")
     parser.add_argument("--mana-margin", type=float, default=1.0)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--jace-commit", default="unknown")
-    parser.add_argument("--manabot-commit", default="unknown")
-    return parser.parse_args(argv)
+    return _Arguments(**vars(parser.parse_args(argv)))
 
 
-def _starting_vectors(arguments: argparse.Namespace, *, data: SetData, cards: SetCards) -> Tensor:
+def _starting_vectors(arguments: _Arguments, *, data: SetData, cards: SetCards) -> Tensor:
     # Returns float [cards, width]: the sources `--starting-vectors` names, side by side in `_SOURCES` order.
     asked = set(arguments.starting_vectors.split(","))
     if not asked or not asked <= set(_SOURCES):
@@ -287,92 +302,35 @@ def _starting_vectors(arguments: argparse.Namespace, *, data: SetData, cards: Se
     return torch.cat([sources[source] for source in _SOURCES if source in asked], dim=1)
 
 
-def main(argv: Sequence[str]) -> None:
-    """Pretrain a drafter on one card set and save its record, checkpoints and learning curve.
+def _priors(arguments: _Arguments, cards: SetCards, *, device: torch.device) -> PickPriors | None:
+    if arguments.rare_penalty <= 0 and arguments.mana_penalty <= 0:
+        return None
+    rare = torch.zeros(len(cards.pool))
+    rare[[*cards.pool.of_rarity(Rarity.RARE), *cards.pool.of_rarity(Rarity.MYTHIC)]] = 1.0
+    return PickPriors(
+        rare=rare.to(device),
+        rare_weight=arguments.rare_penalty,
+        mana_value=cards.mana_value.to(device),
+        mana_weight=arguments.mana_penalty,
+        mana_margin=arguments.mana_margin,
+    )
 
-    The run folder is created under `--run-dir` by `jace.tracking` and gets
-    a "drafter" and an "embedding" checkpoint. The curve is written beside
-    it as `<run id>.curve.json`, with the device, the wall time and two
-    baselines scored on the same held-out picks: a uniformly random pick,
-    computed exactly, and always taking the pack's card with the lowest
-    average pick position.
+
+def _baselines(
+    drafts: HumanDrafts, cards: SetCards, *, device: torch.device, settings: PretrainSettings
+) -> tuple[dict[str, float], PickAccuracy]:
+    """Score two pickers that learn nothing on the held-out picks.
+
+    The first is a uniformly random pick, computed exactly from the pack
+    sizes. The second always takes the pack's card with the lowest average
+    pick position. That position is averaged over every draft of the set,
+    the held-out ones included, so the second baseline has seen a summary
+    of the picks it is scored on.
     """
-    arguments = _arguments(argv)
-    mps = arguments.device == "auto" and torch.backends.mps.is_available()
-    device = torch.device("mps" if mps else "cpu" if arguments.device == "auto" else arguments.device)
-    torch.manual_seed(arguments.seed)
-    data = read_set(arguments.set)
-    programs = {card.name: card.program for card in engine_cards()}
-    cards = card_table(data.attributes, data.statistics, programs=programs)
-    drafts = load_drafts(
-        data.picks, pool=cards.pool, cache_dir=arguments.data_dir, held_out_share=arguments.held_out_share
-    )
-    starting = _starting_vectors(arguments, data=data, cards=cards)
-    embedding = CardEmbedding(starting, hidden=arguments.embedding_hidden, offset_bound=None)
-    model = DrafterModel(
-        embedding, width=arguments.width, layers=arguments.layers, heads=arguments.heads, picks=drafts.picks.shape[1]
-    ).to(device)
-    own = [parameter for name, parameter in model.named_parameters() if not name.startswith("embedding.")]
-    optimizers = [
-        torch.optim.Adam(own, lr=arguments.rate, betas=_ADAM_BETAS),
-        torch.optim.Adam(embedding.parameters(), lr=arguments.rate, betas=_ADAM_BETAS),
-    ]
-    settings = PretrainSettings(
-        steps=arguments.steps,
-        drafts_per_step=arguments.drafts_per_step,
-        evaluate_every=arguments.evaluate_every,
-        evaluate_drafts=512,
-        max_grad_norm=1.0,
-    )
-    steps = int(arguments.steps)
-    warm = max(1, round(steps * _WARM_UP_SHARE))
-
-    def rate_scale(step: int) -> float:
-        if step <= warm:
-            return step / warm
-        return ramp(step, start=warm, end=steps, first=1.0, last=_LAST_RATE_SHARE)
-
-    priors = None
-    if arguments.rare_penalty > 0 or arguments.mana_penalty > 0:
-        rare = torch.zeros(len(cards.pool))
-        rare[[*cards.pool.of_rarity(Rarity.RARE), *cards.pool.of_rarity(Rarity.MYTHIC)]] = 1.0
-        priors = PickPriors(
-            rare=rare.to(device),
-            rare_weight=arguments.rare_penalty,
-            mana_value=cards.mana_value.to(device),
-            mana_weight=arguments.mana_penalty,
-            mana_margin=arguments.mana_margin,
-        )
-
-    clock = functools.partial(datetime.now, UTC)
-    config = {name: str(value) if isinstance(value, Path) else value for name, value in vars(arguments).items()}
-    identity = Identity(
-        config={**config, "device": device.type},
-        seed=arguments.seed,
-        jace_commit=arguments.jace_commit,
-        manabot_commit=arguments.manabot_commit,
-        inputs=(),
-    )
-    folder = create_run(arguments.run_dir, identity, clock=clock)
-    started = time.perf_counter()
-    with writing(folder, clock=clock) as run:
-        curve = pretrain_drafter(
-            model,
-            drafts,
-            optimizers=optimizers,
-            rate_scale=rate_scale,
-            settings=settings,
-            run=run,
-            generator=torch.Generator().manual_seed(arguments.seed),
-            priors=priors,
-        )
-        seconds = time.perf_counter() - started
-        save_checkpoint(run, model="drafter", update=arguments.steps, module=model)
-        save_checkpoint(run, model="embedding", update=arguments.steps, module=embedding)
-
     held_out = drafts.held_out.nonzero().squeeze(1)
-    # A card nobody took has no average pick position and ranks last.
-    eagerness = -torch.where(cards.ata.isnan(), float("inf"), cards.ata).to(device)  # [cards]
+    # A card nobody took has no average pick position and ranks after every card that has one.
+    never_taken = float(drafts.picks.shape[1])
+    eagerness = -cards.ata.nan_to_num(nan=never_taken).to(device)  # [cards]
 
     def earliest_taken(seen: Tensor, _picks: Tensor) -> Tensor:
         outside = seen == 0
@@ -384,20 +342,77 @@ def main(argv: Sequence[str]) -> None:
     real = drafts.weights[held_out] > 0
     sizes = (drafts.packs[held_out] >= 0).sum(dim=-1)[real].float()  # [m] cards in each scored pack
     uniform = {f"top{top}": float((sizes.clamp_max(top) / sizes).mean()) for top in _TOP}
-    trained_picks = arguments.steps * arguments.drafts_per_step * (drafts.picks.shape[1] - 1)
+    return uniform, by_ata
+
+
+def main(argv: Sequence[str]) -> None:
+    """Pretrain a drafter on one card set and save its record, checkpoints and learning curve.
+
+    The run folder is created under `--run-dir` by `jace.tracking` and gets
+    a "drafter" and an "embedding" checkpoint. The curve is written beside
+    it as `<run id>.curve.json`, with the device, the wall time and two
+    baselines scored on the same held-out picks: a uniformly random pick,
+    computed exactly, and always taking the pack's card with the lowest
+    average pick position.
+    """
+    arguments = _arguments(argv)
+    device = device_named(arguments.device)
+    torch.manual_seed(arguments.seed)
+    data = read_set(arguments.set_code)
+    programs = {card.name: card.program for card in engine_cards()}
+    cards = card_table(data.attributes, data.statistics, programs=programs)
+    drafts = load_drafts(
+        data.picks, pool=cards.pool, cache_dir=arguments.data_dir, held_out_share=arguments.held_out_share
+    )
+    starting = _starting_vectors(arguments, data=data, cards=cards)
+    embedding = CardEmbedding(starting, hidden=arguments.embedding_hidden, offset_bound=None)
+    model = DrafterModel(
+        embedding, width=arguments.width, layers=arguments.layers, heads=arguments.heads, picks=drafts.picks.shape[1]
+    ).to(device)
+    optimizers = [
+        torch.optim.Adam(own_parameters(model, embedding), lr=arguments.rate, betas=ADAM_BETAS),
+        torch.optim.Adam(embedding.parameters(), lr=arguments.rate, betas=ADAM_BETAS),
+    ]
+    settings = PretrainSettings(
+        steps=arguments.steps,
+        drafts_per_step=arguments.drafts_per_step,
+        evaluate_every=arguments.evaluate_every,
+        evaluate_drafts=_EVALUATE_DRAFTS,
+        max_grad_norm=1.0,
+    )
+    clock = functools.partial(datetime.now, UTC)
+    folder, curve_file = start_run(arguments, device=device, inputs=(), clock=clock)
+    started = time.perf_counter()
+    with writing(folder, clock=clock) as run:
+        curve = pretrain_drafter(
+            model,
+            drafts,
+            optimizers=optimizers,
+            rate_scale=warm_up_then_decay(arguments.steps),
+            settings=settings,
+            run=run,
+            generator=torch.Generator().manual_seed(arguments.seed),
+            priors=_priors(arguments, cards, device=device),
+        )
+        seconds = time.perf_counter() - started
+        save_checkpoint(run, model="drafter", update=arguments.steps, module=model)
+        save_checkpoint(run, model="embedding", update=arguments.steps, module=embedding)
+
+    uniform, by_ata = _baselines(drafts, cards, device=device, settings=settings)
+    # A step trains on the picks with a weight above zero, which leaves out a first pick rebuilt from the pool.
+    picks_per_draft = float((drafts.weights[~drafts.held_out] > 0).sum(dim=1).float().mean())
     summary = {
         "run_id": folder.name,
         "device": device.type,
         "steps": arguments.steps,
         "seconds": seconds,
-        "picks_per_second": trained_picks / seconds,
+        "picks_per_second": arguments.steps * arguments.drafts_per_step * picks_per_draft / seconds,
         "training_drafts": int((~drafts.held_out).sum()),
-        "held_out_drafts": len(held_out),
+        "held_out_drafts": int(drafts.held_out.sum()),
         "held_out_picks": by_ata.picks,
         "baselines": {"uniform": uniform, "best_ata": {f"top{top}": getattr(by_ata, f"top{top}") for top in _TOP}},
         "curve": [asdict(point) for point in curve],
     }
-    curve_file = arguments.run_dir / f"{folder.name}.curve.json"
     curve_file.write_text(json.dumps(summary, indent=2) + "\n")
     sys.stdout.write(json.dumps({**summary, "curve": summary["curve"][-1:], "curve_file": str(curve_file)}, indent=2))
     sys.stdout.write("\n")

@@ -10,7 +10,7 @@ import pytest
 import torch
 from torch import Tensor
 
-from jace.cards import CardEmbedding, Pool
+from jace.cards import CardEmbedding, Pool, own_parameters
 from jace.decks import (
     BuildRules,
     DeckBuilderModel,
@@ -157,3 +157,17 @@ def test_a_pool_with_too_few_spells_for_any_legal_deck_is_rejected() -> None:
 
     with pytest.raises(NoLegalDeckError, match="at least 8 lands and can hold at most 5"):
         build_decks((3, 7), cards=CARDS, propose=propose, score=_colour_scorer, rules=TWO_BASICS, proposals=4, rounds=1)
+
+
+def test_a_deck_models_own_parameters_hold_none_of_the_shared_embeddings() -> None:
+    embedding = _embedding(CARDS)
+    shared = {id(parameter) for parameter in embedding.parameters()}
+
+    for model in (
+        DeckScore(embedding, width=16, layers=1, heads=2),
+        DeckBuilderModel(embedding, width=16, layers=1, heads=2),
+    ):
+        own = own_parameters(model, embedding)
+
+        assert not shared & {id(parameter) for parameter in own}
+        assert len(own) == len(list(model.parameters())) - len(shared)

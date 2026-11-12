@@ -7,16 +7,30 @@ scheduled; it is meant to be read, copied and changed.
 """
 
 from jace.loops.limited import Learners, LimitedSetup, StartBatch, limited_iteration
-from jace.loops.schedules import Dials, Schedule, phased_schedule, power_decay, ramp
+from jace.loops.schedules import (
+    Dials,
+    RateScale,
+    Schedule,
+    current_rates,
+    phased_schedule,
+    power_decay,
+    ramp,
+    scale_rates,
+    warm_up_then_decay,
+)
 
 __all__ = (
     "Dials",
     "Learners",
     "LimitedSetup",
+    "RateScale",
     "Schedule",
     "StartBatch",
+    "current_rates",
     "limited_iteration",
     "phased_schedule",
     "power_decay",
     "ramp",
+    "scale_rates",
+    "warm_up_then_decay",
 )

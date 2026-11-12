@@ -41,10 +41,16 @@ vector holds the card's 17Lands statistics, such as its win rate when in
 hand and the average pick it is taken at, and a few printed facts. A
 missing statistic becomes zero, and a separate column marks it as missing.
 
+17Lands aggregates the statistics over every draft and game of the set,
+held-out drafts included. A model that reads them has seen a summary of
+the held-out data, so its held-out scores are a little too high.
+
 A card from a set nobody has played has no statistics, so two other
 starting vectors use only what exists before release:
 
 ```python
+from jace.data.hugging_face import hugging_face_encoder
+
 texts = card_texts(data.attributes)
 encode = hugging_face_encoder(TEXT_MODEL, device=torch.device("cpu"))
 text = text_vectors(texts, encode=encode, model_name=TEXT_MODEL, cache_dir=folder)
@@ -56,7 +62,8 @@ toughness, rarity and rules text. It leaves the name out and writes "this
 card" where the rules text names the card. `text_vectors` embeds the texts
 with a frozen language model, by default `all-MiniLM-L6-v2` (Apache 2.0,
 384 numbers per card), and saves the result in `cache_dir`, so the model
-runs once per card list.
+runs once per card list. `hugging_face_encoder` has its own module so that
+importing `jace.data` does not load `transformers`.
 
 `program_vectors` reads the engine program stored in the pool for each
 card. It counts the program's entries and adjacent pairs of entries,

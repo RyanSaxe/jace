@@ -64,6 +64,40 @@ def test_a_draft_missing_only_its_first_pick_gets_it_back_from_the_pool_and_neve
     assert bool((drafts.weights[0, 1:] > 0).all())
 
 
+def test_a_pack_with_two_copies_of_a_card_lists_it_twice(tmp_path: Path) -> None:
+    rows = [
+        _pick_row("twin", pack_number=0, pick_number=0, pick="Ant", pack=(2, 0, 1), held=(0, 0, 0)),
+        _pick_row("twin", pack_number=0, pick_number=1, pick="Cat", pack=(1, 0, 1), held=(1, 0, 0)),
+        _pick_row("twin", pack_number=0, pick_number=2, pick="Ant", pack=(1, 0, 0), held=(1, 0, 1)),
+    ]
+
+    drafts = load_drafts(pl.LazyFrame(rows), pool=_pool(_NAMES), cache_dir=tmp_path, held_out_share=0.0)
+
+    assert drafts.packs.tolist() == [[[0, 0, 2], [0, 2, -1], [0, -1, -1]]]
+    assert drafts.picks.tolist() == [[0, 2, 0]]
+
+
+def test_a_draft_is_held_out_of_its_picks_and_of_its_deck_alike(tmp_path: Path) -> None:
+    ids = [f"draft-{number}" for number in range(12)]
+    picks = [
+        _pick_row(draft, pack_number=0, pick_number=pick, pick="Ant", pack=(2 - pick, 0, 0), held=(pick, 0, 0))
+        for draft in ids
+        for pick in range(2)
+    ]
+    games = [
+        {"draft_id": draft, "build_index": 0, "won": True}
+        | {f"deck_{name}": 1 for name in _NAMES}
+        | {f"sideboard_{name}": 0 for name in _NAMES}
+        for draft in reversed(ids)
+    ]
+
+    drafts = load_drafts(pl.LazyFrame(picks), pool=_pool(_NAMES), cache_dir=tmp_path, held_out_share=0.5)
+    decks = load_decks(pl.LazyFrame(games), pool=_pool(_NAMES), cache_dir=tmp_path, held_out_share=0.5)
+
+    assert 0 < int(drafts.held_out.sum()) < len(ids)
+    assert torch.equal(drafts.held_out, decks.held_out)
+
+
 def test_a_second_load_returns_the_cached_drafts_without_reading_the_rows(tmp_path: Path) -> None:
     first = load_drafts(_two_round_drafts(), pool=_pool(_NAMES), cache_dir=tmp_path, held_out_share=0.0)
 

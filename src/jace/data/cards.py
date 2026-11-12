@@ -1,13 +1,13 @@
 """Build the card pool and each card's starting vector from 17Lands and MTGJSON tables.
 
-The starting vectors here stand in for the planned language-model card
-encoder. Until that exists, a card is described by how humans drafted and
-played it (17Lands statistics such as win rate in hand and average pick
-position) and by a few printed facts: mana value, colours, types, rarity,
-power and toughness. Statistics come from the same drafts the drafter is
-trained on, held-out drafts included, so they describe this card set and
-say nothing about a set with no human data. MTGJSON gives basic lands the
-rarity "common", so basics are recognised by name.
+The starting vectors here describe a card by how humans drafted and played
+it (17Lands statistics such as win rate in hand and average pick position)
+and by a few printed facts: mana value, colours, types, rarity, power and
+toughness. Statistics come from the same drafts the drafter is trained on,
+held-out drafts included, so they describe this card set and say nothing
+about a set with no human data; `jace.data.text` and `jace.data.programs`
+make vectors that need no play data. MTGJSON gives basic lands the rarity
+"common", so basics are recognised by name.
 """
 
 from collections.abc import Mapping
@@ -18,6 +18,7 @@ import torch
 from torch import Tensor
 
 from jace.cards import CardPool, CardRecord, Rarity
+from jace.data.store import SMALLEST_SPREAD
 
 __all__ = ("SetCards", "card_table")
 
@@ -28,8 +29,6 @@ _TYPES = ("Creature", "Instant", "Sorcery", "Enchantment", "Artifact", "Land")
 # hand, in the opening hand and in the deck, the win rate gained by drawing it, the pick number
 # it was last seen at, the pick number it was taken at, and the share of its copies that made a deck.
 _STATISTICS = ("gih_wr", "oh_wr", "gp_wr", "iwd", "alsa", "ata", "pct_gp")
-# A column whose values are all equal has a spread of zero. Dividing by this instead leaves it at zero.
-_SMALLEST_SPREAD = 1e-6
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +63,12 @@ def card_table(
     columns this module reads. `programs` maps a printed name to the
     engine's tokens for that card. A card it lacks gets an empty program,
     which marks it as one the engine cannot play.
+
+    The statistics are whatever `statistics` holds, and `read_set` returns
+    them aggregated over every draft and game of the set, held-out drafts
+    included. A model whose starting vectors are these features, and a
+    baseline that ranks by `ata`, have therefore seen a summary of the
+    held-out picks, and their held-out scores are a little too high.
     """
     cards = attributes.join(statistics, on="name", how="left", maintain_order="left")
     records = [
@@ -92,7 +97,7 @@ def card_table(
     values = torch.from_numpy(measured.to_numpy()).float()  # [cards, measured], NaN where a card has no value
     absent = values.isnan()
     mean = values.nanmean(dim=0)
-    spread = (values - mean).pow(2).nanmean(dim=0).sqrt().clamp_min(_SMALLEST_SPREAD)
+    spread = (values - mean).pow(2).nanmean(dim=0).sqrt().clamp_min(SMALLEST_SPREAD)
     standardised = torch.where(absent, 0.0, (values - mean) / spread)
     sometimes_absent = absent.any(dim=0)
     features = torch.cat(

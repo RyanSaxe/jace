@@ -23,6 +23,7 @@ from jace.tracking import (
     RunNotResumableError,
     RunState,
     create_run,
+    latest_checkpoint,
     load_checkpoint,
     read_state,
     save_checkpoint,
@@ -110,7 +111,7 @@ def test_a_checkpoint_round_trips_and_a_tampered_file_is_rejected(tmp_path: Path
         ref = save_checkpoint(run, model="player", update=3, module=saved)
 
     loaded = nn.Linear(3, 2)
-    load_checkpoint(tmp_path, ref, into=loaded)
+    load_checkpoint(tmp_path, ref, into=loaded, keeping=None)
     assert torch.equal(loaded.weight, saved.weight)
     assert torch.equal(loaded.bias, saved.bias)
 
@@ -118,4 +119,22 @@ def test_a_checkpoint_round_trips_and_a_tampered_file_is_rejected(tmp_path: Path
     with checkpoint_file.open("ab") as file:
         file.write(b"\0")
     with pytest.raises(CheckpointMismatchError):
-        load_checkpoint(tmp_path, ref, into=nn.Linear(3, 2))
+        load_checkpoint(tmp_path, ref, into=nn.Linear(3, 2), keeping=None)
+
+
+def test_loading_a_models_newest_checkpoint_leaves_the_embedding_it_shares_as_it_was(tmp_path: Path) -> None:
+    saved_head = nn.Linear(3, 2)
+    folder = _new_run(tmp_path)
+    with writing(folder, clock=_now) as run:
+        save_checkpoint(run, model="drafter", update=1, module=nn.Sequential(nn.Linear(3, 3), nn.Linear(3, 2)))
+        save_checkpoint(run, model="drafter", update=2, module=nn.Sequential(nn.Linear(3, 3), saved_head))
+    embedding = nn.Linear(3, 3)
+    before = embedding.weight.detach().clone()
+    head = nn.Linear(3, 2)
+
+    ref = latest_checkpoint(folder, "drafter")
+    load_checkpoint(tmp_path, ref, into=nn.Sequential(embedding, head), keeping=embedding)
+
+    assert ref.update == 2
+    assert torch.equal(head.weight, saved_head.weight)
+    assert torch.equal(embedding.weight, before)

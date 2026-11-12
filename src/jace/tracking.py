@@ -34,6 +34,9 @@ or infinite: logging one raises `ValueError`. The fields are:
 
 Times are ISO 8601 in UTC. `sha256` is the hex digest of the `.pt` file. A
 `.pt` file with no line in `index.jsonl` was cut off while being saved.
+A model's checkpoint also holds the card embedding the model was saved
+with, because the model holds the embedding as a submodule. `load_checkpoint`
+never lets that copy replace the shared embedding.
 
 A run moves created -> running -> completed | failed | interrupted, and
 interrupted -> running. The last line of `state.jsonl` is the state, with
@@ -142,6 +145,11 @@ class CheckpointExistsError(FileExistsError):
 class CheckpointMismatchError(ValueError):
     def __init__(self, path: Path, *, expected: str, actual: str) -> None:
         super().__init__(f"checkpoint {path} has sha256 {actual}, but the reference says {expected}")
+
+
+class NoCheckpointError(FileNotFoundError):
+    def __init__(self, run_folder: Path, *, model: ModelName) -> None:
+        super().__init__(f"run {run_folder} lists no {model} checkpoint in checkpoints/index.jsonl")
 
 
 def create_run(root: Path, identity: Identity, *, clock: Clock) -> Path:
@@ -263,19 +271,45 @@ def record_evaluation(
     _append(run.folder / "evaluations.jsonl", record)
 
 
-def load_checkpoint(root: Path, ref: CheckpointRef, *, into: nn.Module) -> None:
-    """Load the referenced checkpoint's weights into `into`.
+def latest_checkpoint(run_folder: Path, model: ModelName) -> CheckpointRef:
+    """Return the reference of the newest checkpoint of `model` in the run at `run_folder`.
+
+    Newest means the highest update listed in `checkpoints/index.jsonl`, so
+    a file cut off while being saved is never returned. The reference's run
+    id is the folder's name, and `load_checkpoint` takes the folder's parent
+    as its `root`. Raises `NoCheckpointError` when the run lists no
+    checkpoint of `model`.
+    """
+    lines = (run_folder / "checkpoints" / "index.jsonl").read_text().splitlines()
+    records = [record for record in map(json.loads, lines) if record["model"] == model]
+    if not records:
+        raise NoCheckpointError(run_folder, model=model)
+    newest = max(records, key=lambda record: record["update"])
+    return CheckpointRef(run_id=run_folder.name, model=model, update=newest["update"], sha256=newest["sha256"])
+
+
+def load_checkpoint(root: Path, ref: CheckpointRef, *, into: nn.Module, keeping: nn.Module | None) -> None:
+    """Load the referenced checkpoint's weights into `into`, leaving `keeping` as it was.
 
     `root` is the folder that holds the run folders, and the reference names
     the run. The file is hashed first and `CheckpointMismatchError` is raised
     when the digest differs from the reference, before anything is loaded.
     A missing file raises `FileNotFoundError`.
+
+    A model's state dict includes every module the model holds, so a model
+    checkpoint carries a copy of the card embedding it was saved with. Pass
+    the shared embedding as `keeping` when loading a model: its weights are
+    put back after the load, so the embedding changes only when it is
+    loaded itself, with `keeping=None`.
     """
     path = _checkpoint_path(root / ref.run_id, model=ref.model, update=ref.update)
     actual = _sha256(path)
     if actual != ref.sha256:
         raise CheckpointMismatchError(path, expected=ref.sha256, actual=actual)
+    kept = {} if keeping is None else {name: value.clone() for name, value in keeping.state_dict().items()}
     into.load_state_dict(torch.load(path, weights_only=True))
+    if keeping is not None:
+        keeping.load_state_dict(kept)
 
 
 def _described(identity: Identity) -> dict[str, object]:
@@ -354,12 +388,14 @@ __all__ = (
     "Clock",
     "Identity",
     "ModelName",
+    "NoCheckpointError",
     "RunExistsError",
     "RunLockedError",
     "RunNotResumableError",
     "RunState",
     "Running",
     "create_run",
+    "latest_checkpoint",
     "load_checkpoint",
     "log_update",
     "read_state",
