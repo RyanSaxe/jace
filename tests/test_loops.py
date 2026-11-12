@@ -56,13 +56,12 @@ def test_one_limited_iteration_updates_every_model() -> None:
         "deck_builder": builder,
         "deck_score": score,
     }
-    optimizers = {name: torch.optim.Adam(own(module), lr=1e-2) for name, module in trained.items()}
-    optimizers["embedding"] = torch.optim.Adam(embedding.parameters(), lr=1e-2)
     before = {name: [parameter.detach().clone() for parameter in own(module)] for name, module in trained.items()}
     setup = LimitedSetup(
         pool=pool,
         draft_format=DraftFormat(seats=2, rounds=1, picks_per_round=3),
         booster=[{Rarity.COMMON: 1.0}] * 4,
+        booster_cards={Rarity.COMMON: pool.of_rarity(Rarity.COMMON)},
         rules=BuildRules(size=5, basics=(0,), nonbasic_lands=frozenset(), min_lands=2, max_lands=3),
         pods=4,
         proposals=8,
@@ -83,7 +82,14 @@ def test_one_limited_iteration_updates_every_model() -> None:
         human_drafter=None,
         builder=builder,
         score=score,
-        optimizers=optimizers,
+        optimizers={
+            "player": torch.optim.Adam(own(player), lr=1e-2),
+            "guess": torch.optim.Adam(own(guess), lr=1e-2),
+            "drafter": torch.optim.Adam(own(drafter), lr=1e-2),
+            "deck_builder": torch.optim.Adam(own(builder), lr=1e-2),
+            "deck_score": torch.optim.Adam(own(score), lr=1e-2),
+            "embedding": torch.optim.Adam(embedding.parameters(), lr=1e-2),
+        },
     )
 
     metrics = limited_iteration(

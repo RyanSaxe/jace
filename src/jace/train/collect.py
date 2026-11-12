@@ -85,6 +85,8 @@ class Collected:
     # rollout: the decisions of the games that finished. games: one entry per finished game.
     rollout: Rollout
     games: tuple[GameResult, ...]
+    # abandoned: how many games the engine could not finish; their decisions are in neither rollout.
+    abandoned: int
     # pending: pass it to the next `collect` call on the same batch.
     pending: Pending
 
@@ -293,4 +295,4 @@ def collect(
         game_ids=game_ids,
         next_game=next_game,
     )
-    return Collected(rollout=rollout, games=tuple(finished), pending=carried)
+    return Collected(rollout=rollout, games=tuple(finished), abandoned=len(abandoned), pending=carried)

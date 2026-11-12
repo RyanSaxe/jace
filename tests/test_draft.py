@@ -73,10 +73,11 @@ def test_a_seats_view_holds_each_pack_as_it_reached_the_seat() -> None:
 
 def test_every_slot_of_a_booster_holds_a_distinct_card_of_a_rarity_its_odds_allow() -> None:
     pool = _pool({Rarity.BASIC: 5, Rarity.COMMON: 10, Rarity.UNCOMMON: 5, Rarity.RARE: 3, Rarity.MYTHIC: 3})
+    by_rarity = {rarity: pool.of_rarity(rarity) for rarity in Rarity}
     rng = random.Random(0)
 
     for _ in range(200):
-        booster = open_booster(TLA_PLAY_BOOSTER, pool, rng=rng)
+        booster = open_booster(TLA_PLAY_BOOSTER, by_rarity, rng=rng)
 
         assert len(set(booster)) == len(TLA_PLAY_BOOSTER)
         for card, odds in zip(booster, TLA_PLAY_BOOSTER, strict=True):
@@ -84,10 +85,10 @@ def test_every_slot_of_a_booster_holds_a_distinct_card_of_a_rarity_its_odds_allo
 
 
 def test_a_spec_with_a_slot_for_a_rarity_the_pool_lacks_is_rejected() -> None:
-    pool = _pool({Rarity.COMMON: 4})
+    by_rarity = {Rarity.COMMON: _pool({Rarity.COMMON: 4}).of_rarity(Rarity.COMMON)}
 
-    with pytest.raises(BoosterSpecError, match="1 slots can draw a rare card, but the pool holds 0"):
-        open_booster([{Rarity.COMMON: 0.9, Rarity.RARE: 0.1}], pool, rng=random.Random(0))
+    with pytest.raises(BoosterSpecError, match="1 slots can draw a rare card, but there are 0"):
+        open_booster([{Rarity.COMMON: 0.9, Rarity.RARE: 0.1}], by_rarity, rng=random.Random(0))
 
 
 def test_a_model_drafter_finishes_a_draft_over_a_larger_card_pool_than_the_model_was_built_with() -> None:

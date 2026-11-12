@@ -13,7 +13,7 @@ import math
 import random
 from collections.abc import Mapping, Sequence
 
-from jace.cards import CardId, CardPool, Rarity
+from jace.cards import CardId, Rarity
 from jace.draft.pod import Pack
 
 __all__ = ("TLA_PLAY_BOOSTER", "BoosterSpec", "BoosterSpecError", "SlotOdds", "open_booster")
@@ -69,21 +69,22 @@ class BoosterSpecError(ValueError):
     """
 
 
-def open_booster(spec: BoosterSpec, pool: CardPool, *, rng: random.Random) -> Pack:
+def open_booster(spec: BoosterSpec, cards: Mapping[Rarity, Sequence[CardId]], *, rng: random.Random) -> Pack:
     """Draw one card for each slot of `spec`, in slot order.
 
-    No card appears twice in the booster. Raises `BoosterSpecError` when a
-    slot's odds do not sum to 1, or when the pool holds fewer cards of a
-    rarity than the number of slots that can draw that rarity. A pool with no
-    cards of a slot's rarity is the plainest case of the second.
+    `cards` lists the cards a booster may hold, by rarity. It can leave out
+    cards of the pool, such as ones the game engine cannot play. No card
+    appears twice in the booster. Raises `BoosterSpecError` when a slot's
+    odds do not sum to 1, or when `cards` holds fewer cards of a rarity
+    than the number of slots that can draw that rarity.
     """
-    available = {rarity: list(pool.of_rarity(rarity)) for rarity in Rarity}
+    available = {rarity: list(cards.get(rarity, ())) for rarity in Rarity}
     _check_spec(spec, available)
     booster: list[CardId] = []
     for odds in spec:
         (rarity,) = rng.choices(tuple(odds), weights=tuple(odds.values()))
-        cards = available[rarity]
-        booster.append(cards.pop(rng.randrange(len(cards))))
+        left = available[rarity]
+        booster.append(left.pop(rng.randrange(len(left))))
     return tuple(booster)
 
 
@@ -95,5 +96,5 @@ def _check_spec(spec: BoosterSpec, available: Mapping[Rarity, Sequence[CardId]])
     for rarity, cards in available.items():
         slots = sum(1 for odds in spec if odds.get(rarity, 0.0) > 0.0)
         if slots > len(cards):
-            message = f"{slots} slots can draw a {rarity.value} card, but the pool holds {len(cards)}"
+            message = f"{slots} slots can draw a {rarity.value} card, but there are {len(cards)}"
             raise BoosterSpecError(message)

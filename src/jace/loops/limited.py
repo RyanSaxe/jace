@@ -16,7 +16,7 @@ import torch
 from torch import Tensor
 from torch.optim import Optimizer
 
-from jace.cards import CardPool, Deck
+from jace.cards import CardId, CardPool, Deck, Rarity
 from jace.decks import (
     BuildRules,
     Candidate,
@@ -42,6 +42,7 @@ from jace.engine import SEATS, GameBatch
 from jace.loops.schedules import Dials
 from jace.modules import run
 from jace.play import Guesser, Policy
+from jace.tracking import ModelName
 from jace.train import (
     GameResult,
     Metrics,
@@ -70,7 +71,8 @@ type StartBatch = Callable[[Callable[[], tuple[Deck, Deck]]], GameBatch]
 class LimitedSetup:
     """Everything about a run that stays fixed from one iteration to the next.
 
-    `pods` drafts are run per iteration, and each pool gets `proposals`
+    `booster_cards` lists the cards a booster may hold, by rarity. `pods`
+    drafts are run per iteration, and each pool gets `proposals`
     candidate decks improved for `search_rounds` rounds. Games are played
     until finished games hold `decisions` learner decisions. `history` is
     how many earlier guesses the guess model is shown. `player_rule` is the
@@ -82,6 +84,7 @@ class LimitedSetup:
     pool: CardPool
     draft_format: DraftFormat
     booster: BoosterSpec
+    booster_cards: Mapping[Rarity, Sequence[CardId]]
     rules: BuildRules
     pods: int
     proposals: int
@@ -115,7 +118,7 @@ class Learners:
     human_drafter: DrafterModel | None
     builder: DeckBuilderModel
     score: DeckScore
-    optimizers: Mapping[str, Optimizer]
+    optimizers: Mapping[ModelName, Optimizer]
 
 
 def _set_rate(optimizer: Optimizer, rate: float) -> None:
@@ -131,7 +134,7 @@ def _draft(
     drafters = [*([drafter] * (seats - len(other_seats))), *other_seats]
     boosters = [
         [
-            [open_booster(setup.booster, setup.pool, rng=rng) for _ in range(seats)]
+            [open_booster(setup.booster, setup.booster_cards, rng=rng) for _ in range(seats)]
             for _ in range(setup.draft_format.rounds)
         ]
         for _ in range(setup.pods)
@@ -338,7 +341,7 @@ def limited_iteration(
     )
     wins, played = _deck_records(decks, collected.games)
 
-    metrics: dict[str, float] = {"games": float(len(collected.games))}
+    metrics: dict[str, float] = {"games": float(len(collected.games)), "abandoned": float(collected.abandoned)}
     metrics |= _update_play_models(setup, learners, rollout=collected.rollout, dials=dials)
     metrics |= _update_deck_score(setup, learners, decks=decks, wins=wins, played=played)
     metrics |= _update_builder(setup, learners, records=records, best_decks=best_decks, generator=generator)
