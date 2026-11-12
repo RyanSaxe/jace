@@ -38,9 +38,35 @@ decks = load_decks(data.games, pool=cards.pool, cache_dir=folder, held_out_share
 
 `cards` holds the `CardPool` and a starting vector for each card. The
 vector holds the card's 17Lands statistics, such as its win rate when in
-hand and the average pick it is taken at, and a few printed facts. It
-stands in for a planned encoder that reads rules text. A missing statistic
-becomes zero, and a separate column marks it as missing.
+hand and the average pick it is taken at, and a few printed facts. A
+missing statistic becomes zero, and a separate column marks it as missing.
+
+A card from a set nobody has played has no statistics, so two other
+starting vectors use only what exists before release:
+
+```python
+texts = card_texts(data.attributes)
+encode = hugging_face_encoder(TEXT_MODEL, device=torch.device("cpu"))
+text = text_vectors(texts, encode=encode, model_name=TEXT_MODEL, cache_dir=folder)
+program = program_vectors(cards.pool, width=64)
+```
+
+`card_texts` writes each card as its mana cost, type line, power and
+toughness, rarity and rules text. It leaves the name out and writes "this
+card" where the rules text names the card. `text_vectors` embeds the texts
+with a frozen language model, by default `all-MiniLM-L6-v2` (Apache 2.0,
+384 numbers per card), and saves the result in `cache_dir`, so the model
+runs once per card list.
+
+`program_vectors` reads the engine program stored in the pool for each
+card. It counts the program's entries and adjacent pairs of entries,
+weights the ones few cards share, and keeps the 64 directions along which
+cards differ most. A last column marks a card the engine has no program
+for. Both functions standardise over the cards they are given, so vectors
+made for different card lists are not comparable.
+
+`python -m jace.loops.pretrain --starting-vectors text,program` trains on
+any combination of `statistics`, `text` and `program`.
 
 `drafts` holds every pack, every pick and a weight for each pick. `decks`
 holds one deck per draft, its pool, and the event's wins and losses.

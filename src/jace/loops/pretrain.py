@@ -10,7 +10,9 @@ drafter, against taking rares and against costly cards, are hand-added
 priors: they are off unless `PickPriors` is passed.
 
 Run it with `uv run python -m jace.loops.pretrain --help`. The card set
-must already be downloaded with `uv run spells add <set>`.
+must already be downloaded with `uv run spells add <set>`. When
+`--starting-vectors` names `text`, the first run downloads the text model
+from Hugging Face.
 """
 
 import argparse
@@ -28,8 +30,21 @@ from torch import Tensor
 from torch.optim import Optimizer
 
 from jace.cards import CardEmbedding, Rarity
-from jace.data import HumanDrafts, card_table, load_drafts, read_set
+from jace.data import (
+    TEXT_MODEL,
+    HumanDrafts,
+    SetCards,
+    SetData,
+    card_table,
+    card_texts,
+    hugging_face_encoder,
+    load_drafts,
+    program_vectors,
+    read_set,
+    text_vectors,
+)
 from jace.draft import DrafterModel
+from jace.engine.manabot import engine_cards
 from jace.loops.schedules import ramp
 from jace.tracking import Identity, Running, create_run, log_update, save_checkpoint, writing
 from jace.train import apply, choice_loss
@@ -57,6 +72,9 @@ _TOP = (1, 2, 3)
 # line to this share of its peak.
 _WARM_UP_SHARE = 0.05
 _LAST_RATE_SHARE = 0.1
+# What a starting vector can be made from, in the order the parts are joined.
+_SOURCES = ("statistics", "text", "program")
+_PROGRAM_WIDTH = 64
 # Adam's decay rates, as the earlier human-trained drafter set them.
 _ADAM_BETAS = (0.9, 0.98)
 
@@ -234,6 +252,12 @@ def _arguments(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--layers", type=int, default=4)
     parser.add_argument("--heads", type=int, default=8)
     parser.add_argument("--embedding-hidden", type=int, default=256)
+    parser.add_argument(
+        "--starting-vectors",
+        default="statistics",
+        help="what a card's starting vector is made from: a comma-separated list of statistics, text and program",
+    )
+    parser.add_argument("--text-model", default=TEXT_MODEL, help="the Hugging Face model that embeds card text")
     parser.add_argument("--rate", type=float, default=5e-4, help="the peak learning rate of both optimizers")
     parser.add_argument("--rare-penalty", type=float, default=0.0, help="weight of the rare-drafting prior, 0 for off")
     parser.add_argument("--mana-penalty", type=float, default=0.0, help="weight of the mana-cost prior, 0 for off")
@@ -242,6 +266,25 @@ def _arguments(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--jace-commit", default="unknown")
     parser.add_argument("--manabot-commit", default="unknown")
     return parser.parse_args(argv)
+
+
+def _starting_vectors(arguments: argparse.Namespace, *, data: SetData, cards: SetCards) -> Tensor:
+    # Returns float [cards, width]: the sources `--starting-vectors` names, side by side in `_SOURCES` order.
+    asked = set(arguments.starting_vectors.split(","))
+    if not asked or not asked <= set(_SOURCES):
+        message = f"--starting-vectors takes a comma-separated list of {', '.join(_SOURCES)}"
+        raise ValueError(message)
+    sources = {"statistics": cards.features}
+    if "text" in asked:
+        sources["text"] = text_vectors(
+            card_texts(data.attributes),
+            encode=hugging_face_encoder(arguments.text_model, device=torch.device("cpu")),
+            model_name=arguments.text_model,
+            cache_dir=arguments.data_dir,
+        )
+    if "program" in asked:
+        sources["program"] = program_vectors(cards.pool, width=_PROGRAM_WIDTH)
+    return torch.cat([sources[source] for source in _SOURCES if source in asked], dim=1)
 
 
 def main(argv: Sequence[str]) -> None:
@@ -259,12 +302,13 @@ def main(argv: Sequence[str]) -> None:
     device = torch.device("mps" if mps else "cpu" if arguments.device == "auto" else arguments.device)
     torch.manual_seed(arguments.seed)
     data = read_set(arguments.set)
-    # The pool is used here for card names only, so no engine programs are attached.
-    cards = card_table(data.attributes, data.statistics, programs={})
+    programs = {card.name: card.program for card in engine_cards()}
+    cards = card_table(data.attributes, data.statistics, programs=programs)
     drafts = load_drafts(
         data.picks, pool=cards.pool, cache_dir=arguments.data_dir, held_out_share=arguments.held_out_share
     )
-    embedding = CardEmbedding(cards.features, hidden=arguments.embedding_hidden, offset_bound=None)
+    starting = _starting_vectors(arguments, data=data, cards=cards)
+    embedding = CardEmbedding(starting, hidden=arguments.embedding_hidden, offset_bound=None)
     model = DrafterModel(
         embedding, width=arguments.width, layers=arguments.layers, heads=arguments.heads, picks=drafts.picks.shape[1]
     ).to(device)
