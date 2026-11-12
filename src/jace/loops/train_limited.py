@@ -72,6 +72,7 @@ class _Arguments(RunArguments):
     decks_run: Path | None
     embedding_run: Path | None
     checkpoint_every: int
+    resume: Path | None
     games: int
     decisions: int
     pods: int
@@ -115,6 +116,7 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument(
         "--checkpoint-every", type=int, default=0, help="also save every checkpoint each N iterations; 0 for never"
     )
+    parser.add_argument("--resume", type=Path, help="a stopped run folder of this command to continue from")
     parser.add_argument("--games", type=int, default=64, help="games played at once")
     parser.add_argument("--decisions", type=int, default=4096, help="learner decisions collected per iteration")
     parser.add_argument("--pods", type=int, default=2, help="eight-seat drafts per iteration")
@@ -223,6 +225,22 @@ def _load_inputs(arguments: _Arguments, models: _Models) -> tuple[CheckpointRef,
     return tuple(inputs)
 
 
+def _resume(run_folder: Path, models: _Models) -> int:
+    # Loads the newest checkpoint of every module of the stopped run at `run_folder` and returns
+    # the iteration they were saved after. Optimizer state is not checkpointed, so it starts fresh.
+    modules = _by_name(models)
+    updates: set[int] = set()
+    for model in ("embedding", *(name for name in modules if name != "embedding")):
+        ref = latest_checkpoint(run_folder, model)
+        keeping = None if model == "embedding" else models.embedding
+        load_checkpoint(run_folder.parent, ref, into=modules[model], keeping=keeping)
+        updates.add(ref.update)
+    if len(updates) != 1:
+        message = f"the newest checkpoints in {run_folder} are from different iterations: {sorted(updates)}"
+        raise ValueError(message)
+    return updates.pop()
+
+
 def _score_against(
     opponent: Policy,
     *,
@@ -272,6 +290,7 @@ def _train(
     score_against_random: Callable[[], WinRate],
     modules: Mapping[ModelName, nn.Module],
     curve_file: Path,
+    done: int,
 ) -> None:
     """Run every iteration, scoring the player and saving checkpoints on the way.
 
@@ -279,25 +298,29 @@ def _train(
     `evaluate_every`-th. Every module of `modules` is checkpointed after
     every `checkpoint_every`-th iteration, when that is above zero, and
     after the last. The curve file is rewritten after each iteration, so a
-    run that is stopped still has its curve.
+    run that is stopped still has its curve. `done` is how many iterations
+    a resumed run has already finished and checkpointed; a new run passes
+    zero. A resumed run keeps the curve up to `done` and goes on from there.
     """
     every = arguments.checkpoint_every
     checkpoint_at = {arguments.iterations, *(range(every, arguments.iterations, every) if every > 0 else ())}
-    iterations: list[dict[str, float]] = []
-    evaluations: list[dict[str, float]] = []
+    earlier = json.loads(curve_file.read_text()) if done > 0 else {"iterations": [], "evaluations": []}
+    iterations: list[dict[str, float]] = [point for point in earlier["iterations"] if point["iteration"] <= done]
+    evaluations: list[dict[str, float]] = [point for point in earlier["evaluations"] if point["iteration"] <= done]
     started = time.perf_counter()
-    for iteration in range(arguments.iterations + 1):
-        if iteration > 0:
+    for iteration in range(done, arguments.iterations + 1):
+        if iteration > done:
             began = time.perf_counter()
             metrics = {**iterate(iteration), "seconds": time.perf_counter() - began}
             log_update(run, model="player", update=iteration, metrics=metrics)
             iterations.append({"iteration": iteration, **metrics})
-        if iteration % arguments.evaluate_every == 0:
+        # A resumed run scored its last finished iteration before it stopped.
+        if iteration % arguments.evaluate_every == 0 and (iteration > done or done == 0):
             rate = score_against_random()
             evaluations.append({"iteration": iteration, "rate": rate.rate, "low": rate.low, "high": rate.high})
             sys.stdout.write(f"iteration {iteration:4d}  win rate against random {rate.rate:.3f}\n")
             sys.stdout.flush()
-        if iteration in checkpoint_at:
+        if iteration in checkpoint_at and iteration > done:
             for name, module in modules.items():
                 save_checkpoint(run, model=name, update=iteration, module=module)
         summary = {"run_id": run.folder.name, "seconds": time.perf_counter() - started}
@@ -337,6 +360,9 @@ def main(argv: Sequence[str]) -> None:
     picks = draft_format.rounds * draft_format.picks_per_round
     models = _build_models(arguments, cards, sample=sample, engine_to_card=engine_to_card, picks=picks)
     inputs = _load_inputs(arguments, models)
+    done = 0 if arguments.resume is None else _resume(arguments.resume, models)
+    # A resumed run must not replay the games it already played.
+    rng.seed(arguments.seed + done)
     human_drafter = None
     if arguments.drafter_run is not None:
         human_drafter = copy.deepcopy(models.drafter).eval().requires_grad_(requires_grad=False)
@@ -406,7 +432,10 @@ def main(argv: Sequence[str]) -> None:
         rng=rng,
     )
     clock = functools.partial(datetime.now, UTC)
-    folder, curve_file = start_run(arguments, device=cpu, inputs=inputs, clock=clock)
+    if arguments.resume is None:
+        folder, curve_file = start_run(arguments, device=cpu, inputs=inputs, clock=clock)
+    else:
+        folder, curve_file = arguments.resume, arguments.resume.with_name(f"{arguments.resume.name}.curve.json")
     with writing(folder, clock=clock) as run:
         _train(
             run,
@@ -415,6 +444,7 @@ def main(argv: Sequence[str]) -> None:
             score_against_random=score_against_random,
             modules=modules,
             curve_file=curve_file,
+            done=done,
         )
 
 

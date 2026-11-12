@@ -80,6 +80,10 @@ ban-relative-imports = "all"
     # This check runs git with fixed arguments, never with outside input.
     "S603",
 ]
+"src/jace/loops/keep_running.py" = [
+    # It starts this package's own training command with the flags its caller typed.
+    "S603",
+]
 "tests/**/*.py" = [
     # Pytest's assertion introspection is the test framework contract.
     "S101",
