@@ -12,5 +12,6 @@ trying to do, and the other pages build on it.
 | [Training](concepts/training.md)           | From played games to a gradient step         |
 | [Write a loop](guides/write-a-loop.md)     | How to assemble and change a training loop   |
 | [Run records](reference/run-records.md)    | The files a training run writes              |
+| [Data](reference/data.md)                  | The human data jace reads and its source     |
 | [Status](status.md)                        | What works today and what is not built       |
 | [Contributing](contributing/README.md)     | Set-up, checks and the design rules          |

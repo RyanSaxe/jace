@@ -6,7 +6,10 @@ embedding. It has no parameter whose size depends on the number of cards, so
 the same weights score a larger card pool once `embedding` is replaced by one
 that covers it. The embedding is trained by its own optimizer, and
 `parameters()` includes it because it is a submodule, so the caller must
-leave `embedding.parameters()` out of the drafter's optimizer.
+leave `embedding.parameters()` out of the drafter's optimizer. An earlier
+pick's token attends only to the picks before it, which is what lets
+`whole_draft` score every pick of a recorded draft in one pass and get the
+same logits `forward` gives pick by pick.
 """
 
 import math
@@ -69,10 +72,42 @@ class DrafterModel(nn.Module):
         )  # [b, width]
         tokens = torch.cat([earlier, current.unsqueeze(1)], dim=1)  # [b, t + 1, width]
         ignored = torch.cat([padding, padding.new_zeros(len(padding), 1)], dim=1)  # [b, t + 1]
-        query = self.encoder.forward(tokens, src_key_padding_mask=ignored)[:, -1]  # [b, width]
+        order = torch.arange(steps + 1, device=seen.device)
+        later = order[:, None] < order[None, :]  # [t + 1, t + 1], True where a token may not look
+        query = self.encoder.forward(tokens, mask=later, src_key_padding_mask=ignored)[:, -1]  # [b, width]
         candidates = run(self.candidate, cards)  # [cards, width]
         scores = query @ candidates.T / math.sqrt(candidates.shape[1])  # [b, cards]
         return scores.masked_fill(pack == 0, float("-inf"))
+
+    def whole_draft(self, seen: Tensor, picks: Tensor) -> Tensor:
+        """Score every pick of whole drafts in one pass, for training on recorded drafts.
+
+        `seen` is `[b, t, cards]` 0/1 and `picks` is int64 `[b, t]`, as in
+        `forward`, but holding every step of the draft. Returns `[b, t, cards]`
+        whose row `i` equals `forward(seen[:, :i], picks[:, :i], pack=seen[:, i])`.
+        Each step appears twice in the sequence: once with its pick, read by
+        later steps, and once without, as the query that scores its pack.
+        A padded step, a row of zeros in `seen`, gets -inf for every card.
+        """
+        steps = seen.shape[1]
+        if steps > self.positions.num_embeddings:
+            message = f"{steps} picks do not fit a model built for {self.positions.num_embeddings} picks"
+            raise ValueError(message)
+        cards = run(self.embedding, torch.arange(seen.shape[2], device=seen.device))  # [cards, card_width]
+        order = torch.arange(steps, device=seen.device)
+        packs = run(self.pack_mean, _mean_card(seen, cards)) + run(self.positions, order)  # [b, t, width]
+        tokens = torch.cat([run(self.picked_card, cards[picks]) + packs, self.current + packs], dim=1)
+        later = order[:, None] < order[None, :]  # [t, t]
+        other = order[:, None] != order[None, :]  # [t, t]
+        # Rows are the token that looks. A picked token sees picked tokens up to its own. A query
+        # sees the picked tokens before its step and, of the queries, only itself.
+        hidden = torch.cat(
+            [torch.cat([later, torch.ones_like(later)], dim=1), torch.cat([later | ~other, other], dim=1)]
+        )  # [2t, 2t], True where a token may not look
+        queries = self.encoder.forward(tokens, mask=hidden)[:, steps:]  # [b, t, width]
+        candidates = run(self.candidate, cards)  # [cards, width]
+        scores = queries @ candidates.T / math.sqrt(candidates.shape[1])  # [b, t, cards]
+        return scores.masked_fill(seen == 0, float("-inf"))
 
 
 def _mean_card(packs: Tensor, cards: Tensor) -> Tensor:
