@@ -7,12 +7,22 @@ are encoded at policy input version 8 because versions 6 and 7 refuse boards
 that hold certain continuous effects. Version 8 adds three arrays and leaves
 unchanged every array `jace.play.tokens` reads. The engine has no card rarity,
 so `engine_cards` cannot build a `CardPool` without data from another source.
+
+Games run in manabot's `VectorEnv`, which steps every slot in one native call
+and writes the boards into arrays this module owns. It reports hidden hands
+but not libraries, so `hidden_cards` works a library out as the deck minus the
+hand and minus the cards the acting seat's board shows in other zones. Two
+cases make a library wrong by one card. The board hides a card the other seat
+foretold, so that card still counts as in its library. The board files a
+permanent under its controller, and when both decks hold that card the owner
+cannot be told from the controller.
 """
 
 import collections
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -34,6 +44,13 @@ __all__ = (
 )
 
 POLICY_INPUT_VERSION = 8
+
+# Columns of a row of the `agent_cards` and `opponent_cards` boards. The first seven are one flag per zone.
+_LIBRARY_COLUMN = int(managym.ZoneEnum.LIBRARY)
+_HAND_COLUMN = int(managym.ZoneEnum.HAND)
+_TOKEN_COLUMN = 29
+# The step results the engine writes beside the boards, which no player reads.
+_STEP_RESULTS = ("rewards", "terminated", "truncated")
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,10 +137,6 @@ def _rules_texts() -> dict[str, str]:
 
 
 class _ManabotBatch:
-    # Temporary: one scalar `Env` per slot, stepped in a Python loop, because only the scalar `Env`
-    # can report both seats' hands. manabot's author is adding hidden hands to the batched env. When
-    # that lands, switch this class to `VectorEnv` with `set_buffers` and `step_into_buffers`.
-
     def __init__(
         self,
         matchups: Callable[[], tuple[Deck, Deck]],
@@ -135,95 +148,120 @@ class _ManabotBatch:
     ) -> None:
         self._matchups: Callable[[], tuple[Deck, Deck]] = matchups
         self._names: tuple[str, ...] = names
+        self._cards_by_name: dict[str, int] = {name: card for card, name in enumerate(names)}
         # card_ids: int64 [engine definition ids], the `CardId` of each engine definition or -1.
         self._card_ids: npt.NDArray[np.int64] = card_ids
-        self._seed: int = seed
-        self._envs: list[managym.Env] = []
-        self._decks: list[tuple[Deck, Deck]] = []
-        self._games_started: list[int] = [0] * games
-        self._seats: npt.NDArray[np.int64] = np.zeros(games, dtype=np.int64)
-        self._action_counts: npt.NDArray[np.int64] = np.zeros(games, dtype=np.int64)
+        self._decks: list[tuple[Deck, Deck]] = [matchups() for _ in range(games)]
         # deck_counts: int64 [n, 2, cards], copies of each card in each seat's deck.
         self._deck_counts: npt.NDArray[np.int64] = np.zeros((games, SEATS, len(names)), dtype=np.int64)
-        self._boards: dict[str, npt.NDArray[np.generic]] = {}
-        for slot in range(games):
-            decks = matchups()
-            env, observation = self._deal(slot, decks=decks)
-            self._envs.append(env)
-            self._decks.append(decks)
-            if not self._boards:
-                first = env.encode_observation(observation, POLICY_INPUT_VERSION)
-                self._boards = {
-                    name: np.zeros((games, *board.shape), dtype=board.dtype) for name, board in first.items()
-                }
-            self._record(slot, observation=observation)
+        # The engine gives slot i the seeds base + i, base + i + n, ... for its successive games, so a
+        # slot's games do not change with how fast the other slots finish. The base is hashed so that
+        # batches started from neighbouring seeds share no game, and halved so the additions cannot overflow.
+        base = int(np.random.SeedSequence(seed).generate_state(1, np.uint64)[0]) >> 1
+        self._games: managym.VectorEnv = managym.VectorEnv(games, seed=base, opponent_policy="none")
+        setups = [self._setup(slot) for slot in range(games)]
+        # The engine sizes its batched boards from the arrays it is given, so one scalar game supplies their shapes.
+        template = managym.Env(seed=base)
+        try:
+            observation, _ = template.reset(setups[0])
+            shapes = template.encode_observation(observation, POLICY_INPUT_VERSION)
+            self._buffers: dict[str, npt.NDArray[Any]] = {
+                name: np.zeros((games, *board.shape), dtype=board.dtype) for name, board in shapes.items()
+            }
+            self._buffers.update(
+                rewards=np.zeros(games, dtype=np.float64),
+                terminated=np.zeros(games, dtype=np.uint8),
+                truncated=np.zeros(games, dtype=np.uint8),
+            )
+            self._games.set_buffers(self._buffers)
+            self._games.reset_each_into_buffers(setups)
+        except managym.AgentError as error:
+            raise DeckRejectedError(str(error)) from error
 
     def decisions(self) -> Decisions:
-        # Copies, so a caller may keep a board after later steps overwrite the slot's row.
-        boards = {name: board.copy() for name, board in self._boards.items()}
-        return Decisions(seats=self._seats.copy(), boards=boards, action_counts=self._action_counts.copy())
+        # Copies, so a caller may keep a board after later steps overwrite the engine's arrays.
+        boards = {name: board.copy() for name, board in self._buffers.items() if name not in _STEP_RESULTS}
+        return Decisions(
+            seats=np.array(self._games.current_agent_indices(), dtype=np.int64),
+            boards=boards,
+            action_counts=self._buffers["actions_valid"].sum(axis=1).astype(np.int64),
+        )
 
     def act(self, actions: npt.NDArray[np.int64]) -> tuple[Finished, ...]:
+        slots = len(self._decks)
+        # An isolated step reports a game the engine cannot continue, such as a board too large
+        # for the observation arrays, in that slot's info and lets every other game advance.
+        self._games.step_isolated_into_buffers(actions.tolist(), [True] * slots, recover_capacity=True)
+        results = self._games.get_last_info()
+        failed = ["game_error" in result for result in results]
+        ended = self._buffers["terminated"] | self._buffers["truncated"] | np.array(failed)
+        if not ended.any():
+            return ()
+        if any(failed):
+            self._games.replace_failed_into_buffers(failed)
+        # The engine has already dealt each ended slot a new game from the old decks. The next
+        # matchup is dealt over it below.
         finished: list[Finished] = []
-        for slot, action in enumerate(actions.tolist()):
-            env = self._envs[slot]
-            observation, _, terminated, truncated, _ = env.step(action)
-            if terminated or truncated:
-                finished.append(Finished(slot=slot, outcome=_outcome(env.winner_index()), decks=self._decks[slot]))
-                self._decks[slot] = self._matchups()
-                self._envs[slot], observation = self._deal(slot, decks=self._decks[slot])
-            self._record(slot, observation=observation)
+        setups: list[list[managym.PlayerConfig] | None] = [None] * slots
+        for slot in np.flatnonzero(ended).tolist():
+            winner = results[slot].get("winner_index")
+            outcome = Outcome.ABANDONED if failed[slot] else _outcome(winner if isinstance(winner, int) else None)
+            finished.append(Finished(slot=slot, outcome=outcome, decks=self._decks[slot]))
+            self._decks[slot] = self._matchups()
+            setups[slot] = self._setup(slot)
+        try:
+            self._games.reassign_roots_into_buffers(setups)
+        except managym.AgentError as error:
+            raise DeckRejectedError(str(error)) from error
         return tuple(finished)
 
     def hidden_cards(self) -> HiddenCards:
+        games = len(self._decks)
+        # The engine returns each hand as a name-to-copies mapping, so this one loop over games is unavoidable.
+        held = [
+            (slot, seat, self._cards_by_name[name], copies)
+            for seat in range(SEATS)
+            for slot, hand in enumerate(self._games.hand_snapshots([seat] * games))
+            for name, copies in hand.cards.items()
+            if name in self._cards_by_name
+        ]
+        slots, seats, cards, copies = np.array(held, dtype=np.int64).reshape(-1, 4).T
         hands = np.zeros_like(self._deck_counts)
-        outside_library = np.zeros_like(self._deck_counts)
-        for slot, env in enumerate(self._envs):
-            for seat in range(SEATS):
-                view = env.observation_for_player(seat)
-                hands[slot, seat], outside_library[slot, seat] = self._own_card_counts(view)
-        # A seat's own view lists its cards in every zone but the library, so the library is the rest of its deck.
-        return HiddenCards(hands=hands, libraries=(self._deck_counts - outside_library).clip(min=0))
+        hands[slots, seats, cards] = copies
+        public = self._cards_in_public_zones()
+        # The board files a permanent under its controller. A side that shows more copies of a card
+        # than its seat's deck holds must control the other seat's permanents, so the extra copies move back.
+        borrowed = (hands + public - self._deck_counts).clip(min=0)
+        libraries = self._deck_counts - hands - public + borrowed - borrowed[:, ::-1]
+        return HiddenCards(hands=hands, libraries=libraries.clip(min=0))
 
-    def _own_card_counts(self, view: managym.Observation) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
-        # Returns (hand, outside_library), both int64 [cards]: copies of each card the viewing seat
-        # owns in its hand, and in any zone but its library.
-        hand = np.zeros(len(self._names), dtype=np.int64)
-        outside_library = np.zeros(len(self._names), dtype=np.int64)
-        for card in (*view.agent_cards, *view.opponent_cards):
-            card_id = int(self._card_ids[card.registry_key])
-            if card.owner_id != view.agent.id or card.is_token or card_id < 0:
-                continue
-            if card.zone == managym.ZoneEnum.HAND:
-                hand[card_id] += 1
-            if card.zone != managym.ZoneEnum.LIBRARY:
-                outside_library[card_id] += 1
-        return hand, outside_library
+    def _cards_in_public_zones(self) -> npt.NDArray[np.int64]:
+        # Returns int64 [n, 2, cards]: copies of each card that the acting seat's board lists on each
+        # seat's side outside the hand and the library, which is the battlefield, graveyard, exile and stack.
+        counts = np.zeros_like(self._deck_counts)
+        acting = np.array(self._games.current_agent_indices(), dtype=np.int64)
+        # definitions: int64 [n, 2, card rows], the engine definition id of each listed card, acting seat first.
+        definitions = self._buffers["semantic_cards"].astype(np.int64) - 1
+        for side, name in enumerate(("agent_cards", "opponent_cards")):
+            rows = self._buffers[name]  # float32 [n, card rows, features]
+            # The valid mask also drops the sideboard cards that `semantic_cards` lists after the acting seat's cards.
+            hidden_zone_or_token = rows[:, :, [_LIBRARY_COLUMN, _HAND_COLUMN, _TOKEN_COLUMN]].any(axis=-1)
+            slots, card_rows = np.nonzero((self._buffers[f"{name}_valid"] > 0) & ~hidden_zone_or_token)
+            cards = self._card_ids[definitions[slots, side, card_rows]]
+            in_pool = cards >= 0
+            seats = np.abs(side - acting[slots])
+            np.add.at(counts, (slots[in_pool], seats[in_pool], cards[in_pool]), 1)
+        return counts
 
-    def _deal(self, slot: int, *, decks: tuple[Deck, Deck]) -> tuple[managym.Env, managym.Observation]:
-        # Each game's seed depends only on the batch seed, its slot and how many games the slot has
-        # started, so a slot's games do not change with how fast the other slots finish.
-        entropy = (self._seed, slot, self._games_started[slot])
-        self._games_started[slot] += 1
-        env = managym.Env(seed=int(np.random.SeedSequence(entropy).generate_state(1, np.uint64)[0]))
+    def _setup(self, slot: int) -> list[managym.PlayerConfig]:
         players: list[managym.PlayerConfig] = []
-        for seat in range(SEATS):
-            copies = collections.Counter(self._names[card] for card in decks[seat])
+        for seat, deck in enumerate(self._decks[slot]):
+            copies = collections.Counter(self._names[card] for card in deck)
             players.append(
                 managym.PlayerConfig(f"seat {seat}", dict(copies), world=managym.WORLD_SETUP, disclosure="closed")
             )
-            self._deck_counts[slot, seat] = np.bincount(decks[seat], minlength=len(self._names))
-        try:
-            observation, _ = env.reset(players)
-        except managym.AgentError as error:
-            raise DeckRejectedError(str(error)) from error
-        return env, observation
-
-    def _record(self, slot: int, *, observation: managym.Observation) -> None:
-        self._seats[slot] = observation.agent.player_index
-        self._action_counts[slot] = len(observation.action_space.actions)
-        for name, board in self._envs[slot].encode_observation(observation, POLICY_INPUT_VERSION).items():
-            self._boards[name][slot] = board
+            self._deck_counts[slot, seat] = np.bincount(deck, minlength=len(self._names))
+        return players
 
 
 def _outcome(winner: int | None) -> Outcome:

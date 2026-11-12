@@ -158,9 +158,11 @@ def _truth(batch: GameBatch, seats: Tensor) -> tuple[Tensor, Tensor]:
     return unseen / unseen.sum(dim=-1, keepdim=True).clamp_min(1.0), (hands > 0).float()
 
 
-def _split(parts: list[Rollout], finished: list[GameResult]) -> tuple[Rollout, Rollout | None]:
-    # Fills in results and returns (rows of finished games, rows of games still running or None).
-    rows = _join(parts)
+def _split(parts: list[Rollout], finished: list[GameResult], *, abandoned: set[int]) -> tuple[Rollout, Rollout | None]:
+    # Drops the rows of abandoned games, fills in results and returns
+    # (rows of finished games, rows of games still running or None).
+    joined = _join(parts)
+    rows = select(joined, ~torch.isin(joined.games, torch.tensor(sorted(abandoned), dtype=torch.int64)))
     result_for_seat_0 = {
         game.game: game.learner_result if game.learner_seat == 0 else 1.0 - game.learner_result for game in finished
     }
@@ -236,6 +238,7 @@ def collect(
     guess_count = state.history_count.clone()
     parts: list[Rollout] = [] if state.rows is None else [state.rows]
     finished: list[GameResult] = []
+    abandoned: set[int] = set()
     learner_rows: dict[int, int] = {}
     if state.rows is not None:
         _count_learner_rows(learner_rows, state.rows.games[state.rows.learner])
@@ -269,15 +272,19 @@ def collect(
 
         for ended in batch.act(actions.numpy()):
             game = int(game_ids[ended.slot])
-            finished.append(_game_result(ended, game=game, learner_seat=int(learner_seat[ended.slot])))
-            finished_learner_rows += learner_rows.pop(game, 0)
+            game_learner_rows = learner_rows.pop(game, 0)
+            if ended.outcome is Outcome.ABANDONED:
+                abandoned.add(game)
+            else:
+                finished.append(_game_result(ended, game=game, learner_seat=int(learner_seat[ended.slot])))
+                finished_learner_rows += game_learner_rows
             game_ids[ended.slot] = next_game
             next_game += 1
             learner_seat[ended.slot] = int(torch.randint(0, SEATS, (1,), generator=generator))
             guess_count[ended.slot] = 0
         pending_decisions = batch.decisions()
 
-    rollout, unfinished = _split(parts, finished)
+    rollout, unfinished = _split(parts, finished, abandoned=abandoned)
     carried = Pending(
         rows=unfinished,
         history=guesses,

@@ -3,10 +3,11 @@ name = "jace"
 version = "0.1.0"
 description = "Learn to draft, build decks and play Magic: The Gathering by self-play"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.13,<3.14"
 dependencies = [
-    "manabot",
+    "manabot>=0.2.1",
     "numpy>=2",
+    "spells-mtg>=0.18",
     "torch>=2.10",
 ]
 
@@ -22,7 +23,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py312"
+target-version = "py313"
 # BYOR vendors and manages these check scripts; they follow BYOR's own config.
 # The repository's own check scripts sit beside them and are linted.
 extend-exclude = [
@@ -99,6 +100,3 @@ exclude = [
     ".byor/scripts/no-thin-docstrings.py",
     ".byor/scripts/ruff.py",
 ]
-
-[tool.uv.sources]
-manabot = { git = "https://github.com/loopflowstudio/manabot", rev = "b5e8f404adf55a2315a2810906cbb81c49465781" }

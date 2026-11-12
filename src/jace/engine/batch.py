@@ -30,6 +30,8 @@ class Outcome(enum.Enum):
     SEAT_0_WON = 0
     SEAT_1_WON = 1
     DRAW = 2
+    # The engine could not continue the game, so it has no result and its decisions are discarded.
+    ABANDONED = 3
 
 
 @dataclass(frozen=True, slots=True)
