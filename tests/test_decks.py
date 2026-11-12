@@ -20,6 +20,7 @@ from jace.decks import (
     improve,
     model_proposer,
     random_proposer,
+    rules_for_pool,
 )
 from jace.modules import run
 
@@ -157,6 +158,19 @@ def test_a_pool_with_too_few_spells_for_any_legal_deck_is_rejected() -> None:
 
     with pytest.raises(NoLegalDeckError, match="at least 8 lands and can hold at most 5"):
         build_decks((3, 7), cards=CARDS, propose=propose, score=_colour_scorer, rules=TWO_BASICS, proposals=4, rounds=1)
+
+
+def test_a_pool_with_too_few_spells_gets_rules_that_let_it_play_every_spell_it_has() -> None:
+    rules = rules_for_pool(TWO_BASICS, (3, 7))
+    propose = random_proposer(rules=rules, generator=torch.Generator().manual_seed(0))
+
+    candidates = build_decks(
+        (3, 7), cards=CARDS, propose=propose, score=_colour_scorer, rules=rules, proposals=4, rounds=1
+    )
+
+    assert rules_for_pool(TWO_BASICS, tuple(range(2, CARDS))) == TWO_BASICS
+    assert all(sorted(card for card in candidate.deck if card in (3, 7)) == [3, 7] for candidate in candidates)
+    assert all(len(candidate.deck) == TWO_BASICS.size for candidate in candidates)
 
 
 def test_a_deck_models_own_parameters_hold_none_of_the_shared_embeddings() -> None:

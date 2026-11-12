@@ -24,6 +24,7 @@ from jace.decks import (
     DeckScore,
     build_decks,
     model_proposer,
+    rules_for_pool,
     writing_steps,
 )
 from jace.draft import (
@@ -147,7 +148,6 @@ def _build(
 ) -> tuple[list[Candidate], list[Candidate]]:
     # Returns (the deck played for each pool, the top-scored deck for each pool), pools in pod then seat order.
     generator = torch.Generator().manual_seed(rng.getrandbits(_SEED_BITS))
-    propose = model_proposer(learners.builder, rules=setup.rules, generator=generator)
 
     def score(decks: Tensor) -> Tensor:
         parts = [run(learners.score, part) for part in decks.split(setup.score_chunk)]
@@ -157,12 +157,14 @@ def _build(
     best: list[Candidate] = []
     for record in records:
         for pool in record.pools:
+            # A drafter that took too many lands still gets a deck, with as many lands as it must play.
+            rules = rules_for_pool(setup.rules, pool)
             candidates = build_decks(
                 pool,
                 cards=len(setup.pool),
-                propose=propose,
+                propose=model_proposer(learners.builder, rules=rules, generator=generator),
                 score=score,
-                rules=setup.rules,
+                rules=rules,
                 proposals=setup.proposals,
                 rounds=setup.search_rounds,
             )

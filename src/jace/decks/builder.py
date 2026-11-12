@@ -11,8 +11,8 @@ survivors into tuples of card ids.
 """
 
 import functools
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from typing import override
 
 import torch
@@ -33,6 +33,7 @@ __all__ = (
     "improve",
     "model_proposer",
     "random_proposer",
+    "rules_for_pool",
     "writing_steps",
 )
 
@@ -309,6 +310,21 @@ def _land_kinds(rules: BuildRules, *, cards: int, device: torch.device) -> tuple
     is_land = is_basic.clone()
     is_land[sorted(rules.nonbasic_lands)] = True
     return is_land, is_basic
+
+
+def rules_for_pool(rules: BuildRules, pool: Sequence[CardId]) -> BuildRules:
+    """Return `rules`, with the land limit raised when `pool` cannot fill a deck within it.
+
+    A drafter is free to take so many lands that its pool holds fewer
+    spells than `size - max_lands`. Such a pool has no deck under `rules`,
+    and `build_decks` rejects it. The deck it can still play holds every
+    spell it has and lands for the rest, so the limit becomes exactly that
+    many lands. A pool with enough spells gets `rules` back unchanged.
+    """
+    lands = {*rules.basics, *rules.nonbasic_lands}
+    spells = sum(1 for card in pool if card not in lands)
+    lands_needed = rules.size - spells
+    return rules if lands_needed <= rules.max_lands else replace(rules, max_lands=lands_needed)
 
 
 def _land_range(pool_counts: Tensor, *, rules: BuildRules) -> tuple[int, int]:
