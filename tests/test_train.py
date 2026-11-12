@@ -10,6 +10,7 @@ from typing import override
 
 import numpy as np
 import numpy.typing as npt
+import pytest
 import torch
 from torch import Tensor, nn
 
@@ -97,9 +98,11 @@ def test_a_game_still_running_when_collect_stops_is_returned_whole_by_a_later_ca
             assert float(rollout.results[first_seat][0] + rollout.results[second_seat][0]) == 1.0
 
 
-def test_a_player_learns_to_pick_its_highest_card() -> None:
+@pytest.mark.parametrize("several_shuffled_passes_on_normalized_advantages", [False, True])
+def test_a_player_learns_to_pick_its_highest_card(*, several_shuffled_passes_on_normalized_advantages: bool) -> None:
     torch.manual_seed(0)
     generator = torch.Generator().manual_seed(0)
+    options = several_shuffled_passes_on_normalized_advantages
     model = nn.Sequential(nn.Linear(HAND_SIZE + 1, 32), nn.Tanh(), nn.Linear(32, HAND_SIZE + 1))
 
     def policy(boards: Boards, _guess: Guess) -> tuple[Tensor, Tensor]:
@@ -108,7 +111,9 @@ def test_a_player_learns_to_pick_its_highest_card() -> None:
 
     batch = ToyBatch(lambda: ((0,), (1,)), games=64, seed=0)
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-3)
-    rule = PlayerRule(clip=0.2, stay=0.1, spread=0.01, keep_quantile=0.0, keep_floor=0.0, value_weight=0.5)
+    rule = PlayerRule(
+        clip=0.2, stay=0.1, spread=0.01, keep_quantile=0.0, keep_floor=0.0, value_weight=0.5, normalize=options
+    )
     best_pick_rates = []
     pending = None
     for _ in range(40):
@@ -137,6 +142,8 @@ def test_a_player_learns_to_pick_its_highest_card() -> None:
             slice_rows=256,
             max_grad_norm=1.0,
             optimizers=[optimizer],
+            passes=2 if options else 1,
+            generator=generator if options else None,
         )
 
     assert best_pick_rates[0] < 0.45

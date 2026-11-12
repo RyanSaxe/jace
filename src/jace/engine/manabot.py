@@ -20,7 +20,7 @@ cannot be told from the controller.
 
 import collections
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -40,6 +40,7 @@ __all__ = (
     "UnreadableDefinitionsError",
     "engine_card_ids",
     "engine_cards",
+    "land_and_spell_actions",
     "start_batch",
 )
 
@@ -120,6 +121,17 @@ def engine_card_ids(pool: CardPool) -> Tensor:
 def start_batch(matchups: Callable[[], tuple[Deck, Deck]], *, pool: CardPool, games: int, seed: int) -> GameBatch:
     names = tuple(pool[card].name for card in range(len(pool)))
     return _ManabotBatch(matchups, names=names, card_ids=engine_card_ids(pool).numpy(), games=games, seed=seed)
+
+
+def land_and_spell_actions(boards: Mapping[str, Tensor]) -> tuple[Tensor, Tensor]:
+    # boards: the engine's arrays as tensors, each [n, ...]. Returns two bool [n, max_actions]
+    # masks: the legal actions that play a land, and the legal actions that cast a spell. The
+    # first columns of an action's row are one flag for each kind of action the engine has.
+    legal = boards["actions_valid"] > 0
+    kinds = boards["actions"]
+    lands = kinds[..., int(managym.ActionEnum.PRIORITY_PLAY_LAND)] > 0
+    spells = kinds[..., int(managym.ActionEnum.PRIORITY_CAST_SPELL)] > 0
+    return lands & legal, spells & legal
 
 
 def _rules_texts() -> dict[str, str]:

@@ -33,7 +33,10 @@ class PlayerRule:
     `spread` the pull toward even odds over legal actions; a loop lowers
     `spread` as training goes on. Only decisions whose advantage is at least
     the `keep_quantile` of advantage sizes, and at least `keep_floor`, teach
-    the policy. `value_weight` weighs the win-chance error. With `stay`,
+    the policy. `value_weight` weighs the win-chance error. With
+    `normalize` the advantages of those decisions are shifted and scaled to
+    mean zero and unit spread before the loss, so the size of a step does
+    not depend on how large the advantages happen to be. With `stay`,
     `spread` and `keep_quantile` at zero this is plain PPO.
     """
 
@@ -43,6 +46,7 @@ class PlayerRule:
     keep_quantile: float
     keep_floor: float
     value_weight: float
+    normalize: bool
 
 
 def _masked_log_probs(logits: Tensor) -> tuple[Tensor, Tensor]:

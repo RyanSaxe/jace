@@ -250,6 +250,8 @@ def _update_play_models(setup: LimitedSetup, learners: Learners, *, rollout: Rol
         slice_rows=setup.slice_rows,
         max_grad_norm=setup.max_grad_norm,
         optimizers=[learners.optimizers["player"], embedding],
+        passes=1,
+        generator=None,
     )
     guess = update_guess(
         learners.guesser,

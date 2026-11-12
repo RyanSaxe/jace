@@ -56,7 +56,9 @@ __all__ = ("main",)
 _SEATS_IN_A_POD = 8
 _BOOSTERS_EACH = 3
 # Ataraxos's player rule. Its `keep_quantile` and `spread` are replaced by the arguments and the schedule.
-_PLAYER_RULE = PlayerRule(clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.75, keep_floor=0.0, value_weight=0.5)
+_PLAYER_RULE = PlayerRule(
+    clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.75, keep_floor=0.0, value_weight=0.5, normalize=False
+)
 _RANGE_RESAMPLES = 1000
 _SCORE_CHUNK = 1024
 _SLICE_ROWS = 512

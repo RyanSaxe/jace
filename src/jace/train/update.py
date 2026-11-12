@@ -3,8 +3,10 @@
 `apply` is the one place a gradient step happens: it steps every optimizer
 it is given, which is how the shared card embedding's own optimizer moves
 together with a model's. `update_player` and `update_guess` walk a rollout
-in order, in slices, because the player's rule filters decisions over the
-whole rollout and the guess model needs each decision's earlier guesses.
+in slices, because the player's rule filters decisions over the whole
+rollout and the guess model needs each decision's earlier guesses. The
+player's update can pass over the rollout several times, in a new random
+order each time. The guess model's makes one pass, in order.
 """
 
 from collections.abc import Mapping, Sequence
@@ -21,6 +23,9 @@ from jace.train.sequences import advantages, earlier_guesses, sequences
 __all__ = ("Metrics", "apply", "update_guess", "update_player")
 
 type Metrics = Mapping[str, float]
+
+# Advantages are divided by at least this when they are normalized, so equal advantages stay finite.
+_SMALLEST_SPREAD = 1e-8
 
 
 def apply(loss: Tensor, optimizers: Sequence[Optimizer], *, max_grad_norm: float) -> None:
@@ -45,14 +50,20 @@ def update_player(
     slice_rows: int,
     max_grad_norm: float,
     optimizers: Sequence[Optimizer],
+    passes: int,
+    generator: torch.Generator | None,
 ) -> Metrics:
-    """Run one pass of the player's update over `rollout`, in order.
+    """Run `passes` passes of the player's update over `rollout`.
 
     Advantages use `lam_advantage` and the win-chance targets use
-    `lam_value`. The decisions that teach the policy are chosen once over
-    the whole rollout: the learner's own, with an advantage at least as
-    large as `rule` asks. Returns the mean loss, the share of decisions
-    kept, and the learner's mean advantage size.
+    `lam_value`. Both are computed once, from the win chances the player
+    predicted when it played. The decisions that teach the policy are also
+    chosen once over the whole rollout: the learner's own, with an
+    advantage at least as large as `rule` asks. With a `generator` every
+    pass takes the rows in a new random order, and without one every pass
+    takes them in the order they were played. Returns the mean loss, the
+    share of decisions kept, and the learner's mean advantage size before
+    any normalizing.
     """
     layout = sequences(rollout.games, rollout.seats)
     advantage = advantages(rollout.values, rollout.results, layout=layout, lam=lam_advantage)
@@ -61,30 +72,58 @@ def update_player(
     learner_sizes = size[rollout.learner]
     threshold = float(learner_sizes.quantile(rule.keep_quantile)) if len(learner_sizes) else 0.0
     keep = rollout.learner & (size >= max(threshold, rule.keep_floor))
+    if rule.normalize and int(keep.sum()) > 1:
+        advantage = (advantage - advantage[keep].mean()) / advantage[keep].std().clamp_min(_SMALLEST_SPREAD)
     total = 0.0
     slices = 0
-    for start in range(0, len(advantage), slice_rows):
-        rows = torch.arange(start, min(start + slice_rows, len(advantage)))
-        part = select(rollout, rows)
-        logits, values = policy(part.boards, part.guesses)
-        loss = player_loss(
-            logits,
-            values,
-            old_logits=part.logits,
-            actions=part.actions,
-            advantages=advantage[rows],
-            value_targets=value_targets[rows],
-            keep=keep[rows],
-            rule=rule,
+    for _ in range(passes):
+        order = (
+            torch.arange(len(advantage)) if generator is None else torch.randperm(len(advantage), generator=generator)
         )
-        apply(loss, optimizers, max_grad_norm=max_grad_norm)
-        total += float(loss.detach())
-        slices += 1
+        for rows in order.split(slice_rows):
+            total += _player_step(
+                policy,
+                select(rollout, rows),
+                advantages=advantage[rows],
+                value_targets=value_targets[rows],
+                keep=keep[rows],
+                rule=rule,
+                max_grad_norm=max_grad_norm,
+                optimizers=optimizers,
+            )
+            slices += 1
     return {
         "loss": total / max(slices, 1),
         "kept_share": float(keep.float().mean()),
         "advantage_size": float(learner_sizes.mean()) if len(learner_sizes) else 0.0,
     }
+
+
+def _player_step(
+    policy: Policy,
+    part: Rollout,
+    *,
+    advantages: Tensor,
+    value_targets: Tensor,
+    keep: Tensor,
+    rule: PlayerRule,
+    max_grad_norm: float,
+    optimizers: Sequence[Optimizer],
+) -> float:
+    # One gradient step on the rows of `part`. advantages, value_targets, keep: [m], for those rows.
+    logits, values = policy(part.boards, part.guesses)
+    loss = player_loss(
+        logits,
+        values,
+        old_logits=part.logits,
+        actions=part.actions,
+        advantages=advantages,
+        value_targets=value_targets,
+        keep=keep,
+        rule=rule,
+    )
+    apply(loss, optimizers, max_grad_norm=max_grad_norm)
+    return float(loss.detach())
 
 
 def update_guess(

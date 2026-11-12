@@ -25,7 +25,7 @@ DECISIONS_PER_ITERATION = 512
 REPORT_EVERY = 5
 HIDDEN_WIDTH = 32
 LEARNING_RATE = 3e-3
-RULE = PlayerRule(clip=0.2, stay=0.1, spread=0.01, keep_quantile=0.0, keep_floor=0.0, value_weight=0.5)
+RULE = PlayerRule(clip=0.2, stay=0.1, spread=0.01, keep_quantile=0.0, keep_floor=0.0, value_weight=0.5, normalize=False)
 
 
 def main() -> None:
@@ -78,6 +78,8 @@ def main() -> None:
             slice_rows=256,
             max_grad_norm=1.0,
             optimizers=[optimizer],
+            passes=1,
+            generator=None,
         )
         if iteration == 1 or iteration % REPORT_EVERY == 0:
             sys.stdout.write(f"iteration {iteration:2d}  best card {best_card_rate:.2f}  win rate {win_rate:.2f}\n")

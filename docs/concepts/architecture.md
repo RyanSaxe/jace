@@ -75,13 +75,14 @@ compute this loss, take this step. A training loop is a function you write
 by calling them. `jace.loops` holds two: `toy`, a player on High Card, and
 `limited`, one round of draft, build, play and learn.
 
-Four modules there run from the command line:
+Five modules there run from the command line:
 
 | Entry point                 | Does                                            |
 | --------------------------- | ----------------------------------------------- |
 | `jace.loops.pretrain`       | Trains the drafter, on human picks              |
 | `jace.loops.pretrain_decks` | Trains the deck score and the deck builder, on human decks |
 | `jace.loops.train_limited`  | Trains every model, on real games, from those checkpoints |
+| `jace.loops.train_player`   | Trains only the player and the guess model, on human decks |
 | `jace.loops.score`          | Scores a run's checkpoints against each other and against manabot's scripted players |
 
 Because only `jace.loops` imports `jace.draft`, constructed play is the same

@@ -71,7 +71,9 @@ def test_one_limited_iteration_updates_every_model() -> None:
         history=2,
         slice_rows=64,
         max_grad_norm=1.0,
-        player_rule=PlayerRule(clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.0, keep_floor=0.0, value_weight=0.5),
+        player_rule=PlayerRule(
+            clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.0, keep_floor=0.0, value_weight=0.5, normalize=False
+        ),
         lam_advantage=0.5,
         lam_value=0.8,
     )

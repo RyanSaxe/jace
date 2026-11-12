@@ -9,6 +9,7 @@ that needs it; the only Python loop over games visits the few that ended on
 a step.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass, fields
 
 import numpy as np
@@ -19,7 +20,7 @@ from jace.cards import Deck
 from jace.engine import SEATS, Finished, GameBatch, Outcome
 from jace.play import Boards, Earlier, Guess, Guesser, Policy
 
-__all__ = ("Collected", "GameResult", "Pending", "Rollout", "collect", "select")
+__all__ = ("Collected", "GameResult", "Pending", "Rollout", "collect", "join", "select")
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +106,8 @@ def select(rollout: Rollout, rows: Tensor) -> Rollout:
     )
 
 
-def _join(parts: list[Rollout]) -> Rollout:
+def join(parts: Sequence[Rollout]) -> Rollout:
+    # The rows of every part, in the order given. `parts` must not be empty.
     plain = {
         field.name: torch.cat([getattr(part, field.name) for part in parts])
         for field in fields(Rollout)
@@ -163,7 +165,7 @@ def _truth(batch: GameBatch, seats: Tensor) -> tuple[Tensor, Tensor]:
 def _split(parts: list[Rollout], finished: list[GameResult], *, abandoned: set[int]) -> tuple[Rollout, Rollout | None]:
     # Drops the rows of abandoned games, fills in results and returns
     # (rows of finished games, rows of games still running or None).
-    joined = _join(parts)
+    joined = join(parts)
     rows = select(joined, ~torch.isin(joined.games, torch.tensor(sorted(abandoned), dtype=torch.int64)))
     result_for_seat_0 = {
         game.game: game.learner_result if game.learner_seat == 0 else 1.0 - game.learner_result for game in finished
@@ -229,6 +231,10 @@ def collect(
     `Pending` from the previous call afterwards. `cards` is the number of
     cards in the pool and `history` is how many earlier guesses the guesser
     is shown. The learner's seat is drawn at random for each new game.
+    When `opponent` is the same policy as `learner`, which is self-play,
+    the decisions of both seats are the learner's: all of them count toward
+    `decisions` and all of them are marked as the learner's in the rollout.
+    `GameResult.learner_result` is still the result of the drawn seat.
     Returns the decisions and results of the finished games, and the state
     to continue from.
     """
@@ -245,11 +251,13 @@ def collect(
     if state.rows is not None:
         _count_learner_rows(learner_rows, state.rows.games[state.rows.learner])
     finished_learner_rows = 0
+    # `==`, not `is`: a bound method is a new object each time it is read from its model.
+    self_play = opponent == learner
     while finished_learner_rows < decisions:
         seats = torch.from_numpy(pending_decisions.seats.copy())
         boards = {name: torch.from_numpy(np.array(array)) for name, array in pending_decisions.boards.items()}
         guess = _guess(guesser, boards, seats=seats, history=guesses, history_count=guess_count)
-        is_learner = seats == learner_seat
+        is_learner = torch.ones_like(seats, dtype=torch.bool) if self_play else seats == learner_seat
         logits, values = _decide(boards, guess, is_learner=is_learner, learner=learner, opponent=opponent)
         log_probs = logits.log_softmax(dim=-1)
         actions = torch.multinomial(log_probs.exp(), 1, generator=generator).squeeze(1)

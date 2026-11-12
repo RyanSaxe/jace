@@ -67,12 +67,16 @@ def test_real_games_train_the_player_and_the_guess_model_for_one_step() -> None:
     update_player(
         player.policy,
         rollout,
-        rule=PlayerRule(clip=0.2, stay=0.1, spread=0.05, keep_quantile=0.0, keep_floor=0.0, value_weight=1.0),
+        rule=PlayerRule(
+            clip=0.2, stay=0.1, spread=0.05, keep_quantile=0.0, keep_floor=0.0, value_weight=1.0, normalize=False
+        ),
         lam_advantage=0.5,
         lam_value=0.8,
         slice_rows=64,
         max_grad_norm=1.0,
         optimizers=[torch.optim.Adam(own(player), lr=1e-3), embedding_optimizer],
+        passes=1,
+        generator=None,
     )
     update_guess(
         guess.guess,
