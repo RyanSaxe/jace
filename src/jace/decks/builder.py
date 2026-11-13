@@ -195,8 +195,8 @@ def writing_steps(
     # The generator lives on the CPU, so the random order is drawn there and moved.
     shuffle = torch.rand(listed.shape, generator=generator).to(decks.device).argsort(dim=1)
     chosen = listed.gather(1, shuffle)
-    written = torch.nn.functional.one_hot(chosen, cards).float().cumsum(dim=1)  # [n, size, cards]
-    partial = torch.cat([torch.zeros_like(written[:, :1]), written[:, :-1]], dim=1)
+    counts_after_step = torch.nn.functional.one_hot(chosen, cards).float().cumsum(dim=1)  # [n, size, cards]
+    partial = torch.cat([torch.zeros_like(counts_after_step[:, :1]), counts_after_step[:, :-1]], dim=1)
     available = (pool_counts[:, None, :] - partial).clamp_min(0)
     slots_left = rules.size - torch.arange(rules.size, device=decks.device)
     available[:, :, is_basic] = slots_left[None, :, None].float().expand(count, -1, int(is_basic.sum()))
@@ -357,12 +357,13 @@ def _write_decks(
     is_land, is_basic = _land_kinds(rules, cards=pool_counts.shape[0], device=pool_counts.device)
     decks = torch.zeros((min_lands.shape[0], pool_counts.shape[0]), device=pool_counts.device)
     one = torch.ones((min_lands.shape[0], 1), device=pool_counts.device)
-    for written in range(rules.size):
+    for cards_added in range(rules.size):
         available = (pool_counts - decks).clamp_min(0)
-        available[:, is_basic] = rules.size - written
-        lands = decks[:, is_land].sum(dim=1)
-        may_add_land = lands < max_lands
-        may_add_spell = written - lands < rules.size - min_lands
+        available[:, is_basic] = rules.size - cards_added
+        lands_added = decks[:, is_land].sum(dim=1)
+        spells_added = cards_added - lands_added
+        may_add_land = lands_added < max_lands
+        may_add_spell = spells_added < rules.size - min_lands
         allowed = torch.where(is_land, may_add_land.unsqueeze(1), may_add_spell.unsqueeze(1)) & (available > 0)
         logits = next_card(available, decks).masked_fill(~allowed, float("-inf"))
         if greedy:
