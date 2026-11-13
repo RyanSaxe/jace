@@ -120,7 +120,7 @@ def test_one_limited_iteration_updates_every_model() -> None:
     metrics = limited_iteration(
         toy.setup,
         toy.learners,
-        dials=phased_schedule(drafter_starts=0, pull_ends=10)(5),
+        dials=phased_schedule(decks_start=0, drafter_starts=0, pull_ends=10)(5),
         other_seats=[],
         play=toy.play,
         rng=random.Random(0),
@@ -146,7 +146,7 @@ def test_a_drafter_whose_rate_is_zero_picks_exactly_as_before_the_iteration() ->
     limited_iteration(
         toy.setup,
         toy.learners,
-        dials=phased_schedule(drafter_starts=100, pull_ends=200)(5),
+        dials=phased_schedule(decks_start=0, drafter_starts=100, pull_ends=200)(5),
         other_seats=[],
         play=toy.play,
         rng=random.Random(0),

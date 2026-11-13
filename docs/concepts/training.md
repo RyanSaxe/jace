@@ -161,7 +161,7 @@ A schedule is a function from the iteration number to that iteration's
 dials:
 
 ```python
-schedule = phased_schedule(drafter_starts=2000, pull_ends=10000)
+schedule = phased_schedule(decks_start=2000, drafter_starts=2000, pull_ends=10000)
 dials = schedule(iteration)
 ```
 

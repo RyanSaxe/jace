@@ -362,6 +362,8 @@ def limited_iteration(
     generator = torch.Generator().manual_seed(rng.getrandbits(_SEED_BITS))
     _set_rate(learners.optimizers["player"], dials.player_rate)
     _set_rate(learners.optimizers["drafter"], dials.drafter_rate)
+    _set_rate(learners.optimizers["deck_score"], dials.deck_rate)
+    _set_rate(learners.optimizers["deck_builder"], dials.deck_rate)
 
     began = time.perf_counter()
     drafter = model_drafter(learners.drafter, generator=generator)
@@ -385,8 +387,9 @@ def limited_iteration(
         "decisions": float(len(collected.rollout.games)),
     }
     metrics |= _update_play_models(setup, learners, rollout=collected.rollout, dials=dials, generator=generator)
-    metrics |= _update_deck_score(setup, learners, decks=decks, wins=wins, played=played)
-    metrics |= _update_builder(setup, learners, records=records, best_decks=best_decks, generator=generator)
+    if dials.deck_rate > 0:
+        metrics |= _update_deck_score(setup, learners, decks=decks, wins=wins, played=played)
+        metrics |= _update_builder(setup, learners, records=records, best_decks=best_decks, generator=generator)
     if dials.drafter_rate > 0:
         metrics |= _update_drafter(
             setup,

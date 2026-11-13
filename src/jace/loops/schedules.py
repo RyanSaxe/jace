@@ -39,6 +39,7 @@ _SPREAD_POWER = 0.3
 
 # First guesses with no source, to be replaced by measured values.
 _DRAFTER_RATE = 1e-5
+_DECK_RATE = 1e-4
 _DRAFTER_ENTROPY = 0.01
 _EXPLORE_SHARE = 0.1
 # The drafter's rate ramps up over this fraction of the iterations it was frozen for.
@@ -54,9 +55,9 @@ _LAST_RATE_SHARE = 0.1
 class Dials:
     """The values a limited iteration reads, for one iteration.
 
-    `player_rate` and `drafter_rate` are learning rates; a rate of zero
-    freezes that model. `spread` is the player's pull toward even odds over
-    legal actions. `human_pull` weighs the drafter's pull toward the
+    `player_rate`, `deck_rate` and `drafter_rate` are learning rates; a rate
+    of zero freezes that model. `deck_rate` is the rate of both deck models.
+    `spread` is the player's pull toward even odds over legal actions. `human_pull` weighs the drafter's pull toward the
     human-trained drafter, and `drafter_entropy` its bonus for keeping pick
     odds spread out. `explore_share` is the share of pools for which a deck
     other than the top-scored one is played.
@@ -64,6 +65,7 @@ class Dials:
 
     player_rate: float
     spread: float
+    deck_rate: float
     drafter_rate: float
     human_pull: float
     drafter_entropy: float
@@ -91,12 +93,14 @@ def ramp(iteration: int, *, start: int, end: int, first: float, last: float) -> 
     return first + (last - first) * (iteration - start) / (end - start)
 
 
-def phased_schedule(*, drafter_starts: int, pull_ends: int) -> Schedule:
+def phased_schedule(*, decks_start: int, drafter_starts: int, pull_ends: int) -> Schedule:
     """Build a schedule with soft phases, as a starting point to edit.
 
     The player's rate and spread follow Ataraxos's published curves from the
-    first iteration. The drafter stays frozen until `drafter_starts`, so the
-    player's results mean something before they steer picks. Its rate then
+    first iteration. The deck models stay frozen until `decks_start` and
+    the drafter until `drafter_starts`, so the player's results mean
+    something before they rank decks or steer picks. The deck models then
+    learn at a fixed rate. Its rate then
     ramps up over a tenth of that span, and its pull toward the human
     drafter falls in a straight line to zero at `pull_ends`. The drafter's
     numbers and the explore share are first guesses with no source.
@@ -107,6 +111,7 @@ def phased_schedule(*, drafter_starts: int, pull_ends: int) -> Schedule:
         return Dials(
             player_rate=power_decay(iteration, scale=_RATE_SCALE, power=_RATE_POWER, low=_RATE_FLOOR, high=_RATE_CAP),
             spread=power_decay(iteration, scale=_SPREAD_START, power=_SPREAD_POWER, low=0.0, high=_SPREAD_START),
+            deck_rate=_DECK_RATE if iteration >= decks_start else 0.0,
             drafter_rate=ramp(iteration, start=drafter_starts, end=warm, first=0.0, last=_DRAFTER_RATE),
             human_pull=ramp(iteration, start=drafter_starts, end=pull_ends, first=1.0, last=0.0),
             drafter_entropy=_DRAFTER_ENTROPY,

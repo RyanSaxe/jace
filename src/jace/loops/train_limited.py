@@ -92,6 +92,7 @@ class _Arguments(PlayArguments):
     games_per_deck: int
     proposals: int
     search_rounds: int
+    decks_start: int
     drafter_starts: int
     pull_ends: int
     drafter_width: int
@@ -128,6 +129,7 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument("--games-per-deck", type=int, default=4, help="games every drafted deck plays per iteration")
     parser.add_argument("--proposals", type=int, default=8, help="candidate decks per pool")
     parser.add_argument("--search-rounds", type=int, default=1)
+    parser.add_argument("--decks-start", type=int, default=20, help="the iteration the deck models start learning at")
     parser.add_argument("--drafter-starts", type=int, default=20, help="the iteration the drafter starts learning at")
     parser.add_argument("--pull-ends", type=int, default=200, help="the iteration the human pull reaches zero at")
     parser.add_argument("--drafter-width", type=int, default=256)
@@ -359,7 +361,9 @@ def main(argv: Sequence[str]) -> None:
         score=models.score,
         optimizers=optimizers,
     )
-    schedule = phased_schedule(drafter_starts=arguments.drafter_starts, pull_ends=arguments.pull_ends)
+    schedule = phased_schedule(
+        decks_start=arguments.decks_start, drafter_starts=arguments.drafter_starts, pull_ends=arguments.pull_ends
+    )
     workers = start_workers(
         functools.partial(play_actor, arguments=arguments), count=arguments.workers, seed=arguments.seed + done
     )
