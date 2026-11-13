@@ -41,6 +41,7 @@ from jace.loops.entry_points import (
     add_play_flags,
     add_run_flags,
     build_play_models,
+    device_named,
     limited_rules,
     play_actor,
     play_weights,
@@ -52,7 +53,7 @@ from jace.loops.entry_points import (
 from jace.loops.limited import Learners, LimitedSetup, limited_iteration
 from jace.loops.matches import Harness
 from jace.loops.schedules import phased_schedule
-from jace.play import GuessModel, PlayerModel
+from jace.play import GuessModel, PlayerModel, guesser_on, policy_on
 from jace.tracking import (
     CheckpointRef,
     ModelName,
@@ -80,6 +81,7 @@ _SLICE_ROWS = 512
 
 @dataclass(frozen=True, slots=True)
 class _Arguments(PlayArguments):
+    device: str
     iterations: int
     drafter_run: Path | None
     decks_run: Path | None
@@ -109,6 +111,7 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser = argparse.ArgumentParser(description="Train every model on real games of one card set.")
     add_run_flags(parser)
     add_play_flags(parser)
+    parser.add_argument("--device", default="auto", help="where the updates run: cpu, mps or cuda; auto takes mps")
     parser.add_argument("--iterations", type=int, required=True)
     parser.add_argument("--drafter-run", type=Path, help="a run folder whose newest drafter to start from")
     parser.add_argument("--decks-run", type=Path, help="a run folder whose newest deck models to start from")
@@ -286,6 +289,14 @@ def _train(
         sys.stdout.flush()
 
 
+def _move(models: _Models, human_drafter: DrafterModel | None, *, to: torch.device) -> torch.device:
+    # Drafting, deck building and every update run on the device. The workers play on the CPU,
+    # with weights sent from here.
+    for module in (*_by_name(models).values(), *filter(None, [human_drafter])):
+        module.to(to)
+    return to
+
+
 def main(argv: Sequence[str]) -> None:
     """Run limited training on one card set and save its record, checkpoints and curve.
 
@@ -338,9 +349,10 @@ def main(argv: Sequence[str]) -> None:
         lam_advantage=arguments.lam_advantage,
         lam_value=arguments.lam_value,
     )
+    device = _move(models, human_drafter, to=device_named(arguments.device))
     learners = Learners(
-        policy=models.player.policy,
-        guesser=models.guess.guess,
+        policy=policy_on(models.player.policy, device),
+        guesser=guesser_on(models.guess.guess, device),
         drafter=models.drafter,
         human_drafter=human_drafter,
         builder=models.builder,
@@ -369,7 +381,7 @@ def main(argv: Sequence[str]) -> None:
 
     clock = functools.partial(datetime.now, UTC)
     if arguments.resume is None:
-        folder, curve_file = start_run(arguments, device=torch.device("cpu"), inputs=inputs, clock=clock)
+        folder, curve_file = start_run(arguments, device=device, inputs=inputs, clock=clock)
     else:
         folder, curve_file = arguments.resume, arguments.resume.with_name(f"{arguments.resume.name}.curve.json")
     try:

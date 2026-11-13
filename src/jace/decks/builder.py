@@ -192,7 +192,8 @@ def writing_steps(
     _, is_basic = _land_kinds(rules, cards=cards, device=decks.device)
     every_card = torch.arange(cards, device=decks.device)
     listed = torch.stack([every_card.repeat_interleave(row) for row in decks.long()])  # [n, size]
-    shuffle = torch.rand(listed.shape, generator=generator, device=decks.device).argsort(dim=1)
+    # The generator lives on the CPU, so the random order is drawn there and moved.
+    shuffle = torch.rand(listed.shape, generator=generator).to(decks.device).argsort(dim=1)
     chosen = listed.gather(1, shuffle)
     written = torch.nn.functional.one_hot(chosen, cards).float().cumsum(dim=1)  # [n, size, cards]
     partial = torch.cat([torch.zeros_like(written[:, :1]), written[:, :-1]], dim=1)
@@ -276,6 +277,7 @@ def build_decks(
     pool: Pool,
     *,
     cards: int,
+    device: torch.device,
     propose: Proposer,
     score: Scorer,
     rules: BuildRules,
@@ -285,17 +287,19 @@ def build_decks(
     """Propose decks for a pool, improve each and return the distinct results, best first.
 
     `cards` is the number of cards in the card pool, which is the width of
-    every count vector. `propose` writes `proposals` decks, `improve` climbs
-    from each for at most `rounds` rounds, and proposals that end at the same
+    every count vector, and `device` is where `propose` and `score` compute.
+    `propose` writes `proposals` decks, `improve` climbs from each for at
+    most `rounds` rounds, and proposals that end at the same
     deck are returned once. Choosing which candidate to play is left to the
     caller. Raises `NoLegalDeckError` when the pool cannot make a legal deck.
     """
-    pool_counts = torch.zeros(cards).index_add_(0, torch.tensor(pool, dtype=torch.int64), torch.ones(len(pool)))
+    copies = torch.ones(len(pool))
+    pool_counts = torch.zeros(cards).index_add_(0, torch.tensor(pool, dtype=torch.int64), copies).to(device)
     proposed = propose(pool_counts, proposals)
     improved = improve(proposed, pool_counts=pool_counts, score=score, rules=rules, rounds=rounds)
-    distinct = improved.unique(dim=0)  # float [d, cards]
+    distinct = improved.cpu().unique(dim=0)  # float [d, cards]
     with torch.no_grad():
-        scores = score(distinct)
+        scores = score(distinct.to(device)).cpu()
     ids = torch.arange(cards)
     return tuple(
         Candidate(deck=tuple(ids.repeat_interleave(distinct[index].long()).tolist()), score=float(scores[index]))
@@ -364,6 +368,8 @@ def _write_decks(
         if greedy:
             choice = logits.argmax(dim=1, keepdim=True)  # int64 [n, 1]
         else:
-            choice = torch.multinomial(logits.softmax(dim=1), 1, generator=generator)
+            # The generator lives on the CPU, so the card is drawn there and moved back.
+            chances = logits.softmax(dim=1).to(generator.device)
+            choice = torch.multinomial(chances, 1, generator=generator).to(logits.device)
         decks.scatter_add_(1, choice, one)
     return decks

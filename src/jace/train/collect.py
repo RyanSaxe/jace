@@ -103,15 +103,23 @@ class NoGamesError(ValueError):
 
 
 def select(rollout: Rollout, rows: Tensor) -> Rollout:
-    # rows: int64 [m] row indices, or bool [n]. Returns those rows as a rollout.
+    # rows: int64 [m] row indices, or bool [n]. Returns those rows as a rollout. A field on a GPU
+    # is indexed with indices on that GPU: indexing it with CPU indices copies through the CPU.
+    on_device: dict[torch.device, Tensor] = {}
+
+    def rows_of(values: Tensor) -> Tensor:
+        if values.device not in on_device:
+            on_device[values.device] = rows.to(values.device)
+        return values[on_device[values.device]]
+
     plain = {
-        field.name: getattr(rollout, field.name)[rows]
+        field.name: rows_of(getattr(rollout, field.name))
         for field in fields(Rollout)
         if field.name not in {"boards", "guesses"}
     }
     return Rollout(
-        boards={name: array[rows] for name, array in rollout.boards.items()},
-        guesses=Guess(deck=rollout.guesses.deck[rows], hand=rollout.guesses.hand[rows]),
+        boards={name: rows_of(array) for name, array in rollout.boards.items()},
+        guesses=Guess(deck=rows_of(rollout.guesses.deck), hand=rows_of(rollout.guesses.hand)),
         **plain,
     )
 

@@ -107,6 +107,7 @@ def test_build_decks_finds_the_best_deck_that_swaps_from_one_start_cannot_reach(
     candidates = build_decks(
         pool,
         cards=CARDS,
+        device=torch.device("cpu"),
         propose=random_proposer(rules=TWO_BASICS, generator=torch.Generator().manual_seed(0)),
         score=_colour_scorer,
         rules=TWO_BASICS,
@@ -157,7 +158,16 @@ def test_a_pool_with_too_few_spells_for_any_legal_deck_is_rejected() -> None:
     propose = random_proposer(rules=TWO_BASICS, generator=torch.Generator().manual_seed(0))
 
     with pytest.raises(NoLegalDeckError, match="at least 8 lands and can hold at most 5"):
-        build_decks((3, 7), cards=CARDS, propose=propose, score=_colour_scorer, rules=TWO_BASICS, proposals=4, rounds=1)
+        build_decks(
+            (3, 7),
+            cards=CARDS,
+            device=torch.device("cpu"),
+            propose=propose,
+            score=_colour_scorer,
+            rules=TWO_BASICS,
+            proposals=4,
+            rounds=1,
+        )
 
 
 def test_a_pool_with_too_few_spells_gets_rules_that_let_it_play_every_spell_it_has() -> None:
@@ -165,7 +175,14 @@ def test_a_pool_with_too_few_spells_gets_rules_that_let_it_play_every_spell_it_h
     propose = random_proposer(rules=rules, generator=torch.Generator().manual_seed(0))
 
     candidates = build_decks(
-        (3, 7), cards=CARDS, propose=propose, score=_colour_scorer, rules=rules, proposals=4, rounds=1
+        (3, 7),
+        cards=CARDS,
+        device=torch.device("cpu"),
+        propose=propose,
+        score=_colour_scorer,
+        rules=rules,
+        proposals=4,
+        rounds=1,
     )
 
     assert rules_for_pool(TWO_BASICS, tuple(range(2, CARDS))) == TWO_BASICS

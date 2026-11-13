@@ -174,6 +174,7 @@ def _build(
             candidates = build_decks(
                 pool,
                 cards=len(setup.pool),
+                device=learners.drafter.embedding.starting.device,
                 propose=model_proposer(learners.builder, rules=rules, generator=generator),
                 score=score,
                 rules=rules,
@@ -186,12 +187,12 @@ def _build(
     return played, best
 
 
-def _counts(decks: Sequence[Deck], *, cards: int) -> Tensor:
-    # Returns float [decks, cards], the copies of each card in each deck.
+def _counts(decks: Sequence[Deck], *, cards: int, device: torch.device) -> Tensor:
+    # Returns float [decks, cards] on `device`, the copies of each card in each deck.
     counts = torch.zeros(len(decks), cards)
     for row, deck in enumerate(decks):
         counts[row].index_add_(0, torch.tensor(deck), torch.ones(len(deck)))
-    return counts
+    return counts.to(device)
 
 
 def balanced_matchups(pods: int, *, seats: int, games_per_deck: int, rng: random.Random) -> list[tuple[int, int]]:
@@ -260,10 +261,11 @@ def _update_drafter(
     if not views:
         nothing: dict[str, float] = {}
         return nothing
-    reward = torch.tensor(rewards)
-    seen, picks, pack = view_tensors(views, cards=len(setup.pool), device=reward.device)
+    device = learners.drafter.embedding.starting.device
+    reward = torch.tensor(rewards, device=device)
+    seen, picks, pack = view_tensors(views, cards=len(setup.pool), device=device)
     logits = learners.drafter.forward(seen, picks, pack=pack)
-    loss = choice_loss(logits, torch.tensor(chosen), weights=reward - reward.mean())
+    loss = choice_loss(logits, torch.tensor(chosen, device=device), weights=reward - reward.mean())
     loss = loss - entropy(logits).mean() * dials.drafter_entropy
     if learners.human_drafter is not None and dials.human_pull > 0:
         with torch.no_grad():
@@ -309,8 +311,9 @@ def _update_deck_score(
     if not bool(seen_play.any()):
         nothing: dict[str, float] = {}
         return nothing
-    logits = run(learners.score, _counts(decks, cards=len(setup.pool))[seen_play])
-    loss = score_loss(logits, wins=wins[seen_play], games=played[seen_play])
+    device = learners.drafter.embedding.starting.device
+    logits = run(learners.score, _counts(decks, cards=len(setup.pool), device=device)[seen_play.to(device)])
+    loss = score_loss(logits, wins=wins[seen_play].to(device), games=played[seen_play].to(device))
     apply(loss, [learners.optimizers["deck_score"]], max_grad_norm=setup.max_grad_norm)
     return {"deck_score/loss": float(loss.detach())}
 
@@ -325,10 +328,13 @@ def _update_builder(
 ) -> Metrics:
     # Teaches the builder to write the top-scored deck the search found for each pool.
     cards = len(setup.pool)
-    pools = _counts([pool for record in records for pool in record.pools], cards=cards)
-    best = _counts([candidate.deck for candidate in best_decks], cards=cards)
+    device = learners.drafter.embedding.starting.device
+    pools = _counts([pool for record in records for pool in record.pools], cards=cards, device=device)
+    best = _counts([candidate.deck for candidate in best_decks], cards=cards, device=device)
     available, partial, chosen = writing_steps(best, pool_counts=pools, rules=setup.rules, generator=generator)
-    loss = choice_loss(run(learners.builder, available, partial), chosen, weights=torch.ones(len(chosen)))
+    loss = choice_loss(
+        run(learners.builder, available, partial), chosen, weights=torch.ones(len(chosen), device=device)
+    )
     apply(loss, [learners.optimizers["deck_builder"]], max_grad_norm=setup.max_grad_norm)
     return {"deck_builder/loss": float(loss.detach())}
 
