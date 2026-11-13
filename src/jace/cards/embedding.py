@@ -1,9 +1,11 @@
 """The one card embedding that every model reads.
 
-Each card starts from a fixed vector built from its rules text and its engine
-program. Training never changes that vector. It changes a small head shared by
-all cards, and optionally a bounded offset per card, so a card from a new set
-gets a usable embedding from its starting vector alone. The head's last layer
+Each card starts from a fixed vector. The loops build it from 17Lands play
+statistics and printed facts, and the drafter's pretraining can also use the
+card's rules text and engine program. Training never changes that vector. It
+changes a small head shared by all cards, and optionally a bounded offset per
+card, so a card from a new set gets an embedding from its starting vector
+alone, as long as that vector holds nothing a new card lacks. The head's last layer
 starts at zero, which makes the embedding equal the starting vector before
 any training.
 """
