@@ -171,15 +171,16 @@ def play_games[T](
     `game_seconds` is recorded as `Outcome.HUNG`: its process is killed and
     a new one plays the games that process had left. A game the engine
     fails on, cuts short, or whose board outgrows the board arrays is
-    recorded as `Outcome.ABANDONED`. No game is skipped or played twice.
+    recorded as `Outcome.ABANDONED`, and so is a game during which the
+    engine ends its process. No game is skipped or played twice.
 
     `check_guesses` is called in the child process, once for each seat that
     guessed in a game with a result. It gets that seat's hand guesses and
     the opponent's true hand at each, both float `[decisions, cards]`, and
     what it returns comes back in `Played.guesses`. It must be a
     module-level function, and its result should be small, because it
-    crosses a pipe. Raises `WorkerDiedError` when a child process ends for
-    any reason but the time limit.
+    crosses a pipe. Raises `WorkerDiedError` when a child process ends
+    before it is ready to play.
     """
     shares = [games[first::workers] for first in range(min(workers, len(games)))]
 
@@ -247,7 +248,7 @@ def _attempt[T](
     decklists: Literal["open", "closed"],
 ) -> list[Played[T]]:
     # Plays `games` in order in one new process and returns the results it reported, which stop
-    # after the first game that hangs. The time limit starts when the process says it is ready,
+    # after the first game that hangs or ends the process. The time limit starts when the process says it is ready,
     # so loading the players does not count against the first game.
     context = multiprocessing.get_context("spawn")
     ours, theirs = context.Pipe()
@@ -260,19 +261,26 @@ def _attempt[T](
     process.start()
     theirs.close()
     played: list[Played[T]] = []
+    crashed = False
     try:
-        ours.recv()
+        try:
+            ours.recv()
+        except EOFError as error:
+            # The process ended before it was ready, so its players or the engine failed to load.
+            process.join()
+            raise WorkerDiedError(process.exitcode) from error
         while len(played) < len(games) and ours.poll(game_seconds):
             played.append(ours.recv())
-    except EOFError as error:
-        process.join()
-        raise WorkerDiedError(process.exitcode) from error
+    except EOFError:
+        # The engine can panic inside a game, which ends the process. That game has no result.
+        crashed = True
     finally:
         process.kill()
         process.join()
         ours.close()
     if len(played) < len(games):
-        played.append(Played(outcome=Outcome.HUNG, decisions=0, guesses=(None, None)))
+        outcome = Outcome.ABANDONED if crashed else Outcome.HUNG
+        played.append(Played(outcome=outcome, decisions=0, guesses=(None, None)))
     return played
 
 
