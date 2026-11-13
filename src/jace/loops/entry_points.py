@@ -118,6 +118,7 @@ class PlayArguments(RunArguments):
     play_layers: int
     play_heads: int
     guess_cards: int
+    deck_guess_cards: int
     embedding_hidden: int
 
 
@@ -148,7 +149,8 @@ def add_play_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--play-width", type=int, default=128)
     parser.add_argument("--play-layers", type=int, default=2)
     parser.add_argument("--play-heads", type=int, default=4)
-    parser.add_argument("--guess-cards", type=int, default=8)
+    parser.add_argument("--guess-cards", type=int, default=8, help="hand-guess tokens the player sees")
+    parser.add_argument("--deck-guess-cards", type=int, default=16, help="deck-guess tokens the player sees")
     parser.add_argument("--embedding-hidden", type=int, default=256)
 
 
@@ -227,7 +229,12 @@ def build_play_models(arguments: PlayArguments, cards: SetCards) -> PlayModels:
     shape = {"width": arguments.play_width, "layers": arguments.play_layers, "heads": arguments.play_heads}
     return PlayModels(
         player=PlayerModel(
-            embedding, engine_to_card=engine_to_card, layout=layout, guess_cards=arguments.guess_cards, **shape
+            embedding,
+            engine_to_card=engine_to_card,
+            layout=layout,
+            guess_cards=arguments.guess_cards,
+            deck_guess_cards=arguments.deck_guess_cards,
+            **shape,
         ),
         guess=GuessModel(embedding, engine_to_card=engine_to_card, layout=layout, **shape),
         embedding=embedding,

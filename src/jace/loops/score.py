@@ -133,7 +133,12 @@ def _model_player(
     embedding = CardEmbedding(cards.features, hidden=numbers["embedding_hidden"], offset_bound=None)
     shape = {"width": numbers["play_width"], "layers": numbers["play_layers"], "heads": numbers["play_heads"]}
     player = PlayerModel(
-        embedding, engine_to_card=engine_to_card, layout=layout, guess_cards=numbers["guess_cards"], **shape
+        embedding,
+        engine_to_card=engine_to_card,
+        layout=layout,
+        guess_cards=numbers["guess_cards"],
+        deck_guess_cards=numbers["deck_guess_cards"],
+        **shape,
     )
     guess = GuessModel(embedding, engine_to_card=engine_to_card, layout=layout, **shape)
     load_checkpoint(run.parent, _checkpoint(run, "embedding", update=update), into=embedding, keeping=None)

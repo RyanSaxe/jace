@@ -40,8 +40,10 @@ def random_policy(boards: Boards, guess: Guess) -> tuple[Tensor, Tensor]:
 class PlayerModel(nn.Module):
     """Score every legal action and estimate the chance of winning.
 
-    `policy` satisfies the `Policy` type. The guess enters as `guess_cards`
-    tokens, one for each of the cards the opponent is likeliest to hold. No
+    `policy` satisfies the `Policy` type. The guess enters as tokens:
+    `guess_cards` for the cards the opponent is likeliest to hold, and
+    `deck_guess_cards` for the cards guessed to make up the largest shares
+    of the opponent's unseen cards. No
     weight is sized by the card pool, so the model plays with a larger pool
     once `embedding` and `engine_to_card` are replaced by ones that cover it.
     The embedding is shared and trained by its own optimizer: leave
@@ -58,11 +60,13 @@ class PlayerModel(nn.Module):
         layers: int,
         heads: int,
         guess_cards: int,
+        deck_guess_cards: int,
     ) -> None:
         super().__init__()
         card_width = embedding.starting.shape[1]
         self.embedding: CardEmbedding = embedding
         self.guess_cards: int = guess_cards
+        self.deck_guess_cards: int = deck_guess_cards
         # engine_to_card: int64 [engine definition ids] -> CardId, -1 for a definition the pool lacks.
         self.engine_to_card: Tensor
         self.register_buffer("engine_to_card", engine_to_card.detach().clone(), persistent=False)
@@ -70,6 +74,8 @@ class PlayerModel(nn.Module):
         self.entities: EntityEncoder = EntityEncoder(layout, card_width=card_width, width=width)
         self.guessed_card: nn.Linear = nn.Linear(card_width, width)
         self.guessed_chance: nn.Linear = nn.Linear(1, width)
+        self.guessed_deck_card: nn.Linear = nn.Linear(card_width, width)
+        self.guessed_deck_share: nn.Linear = nn.Linear(1, width)
         self.encoder: nn.TransformerEncoder = transformer(width, layers=layers, heads=heads)
         self.actions: nn.Linear = nn.Linear(layout.action_features, width)
         self.action_head: nn.Sequential = nn.Sequential(
@@ -78,7 +84,7 @@ class PlayerModel(nn.Module):
         self.value_head: nn.Sequential = nn.Sequential(nn.Linear(width, width), nn.GELU(), nn.Linear(width, 1))
 
     def policy(self, boards: Boards, guess: Guess) -> tuple[Tensor, Tensor]:
-        # guess.hand: float [b, cards]. Returns action logits [b, max_actions], illegal ones at -inf,
+        # guess.hand, guess.deck: float [b, cards]. Returns action logits [b, max_actions], illegal ones at -inf,
         # and the acting seat's chance to win, float [b].
         tokens = board_tokens(boards, layout=self.layout, engine_to_card=self.engine_to_card)
         pool = torch.arange(self.embedding.starting.shape[0], device=self.embedding.starting.device)
@@ -87,8 +93,13 @@ class PlayerModel(nn.Module):
         entities = self.entities.embed(tokens, card_table)
         chances, likeliest = guess.hand.topk(min(self.guess_cards, guess.hand.shape[-1]), dim=-1)
         guessed = run(self.guessed_card, card_table[likeliest]) + run(self.guessed_chance, chances[..., None])
-        sequence = torch.cat((entities, guessed), dim=1)
-        mask = torch.cat((tokens.entity_mask, torch.ones_like(likeliest, dtype=torch.bool)), dim=1)
+        shares, largest = guess.deck.topk(min(self.deck_guess_cards, guess.deck.shape[-1]), dim=-1)
+        guessed_deck = run(self.guessed_deck_card, card_table[largest]) + run(
+            self.guessed_deck_share, shares[..., None]
+        )
+        sequence = torch.cat((entities, guessed, guessed_deck), dim=1)
+        guess_mask = torch.ones((likeliest.shape[0], likeliest.shape[1] + largest.shape[1]), dtype=torch.bool)
+        mask = torch.cat((tokens.entity_mask, guess_mask.to(likeliest.device)), dim=1)
         encoded = encode_real(self.encoder, sequence, mask=mask)
 
         real = mask[..., None]  # bool [b, entities + guessed, 1]

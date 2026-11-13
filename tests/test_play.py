@@ -37,7 +37,14 @@ def _models(cards: int) -> tuple[PlayerModel, GuessModel]:
     embedding = CardEmbedding(starting[:cards], hidden=CARD_WIDTH, offset_bound=None)
     engine_to_card = torch.arange(ENGINE_DEFINITIONS)
     player = PlayerModel(
-        embedding, engine_to_card=engine_to_card, layout=board_layout(), width=64, layers=2, heads=4, guess_cards=8
+        embedding,
+        engine_to_card=engine_to_card,
+        layout=board_layout(),
+        width=64,
+        layers=2,
+        heads=4,
+        guess_cards=8,
+        deck_guess_cards=8,
     )
     guesser = GuessModel(embedding, engine_to_card=engine_to_card, layout=board_layout(), width=64, layers=2, heads=4)
     return player.eval(), guesser.eval()
@@ -72,6 +79,22 @@ def test_player_gives_no_probability_to_illegal_actions_on_real_boards() -> None
     assert torch.equal(probabilities > 0, legal)
     assert torch.allclose(probabilities.sum(dim=-1), torch.ones(3))
     assert bool(((win_chance > 0) & (win_chance < 1)).all())
+
+
+def test_player_reads_both_the_hand_guess_and_the_deck_guess() -> None:
+    boards = _real_boards()
+    player, _ = _models(CARDS)
+    guess = _some_guess((3, CARDS), seed=1)
+    other = _some_guess((3, CARDS), seed=2)
+
+    with torch.no_grad():
+        logits, _ = player.policy(boards, guess)
+        with_other_hand, _ = player.policy(boards, Guess(deck=guess.deck, hand=other.hand))
+        with_other_deck, _ = player.policy(boards, Guess(deck=other.deck, hand=guess.hand))
+
+    legal = boards["actions_valid"] > 0
+    assert not torch.allclose(logits[legal], with_other_hand[legal])
+    assert not torch.allclose(logits[legal], with_other_deck[legal])
 
 
 def test_random_policy_spreads_probability_evenly_over_legal_actions() -> None:

@@ -43,7 +43,14 @@ def test_real_games_train_the_player_and_the_guess_model_for_one_step() -> None:
     embedding = CardEmbedding(torch.randn(len(pool), 16), hidden=16, offset_bound=None)
     engine_to_card = engine_card_ids(pool)
     player = PlayerModel(
-        embedding, engine_to_card=engine_to_card, layout=layout, width=32, layers=1, heads=2, guess_cards=4
+        embedding,
+        engine_to_card=engine_to_card,
+        layout=layout,
+        width=32,
+        layers=1,
+        heads=2,
+        guess_cards=4,
+        deck_guess_cards=4,
     )
     guess = GuessModel(embedding, engine_to_card=engine_to_card, layout=layout, width=32, layers=1, heads=2)
 
