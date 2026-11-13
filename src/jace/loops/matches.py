@@ -93,7 +93,7 @@ def model_player(player: PlayerModel, guess: GuessModel, *, history: int) -> Pla
     """
     frozen_player = copy.deepcopy(player).cpu().requires_grad_(requires_grad=False)
     frozen_guess = copy.deepcopy(guess).cpu().requires_grad_(requires_grad=False)
-    cards = frozen_player.embedding.starting.shape[0]
+    cards = frozen_player.embedding.cards
     return functools.partial(
         model_seat, policy=frozen_player.policy, guesser=frozen_guess.guess, cards=cards, history=history
     )

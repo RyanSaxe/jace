@@ -1,4 +1,4 @@
-"""Train the drafter and the card embedding to copy human picks, before any self-play.
+"""Train the drafter and the card encoder to copy human picks, before any self-play.
 
 Each step scores every pick of a batch of whole human drafts in one pass
 and lowers the weighted cross-entropy of the card the human took, over the
@@ -9,10 +9,14 @@ ignores the sample weights. The two penalties of an earlier human-trained
 drafter, against taking rares and against costly cards, are hand-added
 priors: they are off unless `PickPriors` is passed.
 
-Run it with `uv run python -m jace.loops.pretrain --help`. The card set
-must already be downloaded with `uv run spells add <set>`. When
-`--starting-vectors` names `text`, the first run downloads the text model
-from Hugging Face.
+The card encoder reads each card's text, engine program and printed facts,
+and the pick loss trains it with the drafter, each with its own optimizer.
+It is saved as the run's "embedding" checkpoint, which `pretrain_decks` and
+self-play read frozen. Run it with
+`uv run python -m jace.loops.pretrain --help`. The card set must already be
+downloaded with `uv run spells add <set>`, and the first run on a data
+folder without cached text vectors downloads the text model from Hugging
+Face.
 """
 
 import argparse
@@ -28,23 +32,19 @@ import torch
 from torch import Tensor
 from torch.optim import Optimizer
 
-from jace.cards import CardEmbedding, Rarity, own_parameters
-from jace.data import (
-    TEXT_MODEL,
-    HumanDrafts,
-    SetCards,
-    SetData,
-    card_table,
-    card_texts,
-    load_drafts,
-    program_vectors,
-    read_set,
-    text_vectors,
-)
-from jace.data.hugging_face import hugging_face_encoder
+from jace.cards import FIRST_PROGRAM_TOKEN, CardEncoder, Rarity, own_parameters
+from jace.data import HumanDrafts, SetCards, card_table, load_drafts, read_set
 from jace.draft import DrafterModel
-from jace.engine.manabot import engine_cards
-from jace.loops.entry_points import ADAM_BETAS, RunArguments, add_run_flags, device_named, start_run
+from jace.engine.manabot import engine_cards, program_vocabulary
+from jace.loops.entry_points import (
+    ADAM_BETAS,
+    RunArguments,
+    add_card_flags,
+    add_run_flags,
+    card_inputs,
+    device_named,
+    start_run,
+)
 from jace.loops.schedules import RateScale, current_rates, scale_rates, warm_up_then_decay
 from jace.tracking import Running, log_update, save_checkpoint, writing
 from jace.train import apply, choice_loss
@@ -66,9 +66,6 @@ __all__ = (
 type PickScorer = Callable[[Tensor, Tensor], Tensor]
 
 _TOP_RANKS = (1, 2, 3)
-# What a starting vector can be made from, in the order the parts are joined.
-_SOURCES = ("statistics", "text", "program")
-_PROGRAM_WIDTH = 64
 _EVALUATE_DRAFTS = 512
 
 
@@ -146,14 +143,14 @@ def pretrain_drafter(
 ) -> tuple[CurvePoint, ...]:
     """Train `model` on the drafts that are not held out and return its learning curve.
 
-    `optimizers` holds the drafter's optimizer and the card embedding's, and
+    `optimizers` holds the drafter's optimizer and the card encoder's, and
     every step moves both. Each one's learning rate is its rate at the call
     times `rate_scale(step)`. `generator` draws the training batches and
     lives on the CPU. Every point of the curve is also logged to `run` under
     "drafter". The last point holds the final held-out accuracy.
     """
-    device = model.embedding.starting.device
-    cards = model.embedding.starting.shape[0]
+    device = model.embedding.device
+    cards = model.embedding.cards
     packs, picks, weights = drafts.packs.to(device), drafts.picks.to(device).long(), drafts.weights.to(device)
     training = (~drafts.held_out).nonzero().squeeze(1)
     held_out = drafts.held_out.nonzero().squeeze(1)
@@ -251,9 +248,9 @@ class _Arguments(RunArguments):
     width: int
     layers: int
     heads: int
-    embedding_hidden: int
-    starting_vectors: str
-    text_model: str
+    card_width: int
+    card_layers: int
+    card_heads: int
     rate: float
     rare_penalty: float
     mana_penalty: float
@@ -263,6 +260,7 @@ class _Arguments(RunArguments):
 def _arguments(argv: Sequence[str]) -> _Arguments:
     parser = argparse.ArgumentParser(description="Train the drafter on human picks from 17Lands.")
     add_run_flags(parser)
+    add_card_flags(parser)
     parser.add_argument("--device", default="auto", help="cpu, mps or cuda; auto takes mps when it is available")
     parser.add_argument("--steps", type=int, required=True, help="training steps")
     parser.add_argument("--drafts-per-step", type=int, default=128)
@@ -270,37 +268,11 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument("--width", type=int, default=256)
     parser.add_argument("--layers", type=int, default=4)
     parser.add_argument("--heads", type=int, default=8)
-    parser.add_argument("--embedding-hidden", type=int, default=256)
-    parser.add_argument(
-        "--starting-vectors",
-        default="statistics",
-        help="what a card's starting vector is made from: a comma-separated list of statistics, text and program",
-    )
-    parser.add_argument("--text-model", default=TEXT_MODEL, help="the Hugging Face model that embeds card text")
     parser.add_argument("--rate", type=float, default=5e-4, help="the peak learning rate of both optimizers")
     parser.add_argument("--rare-penalty", type=float, default=0.0, help="weight of the rare-drafting prior, 0 for off")
     parser.add_argument("--mana-penalty", type=float, default=0.0, help="weight of the mana-cost prior, 0 for off")
     parser.add_argument("--mana-margin", type=float, default=1.0)
     return _Arguments(**vars(parser.parse_args(argv)))
-
-
-def _starting_vectors(arguments: _Arguments, *, data: SetData, cards: SetCards) -> Tensor:
-    # Returns float [cards, width]: the sources `--starting-vectors` names, side by side in `_SOURCES` order.
-    asked = set(arguments.starting_vectors.split(","))
-    if not asked or not asked <= set(_SOURCES):
-        message = f"--starting-vectors takes a comma-separated list of {', '.join(_SOURCES)}"
-        raise ValueError(message)
-    sources = {"statistics": cards.features}
-    if "text" in asked:
-        sources["text"] = text_vectors(
-            card_texts(data.attributes),
-            encode=hugging_face_encoder(arguments.text_model, device=torch.device("cpu")),
-            model_name=arguments.text_model,
-            cache_dir=arguments.data_dir,
-        )
-    if "program" in asked:
-        sources["program"] = program_vectors(cards.pool, width=_PROGRAM_WIDTH)
-    return torch.cat([sources[source] for source in _SOURCES if source in asked], dim=1)
 
 
 def _priors(arguments: _Arguments, cards: SetCards, *, device: torch.device) -> PickPriors | None:
@@ -365,14 +337,19 @@ def main(argv: Sequence[str]) -> None:
     drafts = load_drafts(
         data.picks, pool=cards.pool, cache_dir=arguments.data_dir, held_out_share=arguments.held_out_share
     )
-    starting = _starting_vectors(arguments, data=data, cards=cards)
-    embedding = CardEmbedding(starting, hidden=arguments.embedding_hidden, offset_bound=None)
+    encoder = CardEncoder(
+        card_inputs(data, cards, data_dir=arguments.data_dir),
+        width=arguments.card_width,
+        program_vocabulary=FIRST_PROGRAM_TOKEN + len(program_vocabulary()),
+        program_layers=arguments.card_layers,
+        heads=arguments.card_heads,
+    )
     model = DrafterModel(
-        embedding, width=arguments.width, layers=arguments.layers, heads=arguments.heads, picks=drafts.picks.shape[1]
+        encoder, width=arguments.width, layers=arguments.layers, heads=arguments.heads, picks=drafts.picks.shape[1]
     ).to(device)
     optimizers = [
-        torch.optim.Adam(own_parameters(model, embedding), lr=arguments.rate, betas=ADAM_BETAS),
-        torch.optim.Adam(embedding.parameters(), lr=arguments.rate, betas=ADAM_BETAS),
+        torch.optim.Adam(own_parameters(model, encoder), lr=arguments.rate, betas=ADAM_BETAS),
+        torch.optim.Adam(encoder.parameters(), lr=arguments.rate, betas=ADAM_BETAS),
     ]
     settings = PretrainSettings(
         steps=arguments.steps,
@@ -397,7 +374,7 @@ def main(argv: Sequence[str]) -> None:
         )
         seconds = time.perf_counter() - started
         save_checkpoint(run, model="drafter", update=arguments.steps, module=model)
-        save_checkpoint(run, model="embedding", update=arguments.steps, module=embedding)
+        save_checkpoint(run, model="embedding", update=arguments.steps, module=encoder)
 
     uniform, by_ata = _baselines(drafts, cards, device=device, settings=settings)
     # A step trains on the picks with a weight above zero, which leaves out a first pick rebuilt from the pool.

@@ -10,7 +10,7 @@ import pytest
 import torch
 from torch import Tensor
 
-from jace.cards import CardEmbedding, Pool, own_parameters
+from jace.cards import FIRST_PROGRAM_TOKEN, NO_PROGRAM_TOKEN, CardEncoder, CardInputs, CardTable, Pool, own_parameters
 from jace.decks import (
     BuildRules,
     DeckBuilderModel,
@@ -35,9 +35,9 @@ TWO_BASICS = BuildRules(
 NO_BASICS = BuildRules(size=10, basics=(), nonbasic_lands=frozenset({NONBASIC_LAND}), min_lands=3, max_lands=5)
 
 
-def _embedding(cards: int) -> CardEmbedding:
-    starting = torch.randn((cards, 8), generator=torch.Generator().manual_seed(cards))
-    return CardEmbedding(starting, hidden=8, offset_bound=None)
+def _embedding(cards: int) -> CardTable:
+    vectors = torch.randn((cards, 8), generator=torch.Generator().manual_seed(cards))
+    return CardTable(vectors)
 
 
 def _counts(pool: Pool) -> Tensor:
@@ -125,7 +125,7 @@ def test_build_decks_finds_the_best_deck_that_swaps_from_one_start_cannot_reach(
 def test_models_give_the_same_answers_when_the_card_pool_grows() -> None:
     small_embedding = _embedding(6)
     extra = torch.randn((9, 8), generator=torch.Generator().manual_seed(1))
-    large_embedding = CardEmbedding(torch.cat((small_embedding.starting, extra)), hidden=8, offset_bound=None)
+    large_embedding = CardTable(torch.cat((small_embedding.table, extra)))
     deck = torch.tensor([[2.0, 0.0, 1.0, 0.0, 3.0, 0.0]])
     available = torch.tensor([[1.0, 2.0, 0.0, 1.0, 4.0, 0.0]])
     padding = torch.zeros((1, 9))
@@ -190,7 +190,13 @@ def test_a_pool_with_too_few_spells_gets_rules_that_let_it_play_every_spell_it_h
 
 
 def test_a_deck_models_own_parameters_hold_none_of_the_shared_embeddings() -> None:
-    embedding = _embedding(CARDS)
+    generator = torch.Generator().manual_seed(0)
+    inputs = CardInputs(
+        text=torch.randn((CARDS, 4), generator=generator),
+        program=torch.full((CARDS, 1), NO_PROGRAM_TOKEN),
+        printed=torch.randn((CARDS, 3), generator=generator),
+    )
+    embedding = CardEncoder(inputs, width=8, program_vocabulary=FIRST_PROGRAM_TOKEN, program_layers=1, heads=2)
     shared = {id(parameter) for parameter in embedding.parameters()}
 
     for model in (

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import torch
 
-from jace.cards import CardEmbedding
+from jace.cards import CardTable
 from jace.data import HumanDecks
 from jace.decks import BuildRules, DeckBuilderModel, DeckScore, random_proposer
 from jace.loops.pretrain_decks import (
@@ -56,7 +56,7 @@ def test_pretraining_the_score_on_decks_that_win_with_one_card_beats_the_overall
     torch.manual_seed(0)
     generator = torch.Generator().manual_seed(0)
     decks = _lowest_spell_decks(256, generator=generator)
-    model = DeckScore(CardEmbedding(torch.randn(_CARDS, 8), hidden=8, offset_bound=None), width=16, layers=1, heads=2)
+    model = DeckScore(CardTable(torch.randn(_CARDS, 8)), width=16, layers=1, heads=2)
     settings = DeckSettings(steps=150, decks_per_step=32, evaluate_every=50, evaluate_decks=64, max_grad_norm=1.0)
     clock = functools.partial(datetime, 2026, 1, 1, tzinfo=UTC)
     identity = Identity(config={}, seed=0, jace_commit="test", manabot_commit="test", inputs=())
@@ -85,9 +85,8 @@ def test_pretraining_the_builder_on_decks_that_follow_a_rule_rebuilds_held_out_d
     torch.manual_seed(0)
     generator = torch.Generator().manual_seed(0)
     decks = _lowest_spell_decks(256, generator=generator)
-    model = DeckBuilderModel(
-        CardEmbedding(torch.randn(_CARDS, 8), hidden=8, offset_bound=None), width=16, layers=1, heads=2
-    )
+    # The vectors are wider than there are cards, so a linear map of them can put the cards in any order.
+    model = DeckBuilderModel(CardTable(torch.randn(_CARDS, 16)), width=16, layers=1, heads=2)
     settings = DeckSettings(steps=200, decks_per_step=16, evaluate_every=100, evaluate_decks=64, max_grad_norm=1.0)
     clock = functools.partial(datetime, 2026, 1, 1, tzinfo=UTC)
     identity = Identity(config={}, seed=0, jace_commit="test", manabot_commit="test", inputs=())

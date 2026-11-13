@@ -2,7 +2,7 @@
 
 `DeckScore` reads a deck as a set of distinct cards with copy counts, so the
 order of the cards cannot matter and a deck of any size fits. Its only
-knowledge of the cards comes through the shared `CardEmbedding`, and none of
+knowledge of the cards comes through the shared `CardVectors`, and none of
 its own parameters has a slot per card, so it scores decks that hold cards
 from a set it was not trained on. `CardSetEncoder` is the part it shares with
 the deck builder's model: both turn per-card amounts into one vector.
@@ -14,7 +14,7 @@ from typing import override
 import torch
 from torch import Tensor, nn
 
-from jace.cards import CardEmbedding
+from jace.cards import CardVectors
 from jace.modules import DROPOUT, FEEDFORWARD_EXPANSION
 
 __all__ = ("CardSetEncoder", "DeckScore", "EmptyCardSetError", "Scorer")
@@ -38,10 +38,10 @@ class CardSetEncoder(nn.Module):
     stays in the range the encoding saw for small counts.
     """
 
-    def __init__(self, embedding: CardEmbedding, *, amounts: int, width: int, layers: int, heads: int) -> None:
+    def __init__(self, embedding: CardVectors, *, amounts: int, width: int, layers: int, heads: int) -> None:
         super().__init__()
-        self.embedding: CardEmbedding = embedding
-        self.project: nn.Linear = nn.Linear(embedding.starting.shape[1], width)
+        self.embedding: CardVectors = embedding
+        self.project: nn.Linear = nn.Linear(embedding.width, width)
         self.amount: nn.Sequential = nn.Sequential(nn.Linear(amounts, width), nn.GELU(), nn.Linear(width, width))
         layer = nn.TransformerEncoderLayer(
             width,
@@ -73,7 +73,7 @@ class CardSetEncoder(nn.Module):
 
 
 class DeckScore(nn.Module):
-    def __init__(self, embedding: CardEmbedding, *, width: int, layers: int, heads: int) -> None:
+    def __init__(self, embedding: CardVectors, *, width: int, layers: int, heads: int) -> None:
         super().__init__()
         self.cards: CardSetEncoder = CardSetEncoder(embedding, amounts=1, width=width, layers=layers, heads=heads)
         self.head: nn.Linear = nn.Linear(width, 1)

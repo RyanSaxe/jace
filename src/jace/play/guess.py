@@ -13,7 +13,7 @@ import math
 import torch
 from torch import Tensor, nn
 
-from jace.cards import CardEmbedding
+from jace.cards import CardVectors
 from jace.engine import BoardLayout
 from jace.modules import encode_real, transformer
 from jace.play.tokens import EntityEncoder, board_tokens
@@ -42,13 +42,13 @@ class GuessModel(nn.Module):
     `guess` satisfies the `Guesser` type. No
     weight is sized by the card pool, so the model scores a larger pool once
     `embedding` and `engine_to_card` are replaced by ones that cover it. The
-    embedding is shared and trained by its own optimizer: leave
-    `embedding.parameters()` out of this model's optimizer.
+    card vectors are shared with the other models and are not this model's
+    to train: build its optimizer from `own_parameters`.
     """
 
     def __init__(
         self,
-        embedding: CardEmbedding,
+        embedding: CardVectors,
         *,
         engine_to_card: Tensor,
         layout: BoardLayout,
@@ -57,8 +57,8 @@ class GuessModel(nn.Module):
         heads: int,
     ) -> None:
         super().__init__()
-        card_width = embedding.starting.shape[1]
-        self.embedding: CardEmbedding = embedding
+        card_width = embedding.width
+        self.embedding: CardVectors = embedding
         self.width: int = width
         # engine_to_card: int64 [engine definition ids] -> CardId, -1 for a definition the pool lacks.
         self.engine_to_card: Tensor
@@ -77,7 +77,7 @@ class GuessModel(nn.Module):
         # earlier.guesses.deck, .hand: float [b, t, cards], this game's guesses so far, newest first; t may be 0.
         # earlier.mask: bool [b, t]. Returns deck and hand, each float [b, cards].
         tokens = board_tokens(boards, layout=self.layout, engine_to_card=self.engine_to_card)
-        pool = torch.arange(self.embedding.starting.shape[0], device=self.embedding.starting.device)
+        pool = torch.arange(self.embedding.cards, device=self.embedding.device)
         card_table = self.embedding(pool)  # [cards, card_width]
 
         entities = self.entities.embed(tokens, card_table)

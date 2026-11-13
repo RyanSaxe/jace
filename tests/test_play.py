@@ -14,7 +14,7 @@ import pytest
 import torch
 from torch import Tensor
 
-from jace.cards import CardEmbedding
+from jace.cards import CardTable
 from jace.engine.manabot import board_layout
 from jace.play import Boards, Earlier, Guess, GuessModel, PlayerModel, random_policy
 
@@ -34,7 +34,7 @@ def _real_boards() -> dict[str, Tensor]:
 def _models(cards: int) -> tuple[PlayerModel, GuessModel]:
     torch.manual_seed(0)
     starting = torch.randn(MORE_CARDS, CARD_WIDTH, generator=torch.Generator().manual_seed(0))
-    embedding = CardEmbedding(starting[:cards], hidden=CARD_WIDTH, offset_bound=None)
+    embedding = CardTable(starting[:cards])
     engine_to_card = torch.arange(ENGINE_DEFINITIONS)
     player = PlayerModel(
         embedding,

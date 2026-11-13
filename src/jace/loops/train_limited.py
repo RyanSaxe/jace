@@ -3,15 +3,16 @@
 This is the limited loop run for real: packs of the set's playable cards are
 drafted, a deck is built from every pool, and the decks play each other on
 the engine in worker processes, every deck the same number of games and
-every game to its end. The drafter, the deck models and the card embedding
-can start from checkpoints trained on human data; the player and the guess
-model always start untrained. A model started from a checkpoint reads cards
-through the embedding of `--embedding-run`, which must then be given,
-because a model's weights fit only the embedding they were trained with.
-The embedding itself is not trained here, so a model whose rate is zero
-does not change. Every few iterations the player is scored with the scoring
-harness on paired deals of human decks it never trains on, against random
-play, scripted greedy and the heuristic player. Run it with
+every game to its end. Every model reads cards through the card vectors of
+`--embedding-run`, frozen into a `CardTable`. The drafter and the deck
+models can start from checkpoints trained on human data; the player and
+the guess model always start untrained. A model's weights fit only the card
+vectors they were trained with, so `--embedding-run` should be the run its
+checkpoint came from or one that read the same vectors. The table is not
+trained here, so a model whose rate is zero does not change. Every few
+iterations the player is scored with the scoring harness on paired deals of
+human decks it never trains on, against random play, scripted greedy and
+the heuristic player. Run it with
 `uv run python -m jace.loops.train_limited --help`.
 """
 
@@ -30,8 +31,8 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from jace.cards import CardEmbedding, Rarity, own_parameters
-from jace.data import SetCards
+from jace.cards import CardPool, CardTable, Rarity, own_parameters
+from jace.data import read_set
 from jace.decks import DeckBuilderModel, DeckScore
 from jace.draft import TLA_PLAY_BOOSTER, DrafterModel, DraftFormat
 from jace.engine import Matchup
@@ -41,8 +42,10 @@ from jace.loops.entry_points import (
     add_play_flags,
     add_run_flags,
     build_play_models,
+    card_inputs,
     device_named,
     limited_rules,
+    load_card_table,
     play_actor,
     play_weights,
     score_player,
@@ -85,7 +88,7 @@ class _Arguments(PlayArguments):
     iterations: int
     drafter_run: Path | None
     decks_run: Path | None
-    embedding_run: Path | None
+    embedding_run: Path
     checkpoint_every: int
     resume: Path | None
     pods: int
@@ -119,7 +122,8 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument(
         "--embedding-run",
         type=Path,
-        help="a run folder whose newest card embedding to start from; required with either flag above",
+        required=True,
+        help="a drafter pretraining, deck pretraining or self-play run folder whose newest card vectors to read",
     )
     parser.add_argument(
         "--checkpoint-every", type=int, default=0, help="also save every checkpoint each N iterations; 0 for never"
@@ -144,10 +148,6 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument("--lam-value", type=float, default=0.8)
     parser.add_argument("--keep-quantile", type=float, default=0.75, help="learn from decisions above this quantile")
     arguments = _Arguments(**vars(parser.parse_args(argv)))
-    starts_a_model = arguments.drafter_run is not None or arguments.decks_run is not None
-    if starts_a_model and arguments.embedding_run is None:
-        # A model's weights mean something only with the card embedding they were trained on.
-        parser.error("--drafter-run and --decks-run need --embedding-run, the run whose card embedding the models read")
     if arguments.resume is not None and arguments.drafter_run is None:
         started_with = json.loads((arguments.resume / "identity.json").read_text())["config"]["drafter_run"]
         if started_with is not None:
@@ -158,13 +158,13 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
 
 @dataclass(frozen=True, slots=True)
 class _Models:
-    # Every trained thing of a run. The five models share `embedding`.
+    # Every trained thing of a run. The five models share `embedding`, which is not trained.
     player: PlayerModel
     guess: GuessModel
     drafter: DrafterModel
     builder: DeckBuilderModel
     score: DeckScore
-    embedding: CardEmbedding
+    embedding: CardTable
 
 
 def _by_name(models: _Models) -> dict[ModelName, nn.Module]:
@@ -178,9 +178,8 @@ def _by_name(models: _Models) -> dict[ModelName, nn.Module]:
     }
 
 
-def _build_models(arguments: _Arguments, cards: SetCards, *, picks: int) -> _Models:
-    play = build_play_models(arguments, cards)
-    embedding = play.embedding
+def _build_models(arguments: _Arguments, embedding: CardTable, *, pool: CardPool, picks: int) -> _Models:
+    play = build_play_models(arguments, embedding, pool=pool)
     deck_shape = {"width": arguments.deck_width, "layers": arguments.deck_layers, "heads": arguments.deck_heads}
     return _Models(
         player=play.player,
@@ -199,11 +198,10 @@ def _build_models(arguments: _Arguments, cards: SetCards, *, picks: int) -> _Mod
 
 
 def _load_inputs(arguments: _Arguments, models: _Models) -> tuple[CheckpointRef, ...]:
-    # Loads the newest checkpoints of the runs the arguments name and returns their references.
-    # Only `--embedding-run` sets the shared embedding: a model's checkpoint never replaces it.
+    # Loads the newest model checkpoints of the runs the arguments name and returns their references.
+    # A model's checkpoint never replaces the shared card table.
     modules = _by_name(models)
     sources: list[tuple[Path | None, ModelName]] = [
-        (arguments.embedding_run, "embedding"),
         (arguments.drafter_run, "drafter"),
         (arguments.decks_run, "deck_builder"),
         (arguments.decks_run, "deck_score"),
@@ -212,8 +210,7 @@ def _load_inputs(arguments: _Arguments, models: _Models) -> tuple[CheckpointRef,
     for run_folder, model in sources:
         if run_folder is not None:
             ref = latest_checkpoint(run_folder, model)
-            keeping = None if model == "embedding" else models.embedding
-            load_checkpoint(run_folder.parent, ref, into=modules[model], keeping=keeping)
+            load_checkpoint(run_folder.parent, ref, into=modules[model], keeping=models.embedding)
             inputs.append(ref)
     return tuple(inputs)
 
@@ -311,14 +308,18 @@ def main(argv: Sequence[str]) -> None:
     """
     arguments = _arguments(argv)
     torch.manual_seed(arguments.seed)
-    cards = set_cards(arguments.set_code)
+    data = read_set(arguments.set_code)
+    cards = set_cards(data)
     pool = cards.pool
     playable = {rarity: [card for card in pool.of_rarity(rarity) if pool[card].program] for rarity in Rarity}
     draft_format = DraftFormat(seats=_SEATS_IN_A_POD, rounds=_BOOSTERS_EACH, picks_per_round=len(TLA_PLAY_BOOSTER))
-    models = _build_models(arguments, cards, picks=draft_format.rounds * draft_format.picks_per_round)
-    inputs = _load_inputs(arguments, models)
+    embedding, embedding_ref = load_card_table(
+        arguments.embedding_run, inputs=card_inputs(data, cards, data_dir=arguments.data_dir)
+    )
+    models = _build_models(arguments, embedding, pool=pool, picks=draft_format.rounds * draft_format.picks_per_round)
+    inputs = (embedding_ref, *_load_inputs(arguments, models))
     # The copy is taken before a resumed run's own drafter is loaded, so the pull stays toward
-    # the drafter trained on human picks. It keeps its own copy of the embedding it was trained with.
+    # the drafter trained on human picks. It keeps its own copy of the card table.
     human_drafter = None
     if arguments.drafter_run is not None:
         human_drafter = copy.deepcopy(models.drafter).eval().requires_grad_(requires_grad=False)
@@ -326,7 +327,7 @@ def main(argv: Sequence[str]) -> None:
     # A resumed run must not replay the games it already played.
     rng = random.Random(arguments.seed + done)
 
-    # No optimizer holds the embedding's parameters: self-play does not train it.
+    # The card table has no parameters, so it has no optimizer: self-play does not train it.
     optimizers: dict[ModelName, torch.optim.Optimizer] = {
         name: torch.optim.Adam(own_parameters(module, models.embedding), lr=arguments.rate)
         for name, module in _by_name(models).items()
@@ -365,7 +366,9 @@ def main(argv: Sequence[str]) -> None:
         decks_start=arguments.decks_start, drafter_starts=arguments.drafter_starts, pull_ends=arguments.pull_ends
     )
     workers = start_workers(
-        functools.partial(play_actor, arguments=arguments), count=arguments.workers, seed=arguments.seed + done
+        functools.partial(play_actor, arguments=arguments, card_width=embedding.width),
+        count=arguments.workers,
+        seed=arguments.seed + done,
     )
     play_models = PlayModels(player=models.player, guess=models.guess, embedding=models.embedding)
 

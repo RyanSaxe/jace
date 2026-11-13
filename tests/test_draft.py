@@ -11,7 +11,7 @@ from collections.abc import Sequence
 import pytest
 import torch
 
-from jace.cards import CardEmbedding, CardId, CardPool, CardRecord, Rarity
+from jace.cards import CardId, CardPool, CardRecord, CardTable, Rarity
 from jace.draft import (
     TLA_PLAY_BOOSTER,
     BoosterSpecError,
@@ -40,7 +40,7 @@ def _first_card(views: Sequence[SeatView]) -> tuple[CardId, ...]:
 
 
 def _model(cards: int) -> DrafterModel:
-    embedding = CardEmbedding(torch.randn(cards, 8), hidden=8, offset_bound=None)
+    embedding = CardTable(torch.randn(cards, 8))
     return DrafterModel(embedding, width=16, layers=1, heads=2, picks=4)
 
 
@@ -93,7 +93,7 @@ def test_a_spec_with_a_slot_for_a_rarity_the_pool_lacks_is_rejected() -> None:
 
 def test_a_model_drafter_finishes_a_draft_over_a_larger_card_pool_than_the_model_was_built_with() -> None:
     model = _model(cards=4)
-    model.embedding = CardEmbedding(torch.randn(30, 8), hidden=8, offset_bound=None)
+    model.embedding = CardTable(torch.randn(30, 8))
     draft_format = DraftFormat(seats=2, rounds=2, picks_per_round=2)
     boosters = [
         [[(4, 5, 6), (7, 8, 9)], [(10, 11, 12), (13, 14, 15)]],

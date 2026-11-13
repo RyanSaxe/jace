@@ -1,4 +1,4 @@
-"""Check the card text writer, the text vectors and the program vectors through `jace.data`.
+"""Check the card text writer, the text vectors and the program tokens through `jace.data`.
 
 No test downloads or runs a language model. The encoder is a small function
 that turns a text into two numbers and counts its calls, which is enough to
@@ -22,7 +22,7 @@ from jace.cards import (
     CardRecord,
     Rarity,
 )
-from jace.data import card_texts, program_tokens, program_vectors, text_vectors
+from jace.data import card_texts, program_tokens, text_vectors
 
 __all__ = ()
 
@@ -80,27 +80,6 @@ def test_text_vectors_are_standardised_and_the_encoder_runs_once_until_a_text_ch
     assert first[:, 1].eq(0).all()
     assert torch.equal(first, again)
     assert calls == [3, 3]
-
-
-def test_program_vectors_match_for_equal_programs_and_mark_a_card_without_one() -> None:
-    programs = {
-        "Ant": (1, 5, 2, 9, 1, 7),
-        "Bat": (1, 5, 2, 9, 1, 7),
-        "Cat": (1, 5, 3, 4),
-        "Dog": (),
-        "Eel": (2, 9, 4, 1),
-    }
-    records = [
-        CardRecord(name=name, set_code="TST", rarity=Rarity.COMMON, text="", program=program)
-        for name, program in programs.items()
-    ]
-
-    ant, bat, cat, dog, _ = program_vectors(CardPool(records), width=2)
-
-    assert torch.allclose(ant, bat, atol=1e-5)
-    assert not torch.allclose(ant, cat, atol=1e-5)
-    assert dog.tolist() == [0.0, 0.0, 1.0]
-    assert ant[-1] == 0
 
 
 def test_program_tokens_mark_a_pair_the_vocabulary_lacks_and_a_card_without_a_program() -> None:

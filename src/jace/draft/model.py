@@ -1,15 +1,15 @@
 """The drafter: a transformer over the packs a seat has seen and the cards it took.
 
-The model reads cards only through the shared `CardEmbedding` and scores a
-pack by the dot product of one query vector with each card's projected
-embedding. It has no parameter whose size depends on the number of cards, so
-the same weights score a larger card pool once `embedding` is replaced by one
-that covers it. The embedding is trained by its own optimizer, and
-`parameters()` includes it because it is a submodule, so the caller must
-leave `embedding.parameters()` out of the drafter's optimizer. An earlier
-pick's token attends only to the picks before it, which is what lets
-`whole_draft` score every pick of a recorded draft in one pass and get the
-same logits `forward` gives pick by pick.
+The model reads cards only through its `CardVectors` and scores a pack by
+the dot product of one query vector with each card's projected vector. It
+has no parameter whose size depends on the number of cards, so the same
+weights score a larger card pool once `embedding` is replaced by one that
+covers it. In pretraining the card vectors are a `CardEncoder` trained by
+its own optimizer, and `parameters()` includes it because it is a
+submodule, so the caller must leave the encoder's parameters out of the
+drafter's optimizer. An earlier pick's token attends only to the picks
+before it, which is what lets `whole_draft` score every pick of a recorded
+draft in one pass and get the same logits `forward` gives pick by pick.
 """
 
 import math
@@ -19,7 +19,7 @@ from typing import override
 import torch
 from torch import Tensor, nn
 
-from jace.cards import CardEmbedding, CardId
+from jace.cards import CardId, CardVectors
 from jace.draft.drafting import Drafter, SeatView
 from jace.modules import transformer
 
@@ -35,10 +35,10 @@ class DrafterModel(nn.Module):
     is the largest number of picks in a draft, which sizes the positions.
     """
 
-    def __init__(self, embedding: CardEmbedding, *, width: int, layers: int, heads: int, picks: int) -> None:
+    def __init__(self, embedding: CardVectors, *, width: int, layers: int, heads: int, picks: int) -> None:
         super().__init__()
-        card_width = embedding.starting.shape[1]
-        self.embedding: CardEmbedding = embedding
+        card_width = embedding.width
+        self.embedding: CardVectors = embedding
         self.picked_card: nn.Linear = nn.Linear(card_width, width)
         self.pack_mean: nn.Linear = nn.Linear(card_width, width)
         self.candidate: nn.Linear = nn.Linear(card_width, width)
@@ -128,9 +128,8 @@ def model_drafter(model: DrafterModel, *, generator: torch.Generator | None) -> 
     def draft(views: Sequence[SeatView]) -> tuple[CardId, ...]:
         if not views:
             return ()
-        starting = model.embedding.starting
         with torch.no_grad():
-            seen, picks, pack = view_tensors(views, cards=starting.shape[0], device=starting.device)
+            seen, picks, pack = view_tensors(views, cards=model.embedding.cards, device=model.embedding.device)
             logits = model.forward(seen, picks, pack=pack)
             if generator is None:
                 chosen = logits.argmax(dim=-1)

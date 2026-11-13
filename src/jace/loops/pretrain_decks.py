@@ -4,8 +4,9 @@ The deck score learns each deck's chance of winning a game from the wins
 and losses of the event it played. The deck builder learns to write the
 human's deck for a pool one card at a time, from every partial deck that a
 random order of the deck passes through, so it also learns to finish a deck
-that is partly built. Both move the shared card embedding unless the caller
-leaves its optimizer out.
+that is partly built. Both read the card vectors of a drafter pretraining
+run, frozen into a `CardTable`, so neither can move what the drafter
+learned about the cards.
 
 Basic lands follow `BuildRules`: a deck may hold any number of them, so the
 builder is always offered as many basics as the deck has empty slots, and
@@ -30,8 +31,8 @@ import torch
 from torch import Tensor, nn
 from torch.optim import Optimizer
 
-from jace.cards import CardEmbedding, own_parameters
-from jace.data import RESULT_FLOOR, HumanDecks, card_table, load_decks, read_set
+from jace.cards import own_parameters
+from jace.data import RESULT_FLOOR, HumanDecks, load_decks, read_set
 from jace.decks import (
     BuildRules,
     DeckBuilderModel,
@@ -42,9 +43,19 @@ from jace.decks import (
     random_proposer,
     writing_steps,
 )
-from jace.loops.entry_points import ADAM_BETAS, RunArguments, add_run_flags, device_named, limited_rules, start_run
+from jace.loops.entry_points import (
+    ADAM_BETAS,
+    RunArguments,
+    add_run_flags,
+    card_inputs,
+    device_named,
+    limited_rules,
+    load_card_table,
+    set_cards,
+    start_run,
+)
 from jace.loops.schedules import RateScale, current_rates, scale_rates, warm_up_then_decay
-from jace.tracking import CheckpointRef, Running, latest_checkpoint, load_checkpoint, log_update, save_checkpoint
+from jace.tracking import Running, log_update, save_checkpoint
 from jace.tracking import writing as writing_run
 from jace.train import apply, choice_loss, score_loss
 
@@ -141,13 +152,12 @@ def pretrain_deck_score(
 
     A deck's target is its event's record: the loss is the binomial log
     loss of the wins out of the games played, so a deck with more games
-    counts for more. `optimizers` holds the score's optimizer and, to train
-    the card embedding too, the embedding's. Each one's learning rate is its
+    counts for more. Each of `optimizers` has its learning rate set to its
     rate at the call times `rate_scale(step)`. `generator` draws the batches
     and lives on the CPU. Every point is also logged to `run` under
     "deck_score".
     """
-    device = model.cards.embedding.starting.device
+    device = model.cards.embedding.device
     counts = decks.decks.to(device)  # uint8 [drafts, cards]
     wins = decks.wins.to(device).float()
     games = wins + decks.losses.to(device).float()
@@ -221,7 +231,7 @@ def pretrain_deck_builder(
     `generator` draws the batches and the orders and lives on the CPU. Every
     point is also logged to `run` under "deck_builder".
     """
-    device = model.cards.embedding.starting.device
+    device = model.cards.embedding.device
     allowed = allowed_by(rules, decks)
     training = (allowed & ~decks.held_out).nonzero().squeeze(1)
     held_out = (allowed & decks.held_out).nonzero().squeeze(1)[: settings.evaluate_decks]
@@ -282,8 +292,7 @@ class _Arguments(RunArguments):
     device: str
     score_steps: int
     builder_steps: int
-    embedding_run: Path | None
-    freeze_embedding: bool
+    embedding_run: Path
     score_decks_per_step: int
     builder_decks_per_step: int
     score_evaluate_every: int
@@ -292,7 +301,6 @@ class _Arguments(RunArguments):
     width: int
     layers: int
     heads: int
-    embedding_hidden: int
     rate: float
 
 
@@ -302,8 +310,12 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument("--device", default="auto", help="cpu, mps or cuda; auto takes mps when it is available")
     parser.add_argument("--score-steps", type=int, required=True, help="training steps of the deck score")
     parser.add_argument("--builder-steps", type=int, required=True, help="training steps of the deck builder")
-    parser.add_argument("--embedding-run", type=Path, help="a run folder whose newest card embedding to start from")
-    parser.add_argument("--freeze-embedding", action="store_true", help="train the two models and not the embedding")
+    parser.add_argument(
+        "--embedding-run",
+        type=Path,
+        required=True,
+        help="a drafter pretraining run folder whose newest card encoder the models read, frozen",
+    )
     parser.add_argument("--score-decks-per-step", type=int, default=256)
     parser.add_argument("--builder-decks-per-step", type=int, default=32, help="each deck is 40 training examples")
     parser.add_argument("--score-evaluate-every", type=int, default=250)
@@ -312,7 +324,6 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument("--width", type=int, default=128)
     parser.add_argument("--layers", type=int, default=3)
     parser.add_argument("--heads", type=int, default=4)
-    parser.add_argument("--embedding-hidden", type=int, default=256)
     parser.add_argument("--rate", type=float, default=5e-4, help="the peak learning rate of every optimizer")
     return _Arguments(**vars(parser.parse_args(argv)))
 
@@ -320,7 +331,7 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
 def main(argv: Sequence[str]) -> None:
     """Pretrain a deck score and a deck builder on one card set and save the run.
 
-    The score trains first and the builder second, on one card embedding.
+    The score trains first and the builder second, on one card table.
     The run folder is created under `--run-dir` by `jace.tracking` and gets
     a "deck_score", a "deck_builder" and an "embedding" checkpoint. The
     curves are written beside it as `<run id>.curve.json` with two
@@ -332,25 +343,20 @@ def main(argv: Sequence[str]) -> None:
     device = device_named(arguments.device)
     torch.manual_seed(arguments.seed)
     data = read_set(arguments.set_code)
-    # The pool is used here for card names only, so no engine programs are attached.
-    cards = card_table(data.attributes, data.statistics, programs={})
+    cards = set_cards(data)
     decks = load_decks(
         data.games, pool=cards.pool, cache_dir=arguments.data_dir, held_out_share=arguments.held_out_share
     )
     rules = limited_rules(cards)
-    embedding = CardEmbedding(cards.features, hidden=arguments.embedding_hidden, offset_bound=None)
-    inputs: tuple[CheckpointRef, ...] = ()
-    if arguments.embedding_run is not None:
-        inputs = (latest_checkpoint(arguments.embedding_run, "embedding"),)
-        load_checkpoint(arguments.embedding_run.parent, inputs[0], into=embedding, keeping=None)
+    embedding, embedding_ref = load_card_table(
+        arguments.embedding_run, inputs=card_inputs(data, cards, data_dir=arguments.data_dir)
+    )
     shape = {"width": arguments.width, "layers": arguments.layers, "heads": arguments.heads}
     score = DeckScore(embedding, **shape).to(device)
     builder = DeckBuilderModel(embedding, **shape).to(device)
 
     def optimizers(model: nn.Module) -> list[Optimizer]:
-        own = own_parameters(model, embedding)
-        trained = [own] if arguments.freeze_embedding else [own, tuple(embedding.parameters())]
-        return [torch.optim.Adam(parameters, lr=arguments.rate, betas=ADAM_BETAS) for parameters in trained]
+        return [torch.optim.Adam(own_parameters(model, embedding), lr=arguments.rate, betas=ADAM_BETAS)]
 
     held_out = decks.held_out.nonzero().squeeze(1)
     score_settings = DeckSettings(
@@ -368,7 +374,7 @@ def main(argv: Sequence[str]) -> None:
         max_grad_norm=1.0,
     )
     clock = functools.partial(datetime.now, UTC)
-    folder, curve_file = start_run(arguments, device=device, inputs=inputs, clock=clock)
+    folder, curve_file = start_run(arguments, device=device, inputs=(embedding_ref,), clock=clock)
     generator = torch.Generator().manual_seed(arguments.seed)
     started = time.perf_counter()
     with writing_run(folder, clock=clock) as running:
@@ -409,7 +415,6 @@ def main(argv: Sequence[str]) -> None:
     summary = {
         "run_id": folder.name,
         "device": device.type,
-        "embedding_trained": not arguments.freeze_embedding,
         "score": {
             "steps": arguments.score_steps,
             "seconds": score_seconds,

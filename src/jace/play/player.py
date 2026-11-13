@@ -11,7 +11,7 @@ evaluation.
 import torch
 from torch import Tensor, nn
 
-from jace.cards import CardEmbedding
+from jace.cards import CardVectors
 from jace.engine import BoardLayout, Decisions
 from jace.modules import encode_real, transformer
 from jace.play.tokens import EntityEncoder, board_tokens, legal_actions
@@ -46,13 +46,13 @@ class PlayerModel(nn.Module):
     of the opponent's unseen cards. No
     weight is sized by the card pool, so the model plays with a larger pool
     once `embedding` and `engine_to_card` are replaced by ones that cover it.
-    The embedding is shared and trained by its own optimizer: leave
-    `embedding.parameters()` out of this model's optimizer.
+    The card vectors are shared with the other models and are not this
+    model's to train: build its optimizer from `own_parameters`.
     """
 
     def __init__(
         self,
-        embedding: CardEmbedding,
+        embedding: CardVectors,
         *,
         engine_to_card: Tensor,
         layout: BoardLayout,
@@ -63,8 +63,8 @@ class PlayerModel(nn.Module):
         deck_guess_cards: int,
     ) -> None:
         super().__init__()
-        card_width = embedding.starting.shape[1]
-        self.embedding: CardEmbedding = embedding
+        card_width = embedding.width
+        self.embedding: CardVectors = embedding
         self.guess_cards: int = guess_cards
         self.deck_guess_cards: int = deck_guess_cards
         # engine_to_card: int64 [engine definition ids] -> CardId, -1 for a definition the pool lacks.
@@ -87,7 +87,7 @@ class PlayerModel(nn.Module):
         # guess.hand, guess.deck: float [b, cards]. Returns action logits [b, max_actions], illegal ones at -inf,
         # and the acting seat's chance to win, float [b].
         tokens = board_tokens(boards, layout=self.layout, engine_to_card=self.engine_to_card)
-        pool = torch.arange(self.embedding.starting.shape[0], device=self.embedding.starting.device)
+        pool = torch.arange(self.embedding.cards, device=self.embedding.device)
         card_table = self.embedding(pool)  # [cards, card_width]
 
         entities = self.entities.embed(tokens, card_table)

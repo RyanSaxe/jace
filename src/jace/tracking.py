@@ -35,9 +35,9 @@ or infinite: logging one raises `ValueError`. The fields are:
 
 Times are ISO 8601 in UTC. `sha256` is the hex digest of the `.pt` file. A
 `.pt` file with no line in `index.jsonl` was cut off while being saved.
-A model's checkpoint also holds the card embedding the model was saved
-with, because the model holds the embedding as a submodule. `load_checkpoint`
-never lets that copy replace the shared embedding.
+A model's checkpoint also holds the card vectors the model was saved with,
+because the model holds them as a submodule. `load_checkpoint` never lets
+that copy replace the shared card vectors.
 
 A run moves created -> running -> completed | failed | interrupted, and
 interrupted -> running. The last line of `state.jsonl` is the state, with
@@ -61,7 +61,7 @@ import fcntl
 import hashlib
 import json
 import os
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -69,7 +69,7 @@ from pathlib import Path
 from typing import Literal
 
 import torch
-from torch import nn
+from torch import Tensor, nn
 
 type ModelName = Literal["embedding", "drafter", "deck_builder", "deck_score", "guess", "player"]
 type Clock = Callable[[], datetime]
@@ -146,6 +146,19 @@ class CheckpointExistsError(FileExistsError):
 class CheckpointMismatchError(ValueError):
     def __init__(self, path: Path, *, expected: str, actual: str) -> None:
         super().__init__(f"checkpoint {path} has sha256 {actual}, but the reference says {expected}")
+
+
+class CheckpointKeysError(ValueError):
+    def __init__(self, ref: CheckpointRef, *, missing: Sequence[str], unexpected: Sequence[str]) -> None:
+        super().__init__(
+            f"the {ref.model} checkpoint of run {ref.run_id} does not fit the module it is loaded into: "
+            f"it lacks {list(missing)} and holds {list(unexpected)}, which the module has no place for"
+        )
+
+
+class KeepingNotHeldError(ValueError):
+    def __init__(self) -> None:
+        super().__init__("the module to keep as it was is not held by the module being loaded")
 
 
 class NoCheckpointError(FileNotFoundError):
@@ -327,28 +340,52 @@ def latest_checkpoint(run_folder: Path, model: ModelName) -> CheckpointRef:
     return CheckpointRef(run_id=run_folder.name, model=model, update=newest["update"], sha256=newest["sha256"])
 
 
-def load_checkpoint(root: Path, ref: CheckpointRef, *, into: nn.Module, keeping: nn.Module | None) -> None:
-    """Load the referenced checkpoint's weights into `into`, leaving `keeping` as it was.
+def read_checkpoint(root: Path, ref: CheckpointRef) -> dict[str, Tensor]:
+    """Return the state dict the referenced checkpoint holds, on the CPU.
 
     `root` is the folder that holds the run folders, and the reference names
     the run. The file is hashed first and `CheckpointMismatchError` is raised
-    when the digest differs from the reference, before anything is loaded.
+    when the digest differs from the reference, before anything is read.
     A missing file raises `FileNotFoundError`.
-
-    A model's state dict includes every module the model holds, so a model
-    checkpoint carries a copy of the card embedding it was saved with. Pass
-    the shared embedding as `keeping` when loading a model: its weights are
-    put back after the load, so the embedding changes only when it is
-    loaded itself, with `keeping=None`.
     """
     path = _checkpoint_path(root / ref.run_id, model=ref.model, update=ref.update)
     actual = _sha256(path)
     if actual != ref.sha256:
         raise CheckpointMismatchError(path, expected=ref.sha256, actual=actual)
-    kept = {} if keeping is None else {name: value.clone() for name, value in keeping.state_dict().items()}
-    into.load_state_dict(torch.load(path, weights_only=True))
-    if keeping is not None:
-        keeping.load_state_dict(kept)
+    return torch.load(path, weights_only=True)
+
+
+def load_checkpoint(root: Path, ref: CheckpointRef, *, into: nn.Module, keeping: nn.Module | None) -> None:
+    """Load the referenced checkpoint's weights into `into`, leaving `keeping` as it was.
+
+    The checkpoint is read and checked as `read_checkpoint` does. A model's
+    state dict includes every module the model holds, so a model checkpoint
+    carries a copy of the card vectors it was saved with. Pass the shared
+    card vectors as `keeping` when loading a model: `keeping` is found in
+    `into` by identity, and the checkpoint's keys under its place there are
+    left out of the load. The card vectors therefore change only when they
+    are loaded themselves, with `keeping=None`, and a model saved with one
+    kind of card vectors loads into a model that reads another kind.
+
+    Raises `KeepingNotHeldError` when `into` does not hold `keeping`, and
+    `CheckpointKeysError` when any other key that `into` needs is missing
+    from the checkpoint or the checkpoint holds one `into` does not, before
+    anything is loaded.
+    """
+    held_at = () if keeping is None else _places_of(keeping, within=into)
+    saved = {key: value for key, value in read_checkpoint(root, ref).items() if not key.startswith(held_at)}
+    needed = {key for key in into.state_dict() if not key.startswith(held_at)}
+    if needed != saved.keys():
+        raise CheckpointKeysError(ref, missing=sorted(needed - saved.keys()), unexpected=sorted(saved.keys() - needed))
+    into.load_state_dict(saved, strict=False)
+
+
+def _places_of(module: nn.Module, *, within: nn.Module) -> tuple[str, ...]:
+    # The state dict key prefix of every place `within` holds `module`, each ending in a dot.
+    places = tuple(f"{name}." for name, held in within.named_modules(remove_duplicate=False) if held is module)
+    if not places:
+        raise KeepingNotHeldError
+    return places
 
 
 def _described(identity: Identity) -> dict[str, object]:
@@ -422,10 +459,12 @@ def _settled_state(folder: Path, *, clock: Clock) -> RunState:
 
 __all__ = (
     "CheckpointExistsError",
+    "CheckpointKeysError",
     "CheckpointMismatchError",
     "CheckpointRef",
     "Clock",
     "Identity",
+    "KeepingNotHeldError",
     "ModelName",
     "NoCheckpointError",
     "RunExistsError",
@@ -438,6 +477,7 @@ __all__ = (
     "latest_checkpoint",
     "load_checkpoint",
     "log_update",
+    "read_checkpoint",
     "read_state",
     "record_evaluation",
     "save_checkpoint",
