@@ -15,7 +15,7 @@ importing this package does not load `transformers`.
 from jace.data.cards import SetCards, card_table
 from jace.data.decks import HumanDecks, load_decks
 from jace.data.drafts import RESULT_FLOOR, HumanDrafts, PoolAtSecondPickError, load_drafts
-from jace.data.programs import NoProgramsError, program_vectors
+from jace.data.programs import NoProgramsError, ProgramTooLongError, program_tokens, program_vectors
 from jace.data.seventeen_lands import SetData, SetNotDownloadedError, read_set
 from jace.data.store import CardColumnsError, StaleCacheError
 from jace.data.text import TEXT_MODEL, TextEncoder, card_texts, text_vectors
@@ -28,6 +28,7 @@ __all__ = (
     "HumanDrafts",
     "NoProgramsError",
     "PoolAtSecondPickError",
+    "ProgramTooLongError",
     "SetCards",
     "SetData",
     "SetNotDownloadedError",
@@ -37,6 +38,7 @@ __all__ = (
     "card_texts",
     "load_decks",
     "load_drafts",
+    "program_tokens",
     "program_vectors",
     "read_set",
     "text_vectors",

@@ -39,14 +39,20 @@ class SetCards:
     `CardEmbedding`, with one name per column in `feature_names`. Measured
     columns have mean zero and spread one over the cards that have a value.
     A card with no value gets zero there and one in that column's
-    `no_<name>` column. `ata` is float32 `[cards]`, the average pick number
-    a card was taken at, NaN for a card nobody took. `mana_value` is
-    float32 `[cards]`.
+    `no_<name>` column. `printed` is float32 `[cards, printed facts]`, the
+    facts printed on a card, with one name per column in `printed_names`:
+    its mana value, power and toughness, standardised in the same way, a
+    `no_power` and a `no_toughness` column, and flags for its colours, its
+    types, the bonus sheet and its rarity. `ata` is float32 `[cards]`, the
+    average pick number a card was taken at, NaN for a card nobody took.
+    `mana_value` is float32 `[cards]`.
     """
 
     pool: CardPool
     feature_names: tuple[str, ...]
     features: Tensor
+    printed_names: tuple[str, ...]
+    printed: Tensor
     ata: Tensor
     mana_value: Tensor
 
@@ -115,10 +121,30 @@ def card_table(
         *flags.columns,
         *[f"rarity_{rarity.value}" for rarity in Rarity],
     )
+    facts = ["mana_value", "power", "toughness"]
+    columns = [measured.columns.index(fact) for fact in facts]
+    # Every card has a mana value, so only power and toughness get a column that marks them missing.
+    printed = torch.cat(
+        [
+            standardised[:, columns],
+            absent[:, columns[1:]].float(),
+            torch.from_numpy(flags.to_numpy()).float(),
+            rarities.float(),
+        ],
+        dim=1,
+    )
+    printed_names = (
+        *facts,
+        *[f"no_{fact}" for fact in facts[1:]],
+        *flags.columns,
+        *[f"rarity_{rarity.value}" for rarity in Rarity],
+    )
     return SetCards(
         pool=CardPool(records),
         feature_names=names,
         features=features,
+        printed_names=printed_names,
+        printed=printed,
         ata=values[:, measured.columns.index("ata")].clone(),
         mana_value=values[:, measured.columns.index("mana_value")].clone(),
     )

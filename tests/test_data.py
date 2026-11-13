@@ -139,17 +139,17 @@ def test_a_draft_with_two_builds_gives_the_build_played_most_and_the_whole_event
     assert (decks.wins.tolist(), decks.losses.tolist()) == ([1], [2])
 
 
-def test_a_card_nobody_played_gets_a_neutral_win_rate_and_a_marker_that_says_so() -> None:
+def test_a_card_with_no_printed_power_or_toughness_gets_zero_there_and_a_marker_that_says_so() -> None:
     attributes = pl.DataFrame(
         {
             "name": ["Ant", "Bat", "Plains"],
             "set_code": ["TST", "TST", "TST"],
             "rarity": ["rare", "common", "common"],
             "color": ["G", "B", ""],
-            "card_type": ["Creature", "Instant", "Land"],
+            "card_type": ["Creature", "Creature", "Land"],
             "mana_value": [2.0, 4.0, 0.0],
-            "power": ["2", None, None],
-            "toughness": ["*", None, None],
+            "power": ["2", "4", None],
+            "toughness": ["*", "1", None],
             "is_bonus_sheet": [False, False, False],
             "oracle_text": ["", "", ""],
         }
@@ -170,11 +170,13 @@ def test_a_card_nobody_played_gets_a_neutral_win_rate_and_a_marker_that_says_so(
 
     cards = card_table(attributes, statistics, programs={"Ant": (7, 7)})
 
-    column = dict(zip(cards.feature_names, cards.features.T.tolist(), strict=True))
-    assert column["gih_wr"][2] == 0
-    assert column["gih_wr"][0] > 0 > column["gih_wr"][1]
-    assert column["no_gih_wr"] == [0, 0, 1]
-    assert column["no_toughness"] == [1, 1, 1]
+    column = dict(zip(cards.printed_names, cards.printed.T.tolist(), strict=True))
+    assert column["power"] == [-1, 1, 0]
+    assert column["no_power"] == [0, 0, 1]
+    assert column["toughness"] == [0, 0, 0]
+    assert column["no_toughness"] == [1, 0, 1]
+    assert column["colour_G"] == [1, 0, 0]
+    assert column["rarity_basic"] == [0, 0, 1]
     assert [cards.pool[card].rarity for card in range(3)] == [Rarity.RARE, Rarity.COMMON, Rarity.BASIC]
     assert [cards.pool[card].program for card in range(3)] == [(7, 7), (), ()]
     assert cards.ata.tolist() == [2.0, 6.0, 10.0]

@@ -13,8 +13,16 @@ import polars as pl
 import torch
 from torch import Tensor
 
-from jace.cards import CardPool, CardRecord, Rarity
-from jace.data import card_texts, program_vectors, text_vectors
+from jace.cards import (
+    FIRST_PROGRAM_TOKEN,
+    NO_PROGRAM_TOKEN,
+    PADDING_TOKEN,
+    UNKNOWN_TOKEN,
+    CardPool,
+    CardRecord,
+    Rarity,
+)
+from jace.data import card_texts, program_tokens, program_vectors, text_vectors
 
 __all__ = ()
 
@@ -93,3 +101,17 @@ def test_program_vectors_match_for_equal_programs_and_mark_a_card_without_one() 
     assert not torch.allclose(ant, cat, atol=1e-5)
     assert dog.tolist() == [0.0, 0.0, 1.0]
     assert ant[-1] == 0
+
+
+def test_program_tokens_mark_a_pair_the_vocabulary_lacks_and_a_card_without_a_program() -> None:
+    programs = {"Ant": (1, 5, 2, 9), "Bat": (1, 5, 3, 4, 2, 9), "Dog": ()}
+    records = [
+        CardRecord(name=name, set_code="TST", rarity=Rarity.COMMON, text="", program=program)
+        for name, program in programs.items()
+    ]
+
+    ant, bat, dog = program_tokens(CardPool(records), vocabulary={(1, 5): 0, (2, 9): 1}).tolist()
+
+    assert ant == [FIRST_PROGRAM_TOKEN, FIRST_PROGRAM_TOKEN + 1, PADDING_TOKEN]
+    assert bat == [FIRST_PROGRAM_TOKEN, UNKNOWN_TOKEN, FIRST_PROGRAM_TOKEN + 1]
+    assert dog == [NO_PROGRAM_TOKEN, PADDING_TOKEN, PADDING_TOKEN]

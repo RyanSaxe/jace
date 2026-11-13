@@ -1,9 +1,11 @@
-"""Make a starting vector for each card from the engine's compiled program for it.
+"""Turn each card's engine program into token ids, or into a starting vector.
 
 A program is the engine's own definition of a card: a flat run of (kind,
 value) integer pairs, about fifty per card. It says what the card does in
 the engine's terms, which rules text only describes, and it exists for a
-card from a set nobody has played. `program_vectors` has no learned
+card from a set nobody has played. `program_tokens` writes each pair as
+the token id the card encoder reads, from a vocabulary the caller passes
+in, because this package does not import the engine. `program_vectors` has no learned
 parameters. It counts each pair and each two adjacent pairs, weights the
 ones few cards share above the ones every card has, and keeps the
 directions along which the cards differ most. Those directions are fitted
@@ -12,20 +14,60 @@ axes.
 """
 
 from collections import Counter
+from collections.abc import Mapping
 from itertools import pairwise
 
 import torch
 from torch import Tensor
 
-from jace.cards import CardPool
+from jace.cards import (
+    FIRST_PROGRAM_TOKEN,
+    MAX_PROGRAM_TOKENS,
+    NO_PROGRAM_TOKEN,
+    PADDING_TOKEN,
+    UNKNOWN_TOKEN,
+    CardPool,
+)
 from jace.data.store import SMALLEST_SPREAD
 
-__all__ = ("NoProgramsError", "program_vectors")
+__all__ = ("NoProgramsError", "ProgramTooLongError", "program_tokens", "program_vectors")
 
 
 class NoProgramsError(ValueError):
     def __init__(self) -> None:
         super().__init__("no card in the pool has an engine program, so there is nothing to make program vectors from")
+
+
+class ProgramTooLongError(ValueError):
+    def __init__(self, name: str, *, pairs: int) -> None:
+        super().__init__(
+            f"{name}'s engine program has {pairs} pairs, more than the {MAX_PROGRAM_TOKENS} the card encoder can read"
+        )
+
+
+def program_tokens(pool: CardPool, *, vocabulary: Mapping[tuple[int, int], int]) -> Tensor:
+    """Return int64 `[cards, longest]`, each card's program as token ids, one row per card of `pool` in card id order.
+
+    `vocabulary` numbers (kind, value) pairs from zero, and a pair it holds
+    becomes `FIRST_PROGRAM_TOKEN` plus that number. A pair it lacks becomes
+    `UNKNOWN_TOKEN`. A card with an empty program, one the engine cannot
+    play, gets the single token `NO_PROGRAM_TOKEN`, so every row has at
+    least one token that is not padding. Rows shorter than the longest are
+    padded with `PADDING_TOKEN`. Raises `ProgramTooLongError` when a program
+    has more than `MAX_PROGRAM_TOKENS` pairs.
+    """
+    rows: list[list[int]] = []
+    for card in range(len(pool)):
+        program = pool[card].program
+        pairs = zip(program[0::2], program[1::2], strict=True)
+        row = [FIRST_PROGRAM_TOKEN + vocabulary[pair] if pair in vocabulary else UNKNOWN_TOKEN for pair in pairs]
+        if len(row) > MAX_PROGRAM_TOKENS:
+            raise ProgramTooLongError(pool[card].name, pairs=len(row))
+        rows.append(row or [NO_PROGRAM_TOKEN])
+    tokens = torch.full((len(rows), max(map(len, rows))), PADDING_TOKEN, dtype=torch.int64)
+    for card, row in enumerate(rows):
+        tokens[card, : len(row)] = torch.tensor(row)
+    return tokens
 
 
 def program_vectors(pool: CardPool, *, width: int) -> Tensor:

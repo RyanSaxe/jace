@@ -55,6 +55,7 @@ __all__ = (
     "engine_cards",
     "land_and_spell_actions",
     "observation_space",
+    "program_vocabulary",
     "start_batch",
     "turn_numbers",
 )
@@ -140,6 +141,14 @@ def engine_cards() -> tuple[EngineCard, ...]:
             )
         )
     return tuple(cards)
+
+
+def program_vocabulary() -> dict[tuple[int, int], int]:
+    # Every distinct (kind, value) pair in the engine's card programs, numbered from 0 in sorted order.
+    # It is read from the whole catalog, so a pair's number does not depend on which cards a pool holds.
+    catalog = managym.catalog_tokens()
+    pairs = sorted(set(zip(catalog["token_kind"], catalog["token_value"], strict=True)))
+    return {pair: number for number, pair in enumerate(pairs)}
 
 
 def engine_card_ids(pool: CardPool) -> Tensor:
