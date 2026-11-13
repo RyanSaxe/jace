@@ -32,13 +32,13 @@ from jace.cards import CardEmbedding, Deck, Rarity, own_parameters
 from jace.data import SetCards, card_table, load_decks, read_set
 from jace.decks import DeckBuilderModel, DeckScore
 from jace.draft import TLA_PLAY_BOOSTER, DrafterModel, DraftFormat
-from jace.engine import SEATS, GameBatch
-from jace.engine.manabot import engine_card_ids, engine_cards, start_batch
+from jace.engine import SEATS, BoardLayout, GameBatch
+from jace.engine.manabot import board_layout, engine_card_ids, engine_cards, start_batch
 from jace.eval import WinRate, win_rate
 from jace.loops.entry_points import RunArguments, add_run_flags, limited_rules, playable_decks, start_run
 from jace.loops.limited import Learners, LimitedSetup, StartBatch, limited_iteration
 from jace.loops.schedules import phased_schedule
-from jace.play import Boards, Guesser, GuessModel, PlayerModel, Policy, as_boards, random_policy
+from jace.play import Guesser, GuessModel, PlayerModel, Policy, random_policy
 from jace.tracking import (
     CheckpointRef,
     ModelName,
@@ -177,16 +177,16 @@ def _by_name(models: _Models) -> dict[ModelName, nn.Module]:
 
 
 def _build_models(
-    arguments: _Arguments, cards: SetCards, *, sample: Boards, engine_to_card: Tensor, picks: int
+    arguments: _Arguments, cards: SetCards, *, layout: BoardLayout, engine_to_card: Tensor, picks: int
 ) -> _Models:
     embedding = CardEmbedding(cards.features, hidden=arguments.embedding_hidden, offset_bound=None)
     deck_shape = {"width": arguments.deck_width, "layers": arguments.deck_layers, "heads": arguments.deck_heads}
     play_shape = {"width": arguments.play_width, "layers": arguments.play_layers, "heads": arguments.play_heads}
     return _Models(
         player=PlayerModel(
-            embedding, engine_to_card=engine_to_card, sample=sample, guess_cards=arguments.guess_cards, **play_shape
+            embedding, engine_to_card=engine_to_card, layout=layout, guess_cards=arguments.guess_cards, **play_shape
         ),
-        guess=GuessModel(embedding, engine_to_card=engine_to_card, sample=sample, **play_shape),
+        guess=GuessModel(embedding, engine_to_card=engine_to_card, layout=layout, **play_shape),
         drafter=DrafterModel(
             embedding,
             width=arguments.drafter_width,
@@ -349,11 +349,9 @@ def main(argv: Sequence[str]) -> None:
         # ast-grep-ignore: no-routing-functions
         return start_batch(matchups, pool=pool, games=arguments.games, seed=rng.getrandbits(_ENGINE_SEED_BITS))
 
-    first_decks = (scoring_decks[0], scoring_decks[1])
-    sample = as_boards(start(lambda: first_decks).decisions(), device=cpu)
     engine_to_card = engine_card_ids(pool)
     picks = draft_format.rounds * draft_format.picks_per_round
-    models = _build_models(arguments, cards, sample=sample, engine_to_card=engine_to_card, picks=picks)
+    models = _build_models(arguments, cards, layout=board_layout(), engine_to_card=engine_to_card, picks=picks)
     inputs = _load_inputs(arguments, models)
     done = 0 if arguments.resume is None else _resume(arguments.resume, models)
     # A resumed run must not replay the games it already played.
@@ -416,7 +414,7 @@ def main(argv: Sequence[str]) -> None:
 
     score_against_random = functools.partial(
         _score_against,
-        random_policy(engine_to_card),
+        random_policy,
         learner=models.player.policy,
         guesser=models.guess.guess,
         start=start,

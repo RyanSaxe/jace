@@ -47,7 +47,9 @@ starts the next matchup before `act` returns.
 
 Two things implement the interface:
 
-- `jace.engine.manabot` plays real Magic through manabot's batched games.
+- `jace.engine.manabot` plays real Magic through the batched games of
+  managym, manabot's engine. It also reports the layout of the engine's
+  board arrays as a `BoardLayout`, which the play models are built from.
 - `jace.engine.toy` plays High Card, a three-card game. Tests and the
   smallest example use it, so they need no engine.
 
@@ -57,16 +59,16 @@ Scoring a player is the one thing that does not go through `GameBatch`.
 `jace.engine.scoring` plays a match between any two players, which can be
 jace checkpoints or manabot's scripted players. Each game runs alone, in a
 child process, for two reasons. manabot's scripted players read manabot's
-own game object. And the engine can enter a step that never returns, which
-only killing its process ends: `play_games` records such a game as hung
-and plays the rest.
+own game object. And a step of the engine can take very long on a rare
+board, which only killing its process ends: `play_games` records such a
+game as hung and plays the rest.
 
 `jace.eval` decides which games a match holds and what they mean. `legs`
 lists every deal as four games, so each player holds each deck in each seat,
 and `score_match` gives a win rate whose range resamples whole deals.
 
 `jace.engine.manabot` and `jace.engine.scoring` are the only files that
-import manabot, so a change in the engine reaches two files.
+import managym or manabot, so a change in either reaches two files.
 
 ## Pieces, not a framework
 

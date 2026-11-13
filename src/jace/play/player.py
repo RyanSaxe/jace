@@ -12,10 +12,10 @@ import torch
 from torch import Tensor, nn
 
 from jace.cards import CardEmbedding
-from jace.engine import Decisions
+from jace.engine import BoardLayout, Decisions
 from jace.modules import encode_real, run, transformer
-from jace.play.tokens import EntityEncoder, board_tokens
-from jace.play.types import Boards, Guess, Policy
+from jace.play.tokens import EntityEncoder, board_tokens, legal_actions
+from jace.play.types import Boards, Guess
 
 __all__ = ("PlayerModel", "as_boards", "random_policy")
 
@@ -30,14 +30,11 @@ def as_boards(decisions: Decisions, *, device: torch.device) -> Boards:
     return {name: torch.as_tensor(array, device=device) for name, array in decisions.boards.items()}
 
 
-def random_policy(engine_to_card: Tensor) -> Policy:
-    # engine_to_card: int64 [engine definition ids] -> CardId, as `board_tokens` takes it.
-    def policy(boards: Boards, guess: Guess) -> tuple[Tensor, Tensor]:
-        legal = board_tokens(boards, engine_to_card=engine_to_card).action_mask  # bool [b, max_actions]
-        logits = torch.zeros(legal.shape, device=legal.device).masked_fill(~legal, -torch.inf)
-        return logits, torch.full_like(guess.hand[:, 0], _EVEN_CHANCE)
-
-    return policy
+def random_policy(boards: Boards, guess: Guess) -> tuple[Tensor, Tensor]:
+    # A `Policy` that gives every legal action the same score and an even chance of winning.
+    legal = legal_actions(boards)  # bool [b, max_actions]
+    logits = torch.zeros(legal.shape, device=legal.device).masked_fill(~legal, -torch.inf)
+    return logits, torch.full_like(guess.hand[:, 0], _EVEN_CHANCE)
 
 
 class PlayerModel(nn.Module):
@@ -56,7 +53,7 @@ class PlayerModel(nn.Module):
         embedding: CardEmbedding,
         *,
         engine_to_card: Tensor,
-        sample: Boards,
+        layout: BoardLayout,
         width: int,
         layers: int,
         heads: int,
@@ -69,13 +66,12 @@ class PlayerModel(nn.Module):
         # engine_to_card: int64 [engine definition ids] -> CardId, -1 for a definition the pool lacks.
         self.engine_to_card: Tensor
         self.register_buffer("engine_to_card", engine_to_card.detach().clone(), persistent=False)
-        # sample: any batch of boards from the engine that will be played; only its feature widths are used.
-        tokens = board_tokens(sample, engine_to_card=engine_to_card)
-        self.entities: EntityEncoder = EntityEncoder(tokens, card_width=card_width, width=width)
+        self.layout: BoardLayout = layout
+        self.entities: EntityEncoder = EntityEncoder(layout, card_width=card_width, width=width)
         self.guessed_card: nn.Linear = nn.Linear(card_width, width)
         self.guessed_chance: nn.Linear = nn.Linear(1, width)
         self.encoder: nn.TransformerEncoder = transformer(width, layers=layers, heads=heads)
-        self.actions: nn.Linear = nn.Linear(tokens.actions.shape[-1], width)
+        self.actions: nn.Linear = nn.Linear(layout.action_features, width)
         self.action_head: nn.Sequential = nn.Sequential(
             nn.Linear(_SCORED_VECTORS * width, width), nn.GELU(), nn.Linear(width, 1)
         )
@@ -84,7 +80,7 @@ class PlayerModel(nn.Module):
     def policy(self, boards: Boards, guess: Guess) -> tuple[Tensor, Tensor]:
         # guess.hand: float [b, cards]. Returns action logits [b, max_actions], illegal ones at -inf,
         # and the acting seat's chance to win, float [b].
-        tokens = board_tokens(boards, engine_to_card=self.engine_to_card)
+        tokens = board_tokens(boards, layout=self.layout, engine_to_card=self.engine_to_card)
         pool = torch.arange(self.embedding.starting.shape[0], device=self.embedding.starting.device)
         card_table = run(self.embedding, pool)  # [cards, card_width]
 

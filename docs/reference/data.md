@@ -85,7 +85,9 @@ checksum of the draft id, so the split is the same in every run.
 ## Avatar: The Last Airbender
 
 The set has 347 cards: 286 of its own and 61 bonus cards. The engine can
-play 288 of them, and the 59 it cannot are all bonus cards. The data holds
+play 344 of them. The three it cannot are bonus cards: Heartbeat of Spring,
+Lita, Mechanical Engineer and Release to Memory. A deck that holds one is
+left out of play, which drops 181 of the 101,496 human decks. The data holds
 4,214,513 picks from 102,793 drafts, and 101,496 decks.
 
 17Lands has no first pick for any Avatar draft. The pool at the second

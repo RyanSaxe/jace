@@ -6,7 +6,7 @@
 | ---------------- | --------------------------------------------------------- |
 | Python 3.13      | The one version `pyproject.toml` allows                   |
 | [uv](https://docs.astral.sh/uv/) | It installs jace and runs every command   |
-| A Rust toolchain | Installing builds manabot's engine from source            |
+| A Rust toolchain | Only where the engine, managym 0.2.3, has no built package for your platform |
 
 ## Install and check
 
@@ -17,8 +17,8 @@ uv sync
 uv run pytest -q
 ```
 
-The first `uv sync` compiles manabot's engine, which takes a few minutes.
-The tests then run in a few seconds.
+`uv sync` installs managym and manabot 0.2.3. Where it has to compile the
+engine, that takes a few minutes. The tests then run in under a minute.
 
 ## Run the example
 

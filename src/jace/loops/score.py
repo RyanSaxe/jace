@@ -31,8 +31,8 @@ import torch
 
 from jace.cards import CardEmbedding, Deck
 from jace.data import SetCards, card_table, load_decks, read_set
-from jace.engine import SEATS
-from jace.engine.manabot import engine_card_ids, engine_cards, start_batch
+from jace.engine import SEATS, BoardLayout
+from jace.engine.manabot import board_layout, engine_card_ids, engine_cards
 from jace.engine.scoring import (
     Played,
     Player,
@@ -61,7 +61,7 @@ from jace.eval import (
     tally_guess,
 )
 from jace.loops.entry_points import playable_decks
-from jace.play import Boards, GuessModel, PlayerModel, as_boards
+from jace.play import GuessModel, PlayerModel
 from jace.tracking import CheckpointRef, ModelName, Running, evaluating, load_checkpoint, record_evaluation
 
 __all__ = ("main",)
@@ -134,7 +134,7 @@ def _checkpoint(run: Path, model: ModelName, *, update: int) -> CheckpointRef:
 
 
 def _model_player(
-    update: int, *, run: Path, config: Mapping[str, object], cards: SetCards, sample: Boards
+    update: int, *, run: Path, config: Mapping[str, object], cards: SetCards, layout: BoardLayout
 ) -> tuple[Player, CheckpointRef]:
     # Builds the player and the guess model of iteration `update` as the run built them, each on
     # that iteration's card embedding, and returns the player with its player checkpoint.
@@ -143,9 +143,9 @@ def _model_player(
     embedding = CardEmbedding(cards.features, hidden=numbers["embedding_hidden"], offset_bound=None)
     shape = {"width": numbers["play_width"], "layers": numbers["play_layers"], "heads": numbers["play_heads"]}
     player = PlayerModel(
-        embedding, engine_to_card=engine_to_card, sample=sample, guess_cards=numbers["guess_cards"], **shape
+        embedding, engine_to_card=engine_to_card, layout=layout, guess_cards=numbers["guess_cards"], **shape
     )
-    guess = GuessModel(embedding, engine_to_card=engine_to_card, sample=sample, **shape)
+    guess = GuessModel(embedding, engine_to_card=engine_to_card, layout=layout, **shape)
     load_checkpoint(run.parent, _checkpoint(run, "embedding", update=update), into=embedding, keeping=None)
     reference = _checkpoint(run, "player", update=update)
     load_checkpoint(run.parent, reference, into=player, keeping=embedding)
@@ -159,7 +159,7 @@ def _model_player(
 
 
 def _players(
-    names: Sequence[str], *, run: Path, config: Mapping[str, object], cards: SetCards, sample: Boards
+    names: Sequence[str], *, run: Path, config: Mapping[str, object], cards: SetCards, layout: BoardLayout
 ) -> tuple[dict[str, Player], dict[str, CheckpointRef]]:
     # Returns every named player, and the player checkpoint of each one that is a checkpoint.
     players: dict[str, Player] = {}
@@ -171,7 +171,7 @@ def _players(
             players[name] = functools.partial(flat_seat, sims=int(name.removeprefix(_FLAT_PREFIX)))
         else:
             players[name], checkpoints[name] = _model_player(
-                int(name), run=run, config=config, cards=cards, sample=sample
+                int(name), run=run, config=config, cards=cards, layout=layout
             )
     return players, checkpoints
 
@@ -334,11 +334,6 @@ def _deals(decks: Sequence[Deck], *, count: int, seed: int) -> list[Deal]:
     return deals
 
 
-def _sample_boards(deal: Deal, *, cards: SetCards) -> Boards:
-    batch = start_batch(lambda: deal.decks, pool=cards.pool, games=1, seed=0)
-    return as_boards(batch.decisions(), device=torch.device("cpu"))
-
-
 def main(argv: Sequence[str]) -> None:
     """Play every pair, print the table and append each checkpoint's results to its run.
 
@@ -363,7 +358,7 @@ def main(argv: Sequence[str]) -> None:
     deals = _deals(decks, count=arguments.deals, seed=arguments.seed)
     games = legs(deals)
     players, checkpoints = _players(
-        arguments.players, run=arguments.run, config=config, cards=cards, sample=_sample_boards(deals[0], cards=cards)
+        arguments.players, run=arguments.run, config=config, cards=cards, layout=board_layout()
     )
     pairs = [tuple(pair.split(":")) for pair in arguments.pairs] or list(itertools.combinations(arguments.players, 2))
     names = tuple(cards.pool[card].name for card in range(len(cards.pool)))

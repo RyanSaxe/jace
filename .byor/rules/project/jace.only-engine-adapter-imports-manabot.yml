@@ -23,13 +23,14 @@ rule:
 metadata:
   byor:
     rationale: >
-      The engine sits behind jace.engine so that training, evaluation and
-      tests never depend on manabot, and a change in manabot touches two
-      files: the batched adapter that training plays through, and the
-      scalar games that scoring plays against manabot's scripted players.
+      The engine, managym, and manabot's players and rating code sit behind
+      jace.engine so that training, evaluation and tests never depend on
+      either package, and a change in one touches two files: the batched
+      adapter that training plays through, and the scalar games that
+      scoring plays against manabot's scripted players.
     agent_prompt: >
       Do not import manabot or managym here. Use the types in jace.engine
-      (GameBatch, Decisions, Finished, HiddenCards, Outcome). If you need
+      (GameBatch, BoardLayout, Decisions, Finished, HiddenCards, Outcome). If you need
       something new from the engine, add it to the GameBatch interface and
       implement it in src/jace/engine/manabot.py, or, for scoring a match
       between two players, add it to src/jace/engine/scoring.py.

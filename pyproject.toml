@@ -5,7 +5,8 @@ description = "Learn to draft, build decks and play Magic: The Gathering by self
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "manabot>=0.2.1",
+    "manabot>=0.2.3",
+    "managym>=0.2.3",
     "numpy>=2",
     "spells-mtg>=0.18",
     "torch>=2.10",

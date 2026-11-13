@@ -1,8 +1,8 @@
 # jace
 
 jace learns to draft, build decks and play Magic: The Gathering by playing
-against itself. It plays its games on the engine from
-[manabot](https://github.com/loopflowstudio/manabot).
+against itself. It plays its games on managym, the engine of
+[manabot](https://github.com/loopflowstudio/manabot), at version 0.2.3.
 
 > **Status: early.** Every part below has a first version with tests. The
 > drafter and the deck models have been trained on human data, and one short
@@ -43,8 +43,9 @@ Three ideas hold the design together:
 
 ## Try it
 
-You need Python 3.13, [uv](https://docs.astral.sh/uv/) and a Rust toolchain,
-because installing builds manabot's engine.
+You need Python 3.13 and [uv](https://docs.astral.sh/uv/). The engine
+installs as a built package where one exists for your platform. Elsewhere
+it is built from source, which needs a Rust toolchain.
 
 ```sh
 git clone https://github.com/RyanSaxe/jace.git

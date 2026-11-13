@@ -14,6 +14,7 @@ import torch
 from torch import Tensor, nn
 
 from jace.cards import CardEmbedding
+from jace.engine import BoardLayout
 from jace.modules import encode_real, run, transformer
 from jace.play.tokens import EntityEncoder, board_tokens
 from jace.play.types import Boards, Earlier, Guess
@@ -50,7 +51,7 @@ class GuessModel(nn.Module):
         embedding: CardEmbedding,
         *,
         engine_to_card: Tensor,
-        sample: Boards,
+        layout: BoardLayout,
         width: int,
         layers: int,
         heads: int,
@@ -62,10 +63,9 @@ class GuessModel(nn.Module):
         # engine_to_card: int64 [engine definition ids] -> CardId, -1 for a definition the pool lacks.
         self.engine_to_card: Tensor
         self.register_buffer("engine_to_card", engine_to_card.detach().clone(), persistent=False)
-        # sample: any batch of boards from the engine that will be played; only its feature widths are used.
-        tokens = board_tokens(sample, engine_to_card=engine_to_card)
-        self.entities: EntityEncoder = EntityEncoder(tokens, card_width=card_width, width=width)
-        self.events: nn.Linear = nn.Linear(tokens.events.shape[-1], width)
+        self.layout: BoardLayout = layout
+        self.entities: EntityEncoder = EntityEncoder(layout, card_width=card_width, width=width)
+        self.events: nn.Linear = nn.Linear(layout.event_features, width)
         self.earlier: nn.Linear = nn.Linear(_GUESS_PARTS * card_width, width)
         # queries: float [guess parts, width], the tokens whose encodings score the deck and the hand.
         self.queries: nn.Parameter = nn.Parameter(torch.randn(_GUESS_PARTS, width) * width**-0.5)
@@ -76,7 +76,7 @@ class GuessModel(nn.Module):
     def guess(self, boards: Boards, earlier: Earlier) -> Guess:
         # earlier.guesses.deck, .hand: float [b, t, cards], this game's guesses so far, newest first; t may be 0.
         # earlier.mask: bool [b, t]. Returns deck and hand, each float [b, cards].
-        tokens = board_tokens(boards, engine_to_card=self.engine_to_card)
+        tokens = board_tokens(boards, layout=self.layout, engine_to_card=self.engine_to_card)
         pool = torch.arange(self.embedding.starting.shape[0], device=self.embedding.starting.device)
         card_table = run(self.embedding, pool)  # [cards, card_width]
 

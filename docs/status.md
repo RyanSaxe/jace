@@ -17,7 +17,7 @@ says what it was measured on.
 | ----------- | ------------------------------------------------------------------- |
 | Drafting    | Pods draft by the rules, many at once, with one model call per pick |
 | Deck build  | Every deck is legal, and the search escapes a local best            |
-| Real games  | The manabot adapter replays a seed exactly and hides the opponent's decklist |
+| Real games  | The adapter on managym 0.2.3 replays a seed exactly and hides the opponent's decklist |
 | Models      | All five run on a larger card pool than they were built with        |
 | Training    | A player learns the toy game, and unfinished games carry over       |
 | End to end  | One limited round on the toy game updates every model               |
@@ -124,6 +124,6 @@ On an Apple M3 Max CPU:
 | --------------------------- | ---------------------------------------------------------- |
 | Slow deck search            | About two million deck scores and 24 seconds per pool at 200 proposals and full depth |
 | Library labels              | manabot's batched games report hands but not libraries. The adapter works a library out from the board, and is one card off while the other seat holds a foretold card or controls a permanent that both decks contain |
-| Abandoned games             | A game the engine reports an error on is abandoned and replaced. Its decisions teach nothing. That was 5 of 2,267 games of random play |
+| Abandoned games             | A game the engine fails on, cuts short, or whose board outgrows the board arrays is abandoned and replaced. Its decisions teach nothing. With 80 cards and 64 permanents a seat, that was 15 of 5,491 games of a scripted player on human decks |
 | Held-out statistics         | 17Lands statistics cover the held-out drafts too, which inflates every held-out score of a model that reads them |
 | Schedule numbers            | The drafter's rates and the explore share are guesses with no source |

@@ -17,13 +17,34 @@ import numpy.typing as npt
 
 from jace.cards import Deck
 
-__all__ = ("SEATS", "Board", "Decisions", "Finished", "GameBatch", "HiddenCards", "Outcome")
+__all__ = ("SEATS", "Board", "BoardLayout", "Decisions", "Finished", "GameBatch", "HiddenCards", "Outcome")
 
 # Every game has two players, seat 0 and seat 1.
 SEATS = 2
 
 # One named array per kind of thing a seat can see, each with a leading batch axis.
 type Board = Mapping[str, npt.NDArray[np.generic]]
+
+
+@dataclass(frozen=True, slots=True)
+class BoardLayout:
+    """What a model must know about an engine's boards before it sees one.
+
+    The first five fields are how many columns one row of each kind holds,
+    which size the models' input layers. A player's and a card's count
+    include the columns of their turn state when the engine reports one.
+    `permanent_definition` is the column of a permanent's row that holds
+    its card definition id plus one, with zero for none. An engine adapter
+    builds this from what its engine reports, and `jace.play` takes it as
+    plain data, so the models never import an engine.
+    """
+
+    player_features: int
+    card_features: int
+    permanent_features: int
+    action_features: int
+    event_features: int
+    permanent_definition: int
 
 
 class Outcome(enum.Enum):

@@ -30,9 +30,9 @@ from torch import nn
 from jace.cards import CardEmbedding, Deck, own_parameters
 from jace.data import SetCards, card_table, load_decks, read_set
 from jace.engine import SEATS
-from jace.engine.manabot import engine_card_ids, engine_cards, land_and_spell_actions, start_batch
+from jace.engine.manabot import board_layout, engine_card_ids, engine_cards, land_and_spell_actions, start_batch
 from jace.loops.entry_points import RunArguments, add_run_flags, device_named, playable_decks, start_run
-from jace.play import Guess, GuessModel, PlayerModel, as_boards, guesser_on, policy_on
+from jace.play import Guess, GuessModel, PlayerModel, guesser_on, policy_on
 from jace.tracking import (
     CheckpointRef,
     ModelName,
@@ -164,7 +164,7 @@ def _actor(seed: int, *, arguments: _Arguments) -> Actor:
     batch = start_batch(
         matchup, pool=cards.pool, games=arguments.games_per_worker, seed=rng.getrandbits(_ENGINE_SEED_BITS)
     )
-    models = _build_models(arguments, cards, decks=decks)
+    models = _build_models(arguments, cards)
     return Actor(
         batch=batch,
         policy=models.player.policy,
@@ -175,20 +175,16 @@ def _actor(seed: int, *, arguments: _Arguments) -> Actor:
     )
 
 
-def _build_models(arguments: _Arguments, cards: SetCards, *, decks: Sequence[Deck]) -> _Models:
-    # One game is started and never stepped: the models read their input widths from its boards.
-    sample = as_boards(
-        start_batch(lambda: (decks[0], decks[1]), pool=cards.pool, games=1, seed=0).decisions(),
-        device=torch.device("cpu"),
-    )
+def _build_models(arguments: _Arguments, cards: SetCards) -> _Models:
+    layout = board_layout()
     engine_to_card = engine_card_ids(cards.pool)
     embedding = CardEmbedding(cards.features, hidden=arguments.embedding_hidden, offset_bound=None)
     shape = {"width": arguments.play_width, "layers": arguments.play_layers, "heads": arguments.play_heads}
     return _Models(
         player=PlayerModel(
-            embedding, engine_to_card=engine_to_card, sample=sample, guess_cards=arguments.guess_cards, **shape
+            embedding, engine_to_card=engine_to_card, layout=layout, guess_cards=arguments.guess_cards, **shape
         ),
-        guess=GuessModel(embedding, engine_to_card=engine_to_card, sample=sample, **shape),
+        guess=GuessModel(embedding, engine_to_card=engine_to_card, layout=layout, **shape),
         embedding=embedding,
     )
 
@@ -353,8 +349,8 @@ def main(argv: Sequence[str]) -> None:
     """
     arguments = _arguments(argv)
     torch.manual_seed(arguments.seed)
-    cards, decks = _cards_and_decks(arguments)
-    models = _build_models(arguments, cards, decks=decks)
+    cards, _ = _cards_and_decks(arguments)
+    models = _build_models(arguments, cards)
     inputs: tuple[CheckpointRef, ...] = ()
     if arguments.embedding_run is not None:
         ref = latest_checkpoint(arguments.embedding_run, "embedding")

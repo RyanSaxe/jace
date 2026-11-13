@@ -1,10 +1,10 @@
 """Check the guess model and the player model on real engine boards.
 
-The boards in `tests/data/manabot_v6_boards.npz` are three decisions from one
-game, encoded by the manabot engine at input version 6: the opening decision
-and two later ones with permanents, graveyards and events. The tests call the
-models only through `jace.play`, so the token layout and the network can
-change without touching them.
+The boards in `tests/data/manabot_v10_boards.npz` are three decisions from
+real games, encoded by the engine adapter at input version 10, each with
+permanents and events on the board. The models are built from the layout
+the adapter reports, and the tests call them only through `jace.play`, so
+the token layout and the network can change without touching them.
 """
 
 from pathlib import Path
@@ -15,30 +15,31 @@ import torch
 from torch import Tensor
 
 from jace.cards import CardEmbedding
+from jace.engine.manabot import board_layout
 from jace.play import Boards, Earlier, Guess, GuessModel, PlayerModel, random_policy
 
 __all__ = ()
 
-ENGINE_DEFINITIONS = 360
-CARDS = 360
-MORE_CARDS = 400
+ENGINE_DEFINITIONS = 480
+CARDS = 480
+MORE_CARDS = 520
 CARD_WIDTH = 16
 
 
 def _real_boards() -> dict[str, Tensor]:
-    with np.load(Path(__file__).parent / "data" / "manabot_v6_boards.npz") as arrays:
+    with np.load(Path(__file__).parent / "data" / "manabot_v10_boards.npz") as arrays:
         return {name: torch.from_numpy(arrays[name]) for name in arrays.files}
 
 
-def _models(cards: int, boards: Boards) -> tuple[PlayerModel, GuessModel]:
+def _models(cards: int) -> tuple[PlayerModel, GuessModel]:
     torch.manual_seed(0)
     starting = torch.randn(MORE_CARDS, CARD_WIDTH, generator=torch.Generator().manual_seed(0))
     embedding = CardEmbedding(starting[:cards], hidden=CARD_WIDTH, offset_bound=None)
     engine_to_card = torch.arange(ENGINE_DEFINITIONS)
     player = PlayerModel(
-        embedding, engine_to_card=engine_to_card, sample=boards, width=64, layers=2, heads=4, guess_cards=8
+        embedding, engine_to_card=engine_to_card, layout=board_layout(), width=64, layers=2, heads=4, guess_cards=8
     )
-    guesser = GuessModel(embedding, engine_to_card=engine_to_card, sample=boards, width=64, layers=2, heads=4)
+    guesser = GuessModel(embedding, engine_to_card=engine_to_card, layout=board_layout(), width=64, layers=2, heads=4)
     return player.eval(), guesser.eval()
 
 
@@ -60,7 +61,7 @@ def _with_padding_overwritten(boards: Boards) -> dict[str, Tensor]:
 
 def test_player_gives_no_probability_to_illegal_actions_on_real_boards() -> None:
     boards = _real_boards()
-    player, _ = _models(CARDS, boards)
+    player, _ = _models(CARDS)
 
     with torch.no_grad():
         logits, win_chance = player.policy(boards, _some_guess((3, CARDS), seed=1))
@@ -75,9 +76,7 @@ def test_player_gives_no_probability_to_illegal_actions_on_real_boards() -> None
 
 def test_random_policy_spreads_probability_evenly_over_legal_actions() -> None:
     boards = _real_boards()
-    policy = random_policy(torch.arange(ENGINE_DEFINITIONS))
-
-    logits, win_chance = policy(boards, _some_guess((3, CARDS), seed=1))
+    logits, win_chance = random_policy(boards, _some_guess((3, CARDS), seed=1))
 
     probabilities = logits.softmax(dim=-1)
     assert torch.allclose(probabilities[:, 0], torch.tensor([1 / 5, 1 / 4, 1 / 2]))
@@ -88,7 +87,7 @@ def test_random_policy_spreads_probability_evenly_over_legal_actions() -> None:
 @pytest.mark.parametrize("earlier_guesses", [0, 3])
 def test_guess_is_a_deck_distribution_and_hand_probabilities(earlier_guesses: int) -> None:
     boards = _real_boards()
-    _, guesser = _models(CARDS, boards)
+    _, guesser = _models(CARDS)
     mask = torch.ones(3, earlier_guesses, dtype=torch.bool)
     earlier = Earlier(guesses=_some_guess((3, earlier_guesses, CARDS), seed=2), mask=mask)
 
@@ -104,7 +103,7 @@ def test_guess_is_a_deck_distribution_and_hand_probabilities(earlier_guesses: in
 def test_padding_rows_do_not_change_the_policy_or_the_guess() -> None:
     boards = _real_boards()
     padded_boards = _with_padding_overwritten(boards)
-    player, guesser = _models(CARDS, boards)
+    player, guesser = _models(CARDS)
     guesses = _some_guess((3, 2, CARDS), seed=2)
     junk = _some_guess((3, 1, CARDS), seed=3)
     earlier = Earlier(guesses=guesses, mask=torch.ones(3, 2, dtype=torch.bool))
@@ -129,9 +128,9 @@ def test_padding_rows_do_not_change_the_policy_or_the_guess() -> None:
 
 def test_models_score_a_larger_pool_and_old_cards_keep_their_scores() -> None:
     boards = _real_boards()
-    player, guesser = _models(CARDS, boards)
-    larger_player, larger_guesser = _models(CARDS, boards)
-    larger_player.embedding = larger_guesser.embedding = _models(MORE_CARDS, boards)[0].embedding
+    player, guesser = _models(CARDS)
+    larger_player, larger_guesser = _models(CARDS)
+    larger_player.embedding = larger_guesser.embedding = _models(MORE_CARDS)[0].embedding
     no_mask = torch.ones(3, 0, dtype=torch.bool)
 
     with torch.no_grad():

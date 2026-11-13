@@ -196,16 +196,16 @@ nvtx = [
 
 [[package]]
 name = "etude-sdk"
-version = "0.2.15"
+version = "0.2.16"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
     { name = "pydantic" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/da/83/bc081f31b3b1c76a96af2a12bd977a158b3da07a4477a02cec3b0002efcd/etude_sdk-0.2.15.tar.gz", hash = "sha256:0ddb2e64501400c999194d299916c92b723502cc4da9ab423da7fcdfc2b66702", size = 691636, upload-time = "2026-11-08T01:37:54.646Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/63/0170091267c6e2d45924c54f0a1ed083e627c1dc048580a50d3fcac8928f/etude_sdk-0.2.16.tar.gz", hash = "sha256:800f02745aa5a8ab2f7e46c4bf4972248e5a68146a5d2042d5ee2c6e190cd6a1", size = 732617, upload-time = "2026-11-12T11:46:05.628Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2a/16/c30bbbe240f474dfe572090b1f96c1c85aadb711077479621e35cc8b17da/etude_sdk-0.2.15-py3-none-any.whl", hash = "sha256:ec623ac994b1e8348479f6b102f81fc50c790423a537485595bf8f1b30a2eb1a", size = 473477, upload-time = "2026-11-08T01:37:53.089Z" },
+    { url = "https://files.pythonhosted.org/packages/8e/71/ece6e63863c9f660b8d2ae0652bc14e97641870908e527f46a0f2fab5ef8/etude_sdk-0.2.16-py3-none-any.whl", hash = "sha256:8cad3b851ea28e56e2946da35221003cc819c29623e3a5908d01b151f9fc21a0", size = 484718, upload-time = "2026-11-12T11:46:04.079Z" },
 ]
 
 [[package]]
@@ -366,6 +366,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "manabot" },
+    { name = "managym" },
     { name = "numpy" },
     { name = "spells-mtg" },
     { name = "torch" },
@@ -381,7 +382,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "manabot", specifier = ">=0.2.1" },
+    { name = "manabot", specifier = ">=0.2.3" },
+    { name = "managym", specifier = ">=0.2.3" },
     { name = "numpy", specifier = ">=2" },
     { name = "spells-mtg", specifier = ">=0.18" },
     { name = "torch", specifier = ">=2.10" },
@@ -449,11 +451,12 @@ wheels = [
 
 [[package]]
 name = "manabot"
-version = "0.2.1"
+version = "0.2.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "etude-sdk" },
     { name = "gymnasium" },
+    { name = "managym" },
     { name = "nbformat" },
     { name = "numpy" },
     { name = "psutil" },
@@ -461,10 +464,23 @@ dependencies = [
     { name = "torch" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5f/f6/549f022f6338480f9b5e4fe827fffcfdfaf1bde62b0b626c3dabe5197e0f/manabot-0.2.1.tar.gz", hash = "sha256:7e664924c7c901d81eafb64bfd2852ea269190e54eaea688825ecdd2a5d5724f", size = 1946999, upload-time = "2026-11-12T01:20:53.738Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3f/d7/0ce7813108d38ba99c96984d024140d17f5e4927c11700bddeabf53876fc/manabot-0.2.3.tar.gz", hash = "sha256:6ea2fda760c3befca34168c0a63f55406f95be54821f41e8f577b72abd0ce353", size = 995383, upload-time = "2026-11-13T02:20:22.137Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ec/75/6376b34da09a58c0a7f82f489b0b85ab1cda0b47b4dd9d2785655da2b007/manabot-0.2.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:ca0723dae020b656143c5832a98790742a4d5ce9eaac26496668e8279e73e9d2", size = 4530295, upload-time = "2026-11-12T01:20:50.645Z" },
-    { url = "https://files.pythonhosted.org/packages/42/1a/937acf4748ea651205b2efc2a3c3a47add99849882162794599b02396d11/manabot-0.2.1-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:87f8c6aa5b06788a0b80ef9fb90e3d842811b12b453983c0a8e950945a95266d", size = 4808602, upload-time = "2026-11-12T01:20:52.144Z" },
+    { url = "https://files.pythonhosted.org/packages/74/76/f1c66108c43312754cadc6da887d5a7fa9dd9ceb8ba6d907766233eb0e11/manabot-0.2.3-py3-none-any.whl", hash = "sha256:20e1363bb163e827033fc2cca2369aa565afcb49462784c93837d537b5a9d302", size = 1154543, upload-time = "2026-11-13T02:20:20.402Z" },
+]
+
+[[package]]
+name = "managym"
+version = "0.2.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3a/59/1803930337f5428c6c3b0590a04505b1c1385dc08a15da60d463818310bc/managym-0.2.3.tar.gz", hash = "sha256:5f999015d329d287e1ae7b83e2caa5225f12a0030957f70d99eb59d5b7603a5e", size = 1215140, upload-time = "2026-11-13T02:19:38.936Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/09/d6/5b262312cb0721a4083372d0cf33d7ee6ce1fd74d0795b994baca157d029/managym-0.2.3-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:5040426bedaf673bc28bab19aba9fae6e90f28bea4eb48ad4de73ec7f6495bbf", size = 3917727, upload-time = "2026-11-13T02:19:35.115Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/9e/7d75239ef6294795575cb6343bdb7a5fd29c99c0fcee2beda9b7cee8ac4e/managym-0.2.3-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:eaf344db0b414ffe9487bf278fa79f2b560195e30929833bb50f84112ed971ad", size = 4240992, upload-time = "2026-11-13T02:19:36.837Z" },
 ]
 
 [[package]]

@@ -14,7 +14,7 @@ import pytest
 import torch
 
 from jace.cards import CardPool, CardRecord, Deck, Rarity
-from jace.engine import Decisions, Finished
+from jace.engine import Decisions, Finished, Outcome
 from jace.engine.manabot import DeckRejectedError, engine_card_ids, engine_cards, start_batch
 
 __all__ = ()
@@ -92,6 +92,8 @@ def test_a_finished_game_reports_the_decks_it_was_played_with_and_its_slot_deals
         finished = batch.act(_random_actions(batch.decisions(), rng))
 
     game = finished[0]
+    # A game of random play ends with a winner: the engine failed nothing and cut nothing short.
+    assert game.outcome in {Outcome.SEAT_0_WON, Outcome.SEAT_1_WON}
     assert game.decks == in_play[game.slot]
     hidden = batch.hidden_cards()
     assert hidden.hands[game.slot].sum(axis=-1).tolist() == [_OPENING_HAND, _OPENING_HAND]

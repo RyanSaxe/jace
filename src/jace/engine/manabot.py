@@ -1,14 +1,23 @@
 """`GameBatch` on manabot's engine, and the engine's card catalog as plain data.
 
-Only this module and `jace.engine.scoring` import manabot, so a change in
-manabot's API reaches those two files. Decklists are closed, which means a seat's board
-never shows the opponent's deck and the guess model has to infer it. Boards
-are encoded at policy input version 8 because versions 6 and 7 refuse boards
-that hold certain continuous effects. Version 8 adds three arrays and leaves
-unchanged every array `jace.play.tokens` reads. The engine has no card rarity,
-so `engine_cards` cannot build a `CardPool` without data from another source.
+Only this module and `jace.engine.scoring` import the engine, `managym`, and
+manabot, which holds the description of the board arrays' sizes. A change in
+either reaches those two files. Decklists are closed, which means a seat's
+board never shows the opponent's deck and the guess model has to infer it.
+The engine has no card rarity, so `engine_cards` cannot build a `CardPool`
+without data from another source.
 
-Games run in manabot's `VectorEnv`, which steps every slot in one native call
+Boards are encoded at policy input version 10. Version 9 cannot hold what a
+player did earlier in the turn, such as the life it lost, and the engine
+refuses to encode a board that needs it, which Avatar cards do. The arrays
+hold 80 cards and 64 permanents for each seat where the engine's defaults
+are 60 and 40, because Avatar games outgrow the defaults. A game that
+outgrows these too is abandoned. `board_layout` reads the engine's own
+description of the arrays and checks it against what `jace.play.tokens`
+assumes, so a change of layout fails when a model is built and not while it
+plays.
+
+Games run in the engine's `VectorEnv`, which steps every slot in one native call
 and writes the boards into arrays this module owns. It reports hidden hands
 but not libraries, so `hidden_cards` works a library out as the deck minus the
 hand and minus the cards the acting seat's board shows in other zones. Two
@@ -20,36 +29,52 @@ cannot be told from the controller.
 
 import collections
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import managym
 import numpy as np
 import numpy.typing as npt
 import torch
-from manabot import managym
+from manabot.env.observation import ObservationSpace
+from manabot.infra.config import ObservationConfig
 from torch import Tensor
 
 from jace.cards import CardPool, Deck
-from jace.engine.batch import SEATS, Decisions, Finished, GameBatch, HiddenCards, Outcome
+from jace.engine.batch import SEATS, BoardLayout, Decisions, Finished, GameBatch, HiddenCards, Outcome
 
 __all__ = (
     "POLICY_INPUT_VERSION",
+    "BoardLayoutError",
     "DeckRejectedError",
     "EngineCard",
     "UnreadableDefinitionsError",
+    "board_layout",
     "engine_card_ids",
     "engine_cards",
     "land_and_spell_actions",
+    "observation_space",
     "start_batch",
 )
 
-POLICY_INPUT_VERSION = 8
+POLICY_INPUT_VERSION = 10
+# How many cards and permanents of one seat a board can hold. The engine's defaults are 60 and 40.
+_MAX_CARDS = 80
+_MAX_PERMANENTS = 64
 
-# Columns of a row of the `agent_cards` and `opponent_cards` boards. The first seven are one flag per zone.
-_LIBRARY_COLUMN = int(managym.ZoneEnum.LIBRARY)
-_HAND_COLUMN = int(managym.ZoneEnum.HAND)
-_TOKEN_COLUMN = 29
+# The engine's description of every board array: its axes, and the position of each named column.
+_ARRAYS = managym.observation_layout(turn_state=True)
+# Columns of a row of the `agent_cards` and `opponent_cards` boards.
+_LIBRARY_COLUMN = int(_ARRAYS["agent_cards"]["columns"]["zone_library"]["index"])
+_HAND_COLUMN = int(_ARRAYS["agent_cards"]["columns"]["zone_hand"]["index"])
+_TOKEN_COLUMN = int(_ARRAYS["agent_cards"]["columns"]["is_token"]["index"])
+# Columns of a row of the `actions` board.
+_PLAY_LAND_COLUMN = int(_ARRAYS["actions"]["columns"]["play_land"]["index"])
+_CAST_SPELL_COLUMN = int(_ARRAYS["actions"]["columns"]["cast_spell"]["index"])
+# What `jace.play.tokens` assumes about the arrays, in the engine's own words.
+_DEFINITION_ENCODING = "CardDefId + 1; 0 means absent"
+_FOCUS_ORDER = "agent player, opponent player, agent cards, opponent cards, agent permanents, opponent permanents"
 # The step results the engine writes beside the boards, which no player reads.
 _STEP_RESULTS = ("rewards", "terminated", "truncated")
 
@@ -70,6 +95,13 @@ class DeckRejectedError(ValueError):
         super().__init__(f"the engine rejected a deck: {reason}")
 
 
+class BoardLayoutError(RuntimeError):
+    def __init__(self, changed: Sequence[str]) -> None:
+        super().__init__(
+            "the engine's board arrays no longer match what jace.play.tokens assumes about: " + ", ".join(changed)
+        )
+
+
 class UnreadableDefinitionsError(TypeError):
     def __init__(self) -> None:
         super().__init__("the engine's card definitions JSON is not a list of objects with a name and a text_box")
@@ -86,7 +118,7 @@ def engine_cards() -> tuple[EngineCard, ...]:
     Tokens, back faces and rules fixtures are left out because no deck may
     hold them.
     """
-    catalog = managym.learning_catalog()
+    catalog = managym.catalog_tokens()
     kinds, values, offsets = catalog["token_kind"], catalog["token_value"], catalog["definition_offsets"]
     texts = _rules_texts()
     cards: list[EngineCard] = []
@@ -118,6 +150,52 @@ def engine_card_ids(pool: CardPool) -> Tensor:
     return card_ids
 
 
+def observation_space() -> ObservationSpace:
+    # The sizes of every board array, which the engine allocates and encodes by.
+    config = ObservationConfig(
+        policy_input_version=POLICY_INPUT_VERSION,
+        max_cards_per_player=_MAX_CARDS,
+        max_permanents_per_player=_MAX_PERMANENTS,
+    )
+    return ObservationSpace(config)
+
+
+def board_layout() -> BoardLayout:
+    """Describe the boards for `jace.play`, after checking them against what it assumes.
+
+    `jace.play.tokens` joins the acting seat's and the opponent's arrays in
+    the order the engine numbers an action's objects, reads a card's
+    identity as a definition id plus one, and appends each seat's turn
+    state to its player row and each card's to its card row. Each of those
+    is compared with the engine's description of its arrays. Raises
+    `BoardLayoutError`, naming what differs, when one no longer holds.
+    """
+    columns = {name: list(array["columns"]) for name, array in _ARRAYS.items()}
+    holds = {
+        "the columns of the two seats' players": columns["agent_player"] == columns["opponent_player"],
+        "the columns of the two seats' cards": columns["agent_cards"] == columns["opponent_cards"],
+        "the columns of the two seats' permanents": columns["agent_permanents"] == columns["opponent_permanents"],
+        "the order of action_focus": str(_ARRAYS["action_focus"]["element"]["encoding"]).endswith(_FOCUS_ORDER),
+        "the ids in semantic_cards": _ARRAYS["semantic_cards"]["element"]["encoding"] == _DEFINITION_ENCODING,
+        "the axes of semantic_cards": _ARRAYS["semantic_cards"]["axes"] == ["viewer_relative_seat", "card"],
+        "the id of a permanent": _ARRAYS["agent_permanents"]["columns"]["definition"]["encoding"]
+        == _DEFINITION_ENCODING,
+        "the axes of player_turn_state": _ARRAYS["player_turn_state"]["axes"] == ["viewer_relative_seat", "feature"],
+        "the axes of card_turn_state": _ARRAYS["card_turn_state"]["axes"] == ["viewer_relative_seat", "card"],
+    }
+    changed = [name for name, held in holds.items() if not held]
+    if changed:
+        raise BoardLayoutError(changed)
+    return BoardLayout(
+        player_features=len(columns["agent_player"]) + len(columns["player_turn_state"]),
+        card_features=len(columns["agent_cards"]) + 1,
+        permanent_features=len(columns["agent_permanents"]),
+        action_features=len(columns["actions"]),
+        event_features=len(columns["events"]),
+        permanent_definition=int(_ARRAYS["agent_permanents"]["columns"]["definition"]["index"]),
+    )
+
+
 def start_batch(matchups: Callable[[], tuple[Deck, Deck]], *, pool: CardPool, games: int, seed: int) -> GameBatch:
     names = tuple(pool[card].name for card in range(len(pool)))
     return _ManabotBatch(matchups, names=names, card_ids=engine_card_ids(pool).numpy(), games=games, seed=seed)
@@ -125,12 +203,11 @@ def start_batch(matchups: Callable[[], tuple[Deck, Deck]], *, pool: CardPool, ga
 
 def land_and_spell_actions(boards: Mapping[str, Tensor]) -> tuple[Tensor, Tensor]:
     # boards: the engine's arrays as tensors, each [n, ...]. Returns two bool [n, max_actions]
-    # masks: the legal actions that play a land, and the legal actions that cast a spell. The
-    # first columns of an action's row are one flag for each kind of action the engine has.
+    # masks: the legal actions that play a land, and the legal actions that cast a spell.
     legal = boards["actions_valid"] > 0
     kinds = boards["actions"]
-    lands = kinds[..., int(managym.ActionEnum.PRIORITY_PLAY_LAND)] > 0
-    spells = kinds[..., int(managym.ActionEnum.PRIORITY_CAST_SPELL)] > 0
+    lands = kinds[..., _PLAY_LAND_COLUMN] > 0
+    spells = kinds[..., _CAST_SPELL_COLUMN] > 0
     return lands & legal, spells & legal
 
 
@@ -174,19 +251,14 @@ class _ManabotBatch:
         base = int(np.random.SeedSequence(seed).generate_state(1, np.uint64)[0]) >> 1
         self._games: managym.VectorEnv = managym.VectorEnv(games, seed=base, opponent_policy="none")
         setups = [self._setup(slot) for slot in range(games)]
-        # The engine sizes its batched boards from the arrays it is given, so one scalar game supplies their shapes.
-        template = managym.Env(seed=base)
+        # The engine writes the boards into the arrays it is given, and encodes by their names and sizes.
+        self._buffers: dict[str, npt.NDArray[Any]] = observation_space().encoder.allocate(games)
+        self._buffers.update(
+            rewards=np.zeros(games, dtype=np.float64),
+            terminated=np.zeros(games, dtype=np.uint8),
+            truncated=np.zeros(games, dtype=np.uint8),
+        )
         try:
-            observation, _ = template.reset(setups[0])
-            shapes = template.encode_observation(observation, POLICY_INPUT_VERSION)
-            self._buffers: dict[str, npt.NDArray[Any]] = {
-                name: np.zeros((games, *board.shape), dtype=board.dtype) for name, board in shapes.items()
-            }
-            self._buffers.update(
-                rewards=np.zeros(games, dtype=np.float64),
-                terminated=np.zeros(games, dtype=np.uint8),
-                truncated=np.zeros(games, dtype=np.uint8),
-            )
             self._games.set_buffers(self._buffers)
             self._games.reset_each_into_buffers(setups)
         except managym.AgentError as error:
@@ -207,8 +279,11 @@ class _ManabotBatch:
         # for the observation arrays, in that slot's info and lets every other game advance.
         self._games.step_isolated_into_buffers(actions.tolist(), [True] * slots, recover_capacity=True)
         results = self._games.get_last_info()
-        failed = ["game_error" in result for result in results]
-        ended = self._buffers["terminated"] | self._buffers["truncated"] | np.array(failed)
+        # A game the engine could not continue, or one it cut short, has no result. `jace.engine.scoring`
+        # counts the same two as abandoned.
+        failed = [result.get("game_error") is not None for result in results]
+        cut_short = self._buffers["truncated"] > 0
+        ended = (self._buffers["terminated"] > 0) | cut_short | np.array(failed)
         if not ended.any():
             return ()
         if any(failed):
@@ -219,7 +294,8 @@ class _ManabotBatch:
         setups: list[list[managym.PlayerConfig] | None] = [None] * slots
         for slot in np.flatnonzero(ended).tolist():
             winner = results[slot].get("winner_index")
-            outcome = Outcome.ABANDONED if failed[slot] else _outcome(winner if isinstance(winner, int) else None)
+            unfinished = failed[slot] or bool(cut_short[slot])
+            outcome = Outcome.ABANDONED if unfinished else _outcome(winner if isinstance(winner, int) else None)
             finished.append(Finished(slot=slot, outcome=outcome, decks=self._decks[slot]))
             self._decks[slot] = self._matchups()
             setups[slot] = self._setup(slot)

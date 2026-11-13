@@ -24,14 +24,13 @@ from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from typing import Any, Literal
 
+import managym
 import numpy.typing as npt
 import torch
-from manabot import managym
 from manabot.env.env import Env
 from manabot.env.match import Match, Reward
-from manabot.env.observation import ObservationSpace
 from manabot.eval.rating import bootstrap_population, fit_population
-from manabot.infra.config import MatchConfig, ObservationConfig, RewardConfig
+from manabot.infra.config import MatchConfig, RewardConfig
 from manabot.sim.anchors import RandomMatchupPlayer, ScriptedGreedyPlayer
 from manabot.sim.heuristic import HeuristicPlayer
 from manabot.sim.players import DemoSearchPlayer
@@ -39,7 +38,7 @@ from torch import Tensor
 
 from jace.cards import Deck
 from jace.engine.batch import SEATS, Outcome
-from jace.engine.manabot import POLICY_INPUT_VERSION
+from jace.engine.manabot import observation_space
 
 __all__ = (
     "Observation",
@@ -290,7 +289,7 @@ def _work[T](
     torch.set_num_threads(1)
     # manabot logs every board it encodes at debug level.
     logging.getLogger("manabot").setLevel(logging.WARNING)
-    space = ObservationSpace(ObservationConfig(policy_input_version=POLICY_INPUT_VERSION))
+    space = observation_space()
     cards_by_name = {name: card for card, name in enumerate(names)}
     connection.send(None)
     for game in games:
