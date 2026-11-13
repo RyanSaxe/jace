@@ -32,14 +32,19 @@ class Sequences:
 def sequences(games: Tensor, seats: Tensor) -> Sequences:
     # games, seats: int64 [n], rows in the order the decisions were made.
     rows = torch.arange(len(games), device=games.device)
+    # One integer per (game, seat), so sorting by it gathers each sequence's rows together.
     keys = games * SEATS + seats
     order = torch.argsort(keys, stable=True)
     sorted_keys = keys[order]
     starts = torch.ones_like(sorted_keys, dtype=torch.bool)
     starts[1:] = sorted_keys[1:] != sorted_keys[:-1]
     sequence_sorted = starts.long().cumsum(0) - 1
+    # `rows` doubles here as each row's index in sorted order. The stable sort keeps a sequence's
+    # rows in time order, so a row's position is its sorted index minus the sorted index at which
+    # its sequence starts.
     sequence_start = torch.zeros_like(rows).scatter_reduce(0, sequence_sorted, rows, reduce="amin", include_self=False)
     position_sorted = rows - sequence_start[sequence_sorted]
+    # Scattering through `order` takes both from sorted order back to the order of the rows.
     sequence = torch.empty_like(rows).scatter(0, order, sequence_sorted)
     position = torch.empty_like(rows).scatter(0, order, position_sorted)
     count = int(sequence_sorted[-1]) + 1 if len(rows) else 0
@@ -62,11 +67,16 @@ def advantages(values: Tensor, results: Tensor, *, layout: Sequences, lam: float
     valid = layout.table >= 0
     rows = layout.table.clamp_min(0)
     value = values[rows] * valid
+    # Shifted one step left, so each position sees the next decision's prediction. After a
+    # sequence's last decision there is none, and the game's result stands in for it.
     later_valid = torch.cat([valid[:, 1:], torch.zeros_like(valid[:, :1])], dim=1)
     later_value = torch.cat([value[:, 1:], torch.zeros_like(value[:, :1])], dim=1)
     surprise = (torch.where(later_valid, later_value, results[rows]) - value) * valid
     estimate = torch.zeros_like(surprise)
+    # With no rows there is no column 0, and a sum over no columns gives the same zeros.
     running = torch.zeros_like(surprise[:, 0]) if surprise.shape[1] else surprise.sum(dim=1)
+    # From the last position back, each estimate is its own surprise plus `lam` times the next
+    # one's. A position past a sequence's end has zero surprise, so it adds nothing.
     for step in reversed(range(surprise.shape[1])):
         running = surprise[:, step] + lam * running
         estimate[:, step] = running
@@ -84,6 +94,8 @@ def earlier_guesses(guesses: Guess, layout: Sequences, *, rows: Tensor, history:
     """
     steps_back = torch.arange(1, history + 1, device=rows.device)
     positions = layout.position[rows][:, None] - steps_back
+    # `mask` is False for a position before the sequence's first decision, which is clamped to 0
+    # below so the lookup stays in range.
     mask = positions >= 0
     earlier_rows = layout.table[layout.sequence[rows][:, None], positions.clamp_min(0)]
     return Earlier(guesses=Guess(deck=guesses.deck[earlier_rows], hand=guesses.hand[earlier_rows]), mask=mask)

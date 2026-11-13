@@ -330,6 +330,7 @@ def land_and_spell_rates(rollout: Rollout) -> dict[str, float]:
     rates: dict[str, float] = {}
     for name, offered in zip(("land_rate", "spell_rate"), land_and_spell_actions(rollout.boards), strict=True):
         took = offered.gather(1, rollout.actions[:, None]).squeeze(1)
+        # The max over a turn's decisions is 1 when any one of them offered the action, or took it.
         turn_offered = per_turn.scatter_reduce(0, turn, offered.any(dim=-1).float(), reduce="amax")
         turn_took = per_turn.scatter_reduce(0, turn, took.float(), reduce="amax")
         rates[name] = float(turn_took.sum() / turn_offered.sum().clamp_min(1.0))

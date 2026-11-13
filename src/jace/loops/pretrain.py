@@ -228,6 +228,7 @@ def pick_accuracy(
 
 def _seen(packs: Tensor, *, cards: int) -> Tensor:
     # packs: int16 [b, t, pack_size] card ids, -1 past a pack's end. Returns float [b, t, cards] 0/1.
+    # Ids shift up by one so the -1 padding lands in column 0, which is then dropped.
     with_padding = torch.zeros(*packs.shape[:2], cards + 1, device=packs.device)
     with_padding.scatter_(2, packs.long() + 1, 1.0)
     return with_padding[:, :, 1:]

@@ -198,6 +198,7 @@ def play_games[T](
 
     with ThreadPoolExecutor(max_workers=max(len(shares), 1)) as threads:
         parts = list(threads.map(supervise, shares))
+    # Game i went to share i % workers as its game i // workers, so this restores the order of `games`.
     return tuple(parts[position % workers][position // workers] for position in range(len(games)))
 
 

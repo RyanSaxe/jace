@@ -52,7 +52,10 @@ def program_vectors(pool: CardPool, *, width: int) -> Tensor:
     # An entry every card has gets weight zero; one that a single card has gets the most.
     inverse_frequency = (len(known) / (table > 0).sum(dim=0)).log()  # [vocabulary]
     weighted = table.log1p() * inverse_frequency
+    # Each card's row is scaled to length one, so a card with a long program does not outweigh the rest.
     weighted = weighted / weighted.pow(2).sum(dim=1, keepdim=True).sqrt().clamp_min(SMALLEST_SPREAD)
+    # The SVD of the centred rows is principal component analysis: `left * strengths` is each
+    # card's place along the directions the cards differ most in, strongest first.
     left, strengths, _ = torch.linalg.svd(weighted - weighted.mean(dim=0), full_matrices=False)
     reduced = (left * strengths)[:, :width]  # [known, columns]
     spread = reduced.std(dim=0, correction=0).clamp_min(SMALLEST_SPREAD)

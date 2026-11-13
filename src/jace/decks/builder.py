@@ -197,6 +197,7 @@ def writing_steps(
     partial = torch.cat([torch.zeros_like(counts_after_step[:, :1]), counts_after_step[:, :-1]], dim=1)
     available = (pool_counts[:, None, :] - partial).clamp_min(0)
     slots_left = rules.size - torch.arange(rules.size, device=decks.device)
+    # As in `_write_decks`, a basic has as many copies available as the deck has slots left.
     available[:, :, is_basic] = slots_left[None, :, None].float().expand(count, -1, int(is_basic.sum()))
     return available.reshape(-1, cards), partial.reshape(-1, cards), chosen.reshape(-1)
 
@@ -235,6 +236,7 @@ def improve(decks: Tensor, *, pool_counts: Tensor, score: Scorer, rules: BuildRu
             # best_score, best_swap: [a]. best_swap indexes a deck's [m out, m in] swaps, flattened.
             best_score, best_swap = swap_scores.flatten(1).max(dim=1)
             better = best_score > scores[climbing]
+            # A deck whose best swap does not beat its current score is finished.
             climbing = climbing[better]
             if climbing.shape[0] == 0:
                 break
@@ -251,6 +253,7 @@ def _legal_swaps(held: Tensor, *, in_pool: Tensor, is_basic: Tensor, is_land: Te
     # is_basic, is_land: bool [m]. Returns bool [a, m out, m in]: true where taking one copy of
     # card `out` and adding one copy of card `in` leaves a legal deck.
     land = is_land.int()
+    # Taking out `out` and adding `in` changes the land count by is_land[in] - is_land[out].
     land_change = land.unsqueeze(0) - land.unsqueeze(1)  # int [m out, m in]
     lands = (held * land).sum(dim=1).long().view(-1, 1, 1) + land_change  # int64 [a, m, m]
     removable = held.gt(0).unsqueeze(2)  # bool [a, m, 1]
@@ -333,6 +336,7 @@ def rules_for_pool(rules: BuildRules, pool: Sequence[CardId]) -> BuildRules:
 def _land_range(pool_counts: Tensor, *, rules: BuildRules) -> tuple[int, int]:
     is_land, is_basic = _land_kinds(rules, cards=pool_counts.shape[0], device=pool_counts.device)
     spells = int(pool_counts[~is_land].sum())
+    # With basics the deck can be all lands; without them it holds at most the pool's lands.
     lands = rules.size if rules.basics else int(pool_counts[is_land & ~is_basic].sum())
     fewest = max(rules.min_lands, rules.size - spells)
     most = min(rules.max_lands, lands)
@@ -358,10 +362,12 @@ def _write_decks(
     one_copy = torch.ones((min_lands.shape[0], 1), device=pool_counts.device)
     for cards_added in range(rules.size):
         available = (pool_counts - decks).clamp_min(0)
+        # Basics are unlimited, so a basic has as many copies available as the deck has slots left.
         available[:, is_basic] = rules.size - cards_added
         lands_added = decks[:, is_land].sum(dim=1)
         spells_added = cards_added - lands_added
         may_add_land = lands_added < max_lands
+        # A spell fits only while the deck still has room after it for its minimum number of lands.
         may_add_spell = spells_added < rules.size - min_lands
         allowed = torch.where(is_land, may_add_land.unsqueeze(1), may_add_spell.unsqueeze(1)) & (available > 0)
         logits = next_card(available, decks).masked_fill(~allowed, float("-inf"))

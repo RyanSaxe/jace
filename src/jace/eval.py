@@ -278,6 +278,7 @@ def tally_guess(hand_guess: Tensor, hand_truth: Tensor) -> GuessTally:
     stated = hand_guess.flatten().double()
     truth = hand_truth.flatten().double()
     safe = stated.clamp(_CHANCE_MARGIN, 1.0 - _CHANCE_MARGIN)
+    # A stated chance of exactly 1 falls in the last range.
     chance_range = (stated * CHANCE_RANGES).long().clamp_max(CHANCE_RANGES - 1)
     empty = torch.zeros(CHANCE_RANGES, dtype=torch.float64)
     return GuessTally(
@@ -293,6 +294,8 @@ def tally_guess(hand_guess: Tensor, hand_truth: Tensor) -> GuessTally:
 def add_tallies(tallies: Iterable[GuessTally]) -> GuessTally:
     # The tally of every pair in `tallies`, which must all be over the same cards. No tallies
     # give the tally of no pairs.
+    # Each tally becomes one row of pairs, loss, the three per-range tuples and then `held`, so
+    # one sum adds every field.
     parts = [
         torch.tensor((tally.pairs, tally.loss, *tally.counts, *tally.stated, *tally.observed, *tally.held))
         for tally in tallies
@@ -312,6 +315,7 @@ def guess_report(tally: GuessTally) -> GuessReport:
     counts = torch.tensor(tally.counts, dtype=torch.float64)
     held = torch.tensor(tally.held, dtype=torch.float64)
     # base_rate: [cards], how often each card was in hand over the decisions scored.
+    # `pairs` is decisions times cards, so `held * cards / pairs` is `held` over decisions.
     base_rate = held * len(held) / tally.pairs if tally.pairs else held
     safe = base_rate.clamp(_CHANCE_MARGIN, 1.0 - _CHANCE_MARGIN)
     return GuessReport(

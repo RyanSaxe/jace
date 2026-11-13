@@ -48,6 +48,7 @@ class ToyBatch:
     def decisions(self) -> Decisions:
         playing = np.flatnonzero(self._game >= 0)
         first_pick = self._first_pick[playing]
+        # Seat 1 acts once seat 0 has picked.
         seats = (first_pick >= 0).astype(np.int64)
         hands = self._hands[playing, seats].astype(np.float32) / (TOY_CARDS - 1)
         seen = np.where(first_pick >= 0, first_pick / (TOY_CARDS - 1), -1.0).astype(np.float32)
@@ -72,6 +73,7 @@ class ToyBatch:
             game = int(self._game[slot])
             finished.append(Finished(game=game, outcome=outcome, decks=self._matchups[game]))
             self._game[slot] = self._started if self._started < len(self._matchups) else -1
+            # A game is counted as started only when one was left to deal into the slot.
             self._started += self._game[slot] >= 0
             self._deal(slot)
         return tuple(finished)

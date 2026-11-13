@@ -112,11 +112,15 @@ def player_loss(
     log_probs, available = _masked_log_probs(logits)
     old_log_probs, _ = _masked_log_probs(old_logits)
     chosen = actions[:, None]
+    # How much more likely the fresh policy makes the action taken than the policy that played it.
     ratio = (log_probs.gather(1, chosen) - old_log_probs.gather(1, chosen)).squeeze(1).exp()
+    # PPO's clipped objective: the lesser of the plain and the clipped gain, so moving the
+    # ratio past 1 +- clip earns nothing more in this update.
     gain = torch.minimum(ratio * advantages, ratio.clamp(1.0 - rule.clip, 1.0 + rule.clip) * advantages)
     kept = keep.float()
     kept_count = kept.sum().clamp_min(1.0)
     kl_to_old = (log_probs.exp() * (log_probs - old_log_probs) * available).sum(dim=-1)
+    # The log of the number of legal actions minus the entropy is the KL divergence to even odds.
     kl_to_even = available.float().sum(dim=-1).log() - entropy(logits)
     policy_loss = ((-gain + rule.stay * kl_to_old + rule.spread * kl_to_even) * kept).sum() / kept_count
     value_rows = learner.float()
@@ -134,5 +138,6 @@ def guess_loss(guess: Guess, *, deck_truth: Tensor, hand_truth: Tensor) -> Tenso
 def score_loss(logits: Tensor, *, wins: Tensor, games: Tensor) -> Tensor:
     # logits: [d] deck scores; wins, games: [d] games won and played by each deck.
     lost = games - wins
+    # The binomial log-likelihood of each deck's record at the win chance sigmoid(logit).
     per_deck = wins * functional.logsigmoid(logits) + lost * functional.logsigmoid(-logits)
     return -per_deck.sum() / games.sum().clamp_min(1.0)

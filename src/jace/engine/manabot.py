@@ -355,6 +355,9 @@ class _ManabotBatch:
         # The board files a permanent under its controller. A side that shows more copies of a card
         # than its seat's deck holds must control the other seat's permanents, so the extra copies move back.
         borrowed = (hands + public - self._deck_counts).clip(min=0)
+        # A borrowed copy was counted among the borrower's public cards, so it is added back to the
+        # borrower's library and taken out of the owner's. `borrowed[:, ::-1]` is what the other seat
+        # borrowed from this one.
         libraries = self._deck_counts - hands - public + borrowed - borrowed[:, ::-1]
         playing = self._game >= 0
         return HiddenCards(hands=hands[playing], libraries=libraries.clip(min=0)[playing])
@@ -373,6 +376,7 @@ class _ManabotBatch:
             slots, card_rows = np.nonzero((self._buffers[f"{name}_valid"] > 0) & ~hidden_zone_or_token)
             cards = self._card_ids[definitions[slots, side, card_rows]]
             in_pool = cards >= 0
+            # Side 0 is the acting seat's, so side s belongs to seat |s - acting|.
             seats = np.abs(side - acting[slots])
             np.add.at(counts, (slots[in_pool], seats[in_pool], cards[in_pool]), 1)
         return counts

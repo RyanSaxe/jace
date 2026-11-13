@@ -189,6 +189,7 @@ def score_fit(score: Scorer, decks: HumanDecks, *, rows: Tensor, device: torch.d
     enough = games >= _GAMES_FOR_A_RATE
     predicted_centred = predicted.sigmoid()[enough] - predicted.sigmoid()[enough].mean()
     actual_centred = (wins / games.clamp_min(1.0))[enough] - (wins / games.clamp_min(1.0))[enough].mean()
+    # Pearson's correlation: the sum of products of the centred values over this scale.
     scale = (predicted_centred.pow(2).sum() * actual_centred.pow(2).sum()).sqrt().clamp_min(_SMALLEST_CORRELATION_SCALE)
     return ScoreFit(
         log_loss=float(log_loss), correlation=float((predicted_centred * actual_centred).sum() / scale), decks=len(rows)

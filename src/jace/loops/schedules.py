@@ -100,9 +100,9 @@ def phased_schedule(*, decks_start: int, drafter_starts: int, pull_ends: int) ->
     first iteration. The deck models stay frozen until `decks_start` and
     the drafter until `drafter_starts`, so the player's results mean
     something before they rank decks or steer picks. The deck models then
-    learn at a fixed rate. Its rate then
-    ramps up over a tenth of that span, and its pull toward the human
-    drafter falls in a straight line to zero at `pull_ends`. The drafter's
+    learn at a fixed rate. The drafter's rate ramps up over a tenth of the
+    iterations it was frozen for, and its pull toward the human drafter
+    falls in a straight line to zero at `pull_ends`. The drafter's
     numbers and the explore share are first guesses with no source.
     """
 

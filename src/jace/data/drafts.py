@@ -144,6 +144,7 @@ def _read(rows: pl.LazyFrame, *, pool: CardPool) -> Tensors:
     for start in range(0, len(placed), _ROWS_PER_READ):
         pack_counts = torch.from_numpy(rows.slice(start, _ROWS_PER_READ).select(pack_columns).collect().to_numpy())
         chunk = slice(start, start + len(pack_counts))
+        # `row` counts the kept rows of this chunk.
         row, slot, card = _pack_slots(pack_counts[kept[chunk]])
         packs[draft_of_row[chunk][kept[chunk]][row], step_of_row[chunk][kept[chunk]][row], slot] = card.to(torch.int16)
 
@@ -175,5 +176,7 @@ def _pack_slots(counts: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     copies = counts[row, card].long()
     row, card = row.repeat_interleave(copies), card.repeat_interleave(copies)
     sizes = counts.sum(dim=1, dtype=torch.int64)
+    # `nonzero` lists entries row by row, so each row's copies sit together and a copy's slot is
+    # its distance from the row's first entry.
     first_entry = sizes.cumsum(dim=0) - sizes  # [rows], where each row's entries start
     return row, torch.arange(len(row)) - first_entry[row], card

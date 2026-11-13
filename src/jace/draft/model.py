@@ -65,6 +65,7 @@ class DrafterModel(nn.Module):
             + self.pack_mean(_mean_card(seen, cards))
             + self.positions(torch.arange(steps, device=seen.device))
         )  # [b, t, width]
+        # The current pack takes the position after the last real earlier step.
         current = (
             self.current + self.pack_mean(_mean_card(pack, cards)) + self.positions(steps - padding.sum(dim=-1))
         )  # [b, width]
@@ -94,6 +95,7 @@ class DrafterModel(nn.Module):
         cards = self.embedding(torch.arange(seen.shape[2], device=seen.device))  # [cards, card_width]
         order = torch.arange(steps, device=seen.device)
         packs = self.pack_mean(_mean_card(seen, cards)) + self.positions(order)  # [b, t, width]
+        # The first t tokens carry each step's pick and the last t are the queries.
         tokens = torch.cat([self.picked_card(cards[picks]) + packs, self.current + packs], dim=1)
         later = order[:, None] < order[None, :]  # [t, t]
         other = order[:, None] != order[None, :]  # [t, t]

@@ -160,6 +160,7 @@ def _without(pack: Pack, pick: CardId, *, seat: int) -> Pack:
 def _passed(packs: tuple[Pack, ...], *, round_index: int) -> tuple[Pack, ...]:
     step = 1 if round_index % 2 == 0 else -1
     seats = len(packs)
+    # Passing to the next seat means each seat receives the pack of the seat `step` places before it.
     return tuple(packs[(seat - step) % seats] for seat in range(seats))
 
 

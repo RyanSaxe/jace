@@ -48,6 +48,8 @@ class CardEmbedding(nn.Module):
             return embedded
         offset = functional.embedding(cards, self.offset)
         length = offset.pow(2).sum(dim=-1, keepdim=True).sqrt().clamp_min(self.offset_bound)
+        # `length` is max(|offset|, bound), so an offset shorter than the bound is unchanged and a
+        # longer one is scaled down to the bound.
         return embedded + offset * length.reciprocal() * self.offset_bound
 
     def pull(self) -> Tensor:

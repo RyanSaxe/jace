@@ -66,6 +66,7 @@ def update_player(
     """
     layout = sequences(rollout.games, rollout.seats)
     advantage = advantages(rollout.values, rollout.results, layout=layout, lam=lam_advantage)
+    # A prediction plus its advantage is the lambda-return, the target the win chance learns.
     value_targets = rollout.values + advantages(rollout.values, rollout.results, layout=layout, lam=lam_value)
     advantage_size = advantage.abs()
     learner_sizes = advantage_size[rollout.learner]

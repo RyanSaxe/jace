@@ -82,6 +82,7 @@ class GuessModel(nn.Module):
 
         entities = self.entities.embed(tokens, card_table)
         # Events are oldest first and earlier guesses newest first, so their ages count in opposite directions.
+        # A cumulative sum taken from the newest end counts the real events at or after each one.
         event_age = tokens.event_mask.flip(1).cumsum(1).flip(1) - 1
         events = self.events(tokens.events) + _age_encoding(event_age, width=self.width)
         # One token per earlier guess: its two probability vectors, each as a weighted sum of card embeddings.

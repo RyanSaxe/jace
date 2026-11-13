@@ -154,6 +154,7 @@ def play_on_workers(
     packed = io.BytesIO()
     torch.save({name: dict(state) for name, state in weights.items()}, packed)
     ready = [_await_ready(worker, stall_seconds=stall_seconds) for worker in workers]
+    # Matchup i goes to worker i % workers.
     shares = [tuple(range(first, len(matchups), len(ready))) for first in range(len(ready))]
     states: list[Worker] = [
         _assign(worker, weights=packed.getvalue(), matchups=matchups, share=share) if share else worker
@@ -226,6 +227,7 @@ def _advance(worker: Playing, *, played: list[tuple[tuple[int, ...], Collected]]
     if now - worker.since < stall_seconds:
         return worker
     _kill(worker.child)
+    # The new seed is drawn from the stalled one's, so a run's seeds depend only on its own seed.
     return _spawn(worker.child.build, seed=random.Random(worker.child.seed).getrandbits(_SEED_BITS))
 
 

@@ -163,6 +163,7 @@ def _truth(batch: GameBatch, seats: Tensor) -> tuple[Tensor, Tensor]:
     # Returns (deck_truth, hand_truth), each [n, cards], for the opponent of the seat acting in each game in play.
     hidden = batch.hidden_cards()
     in_play = torch.arange(len(seats))
+    # `1 - seats` is the opponent of the seat acting in each game.
     hands = torch.from_numpy(hidden.hands)[in_play, 1 - seats].float()
     unseen = hands + torch.from_numpy(hidden.libraries)[in_play, 1 - seats].float()
     return unseen / unseen.sum(dim=-1, keepdim=True).clamp_min(1.0), (hands > 0).float()
@@ -189,6 +190,7 @@ def _guess(
     earlier = Guess(deck=history.deck[games, seats], hand=history.hand[games, seats])
     mask = torch.arange(history_length) < history_count[games, seats][:, None]
     guess = guesser(boards, Earlier(guesses=earlier, mask=mask))
+    # The new guess goes in front and the oldest falls off the end, so the history stays newest first.
     history.deck[games, seats] = torch.cat([guess.deck[:, None], earlier.deck], dim=1)[:, :history_length]
     history.hand[games, seats] = torch.cat([guess.hand[:, None], earlier.hand], dim=1)[:, :history_length]
     history_count[games, seats] = (history_count[games, seats] + 1).clamp_max(history_length)
