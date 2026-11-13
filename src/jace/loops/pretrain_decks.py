@@ -164,8 +164,8 @@ def pretrain_deck_score(
         loss_sum += float(loss.detach())
         if step % settings.evaluate_every == 0 or step == settings.steps:
             fit = score_fit(model, decks, rows=held_out, device=device)
-            since = step - (curve[-1].step if curve else 0)
-            point = ScorePoint(step, loss_sum / since, fit.log_loss, fit.correlation)
+            steps_since_point = step - (curve[-1].step if curve else 0)
+            point = ScorePoint(step, loss_sum / steps_since_point, fit.log_loss, fit.correlation)
             metrics = {"loss": point.loss, "held_out_log_loss": point.log_loss}
             log_update(
                 run, model="deck_score", update=step, metrics={**metrics, "held_out_correlation": fit.correlation}
@@ -187,10 +187,12 @@ def score_fit(score: Scorer, decks: HumanDecks, *, rows: Tensor, device: torch.d
     games = wins + decks.losses[rows].double()
     log_loss = score_loss(predicted, wins=wins, games=games)
     enough = games >= _GAMES_FOR_A_RATE
-    chance = predicted.sigmoid()[enough] - predicted.sigmoid()[enough].mean()
-    rate = (wins / games.clamp_min(1.0))[enough] - (wins / games.clamp_min(1.0))[enough].mean()
-    spread = (chance.pow(2).sum() * rate.pow(2).sum()).sqrt().clamp_min(_SMALLEST_CORRELATION_SCALE)
-    return ScoreFit(log_loss=float(log_loss), correlation=float((chance * rate).sum() / spread), decks=len(rows))
+    predicted_centred = predicted.sigmoid()[enough] - predicted.sigmoid()[enough].mean()
+    actual_centred = (wins / games.clamp_min(1.0))[enough] - (wins / games.clamp_min(1.0))[enough].mean()
+    scale = (predicted_centred.pow(2).sum() * actual_centred.pow(2).sum()).sqrt().clamp_min(_SMALLEST_CORRELATION_SCALE)
+    return ScoreFit(
+        log_loss=float(log_loss), correlation=float((predicted_centred * actual_centred).sum() / scale), decks=len(rows)
+    )
 
 
 def pretrain_deck_builder(
@@ -241,8 +243,8 @@ def pretrain_deck_builder(
         loss_sum += float(loss.detach())
         if step % settings.evaluate_every == 0 or step == settings.steps:
             overlap = deck_overlap(best_guess, decks, rows=held_out, rules=rules, device=device)
-            since = step - (curve[-1].step if curve else 0)
-            point = BuilderPoint(step, loss_sum / since, overlap)
+            steps_since_point = step - (curve[-1].step if curve else 0)
+            point = BuilderPoint(step, loss_sum / steps_since_point, overlap)
             log_update(
                 run, model="deck_builder", update=step, metrics={"loss": point.loss, "held_out_overlap": overlap}
             )

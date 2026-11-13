@@ -92,8 +92,8 @@ def load_drafts(rows: pl.LazyFrame, *, pool: CardPool, cache_dir: Path, held_out
     result = (saved["wins"] / matches.clamp_min(1.0)).clamp(RESULT_FLOOR, 1.0)
     picks_per_round = packs.shape[2]
     pick_in_round = torch.arange(packs.shape[1]) % picks_per_round + 1
-    position = (pick_in_round.log() + 1) / pick_in_round.pow(_POSITION_POWER)
-    weights = (skill * result)[:, None] * position[None, :]
+    position_weight = (pick_in_round.log() + 1) / pick_in_round.pow(_POSITION_POWER)
+    weights = (skill * result)[:, None] * position_weight[None, :]
     # A pack that opens a round with one card is a first pick rebuilt from the pool.
     rebuilt = packs[:, 0, 1] < 0 if picks_per_round > 1 else torch.zeros(len(packs), dtype=torch.bool)
     weights[rebuilt, 0] = 0.0
@@ -142,21 +142,21 @@ def _read(rows: pl.LazyFrame, *, pool: CardPool) -> Tensors:
     picks[draft_of_row[kept], step_of_row[kept]] = torch.from_numpy(placed["pick"].to_numpy(writable=True))[kept]
     packs = torch.full((len(drafts), steps, picks_per_round), -1, dtype=torch.int16)
     for start in range(0, len(placed), _ROWS_PER_READ):
-        counts = torch.from_numpy(rows.slice(start, _ROWS_PER_READ).select(pack_columns).collect().to_numpy())
-        here = slice(start, start + len(counts))
-        row, slot, card = _pack_slots(counts[kept[here]])
-        packs[draft_of_row[here][kept[here]][row], step_of_row[here][kept[here]][row], slot] = card.to(torch.int16)
+        pack_counts = torch.from_numpy(rows.slice(start, _ROWS_PER_READ).select(pack_columns).collect().to_numpy())
+        chunk = slice(start, start + len(pack_counts))
+        row, slot, card = _pack_slots(pack_counts[kept[chunk]])
+        packs[draft_of_row[chunk][kept[chunk]][row], step_of_row[chunk][kept[chunk]][row], slot] = card.to(torch.int16)
 
-    no_first = packs[:, 0, 0] < 0
-    if no_first.any():
+    missing_first = packs[:, 0, 0] < 0
+    if missing_first.any():
         second = rows.filter(step == 1).select("draft_id", *pool_columns).collect()
         second = second.join(drafts.select("draft_id", "draft"), on="draft_id").sort("draft")
-        held = torch.from_numpy(second.select(pool_columns).to_numpy())  # int8 [drafts, cards]
-        if len(held) != len(drafts) or bool((held.sum(dim=1) != 1)[no_first].any()):
-            raise PoolAtSecondPickError(int(no_first.sum()))
-        first = held.argmax(dim=1).to(torch.int16)
-        picks[no_first, 0] = first[no_first]
-        packs[no_first, 0, 0] = first[no_first]
+        second_pool = torch.from_numpy(second.select(pool_columns).to_numpy())  # int8 [drafts, cards]
+        if len(second_pool) != len(drafts) or bool((second_pool.sum(dim=1) != 1)[missing_first].any()):
+            raise PoolAtSecondPickError(int(missing_first.sum()))
+        first_picks = second_pool.argmax(dim=1).to(torch.int16)
+        picks[missing_first, 0] = first_picks[missing_first]
+        packs[missing_first, 0, 0] = first_picks[missing_first]
     return {
         "packs": packs,
         "picks": picks,

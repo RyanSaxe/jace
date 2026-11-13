@@ -99,10 +99,10 @@ class DrafterModel(nn.Module):
         other = order[:, None] != order[None, :]  # [t, t]
         # Rows are the token that looks. A picked token sees picked tokens up to its own. A query
         # sees the picked tokens before its step and, of the queries, only itself.
-        hidden = torch.cat(
+        blocked = torch.cat(
             [torch.cat([later, torch.ones_like(later)], dim=1), torch.cat([later | ~other, other], dim=1)]
         )  # [2t, 2t], True where a token may not look
-        queries = self.encoder.forward(tokens, mask=hidden)[:, steps:]  # [b, t, width]
+        queries = self.encoder.forward(tokens, mask=blocked)[:, steps:]  # [b, t, width]
         candidates = self.candidate(cards)  # [cards, width]
         scores = queries @ candidates.T / math.sqrt(candidates.shape[1])  # [b, t, cards]
         return scores.masked_fill(seen == 0, float("-inf"))

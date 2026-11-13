@@ -251,33 +251,33 @@ def _attempt[T](
     # after the first game that hangs or ends the process. The time limit starts when the process says it is ready,
     # so loading the players does not count against the first game.
     context = multiprocessing.get_context("spawn")
-    ours, theirs = context.Pipe()
+    parent_end, child_end = context.Pipe()
     process = context.Process(
         target=_work,
-        args=(theirs, games),
+        args=(child_end, games),
         kwargs={"check_guesses": check_guesses, "names": names, "decklists": decklists},
         daemon=True,
     )
     process.start()
-    theirs.close()
+    child_end.close()
     played: list[Played[T]] = []
     crashed = False
     try:
         try:
-            ours.recv()
+            parent_end.recv()
         except EOFError as error:
             # The process ended before it was ready, so its players or the engine failed to load.
             process.join()
             raise WorkerDiedError(process.exitcode) from error
-        while len(played) < len(games) and ours.poll(game_seconds):
-            played.append(ours.recv())
+        while len(played) < len(games) and parent_end.poll(game_seconds):
+            played.append(parent_end.recv())
     except EOFError:
         # The engine can panic inside a game, which ends the process. That game has no result.
         crashed = True
     finally:
         process.kill()
         process.join()
-        ours.close()
+        parent_end.close()
     if len(played) < len(games):
         outcome = Outcome.ABANDONED if crashed else Outcome.HUNG
         played.append(Played(outcome=outcome, decisions=0, guesses=(None, None)))

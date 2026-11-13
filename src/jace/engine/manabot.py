@@ -273,7 +273,7 @@ class _ManabotBatch:
         # slot's games do not change with how fast the other slots finish. The base is hashed so that
         # batches started from neighbouring seeds share no game, and halved so the additions cannot overflow.
         base = int(np.random.SeedSequence(seed).generate_state(1, np.uint64)[0]) >> 1
-        self._games: managym.VectorEnv = managym.VectorEnv(slots, seed=base, opponent_policy="none")
+        self._engine: managym.VectorEnv = managym.VectorEnv(slots, seed=base, opponent_policy="none")
         setups = [self._setup(slot) for slot in range(slots)]
         # The engine writes the boards into the arrays it is given, and encodes by their names and sizes.
         self._buffers: dict[str, npt.NDArray[Any]] = observation_space().encoder.allocate(slots)
@@ -283,8 +283,8 @@ class _ManabotBatch:
             truncated=np.zeros(slots, dtype=np.uint8),
         )
         try:
-            self._games.set_buffers(self._buffers)
-            self._games.reset_each_into_buffers(setups)
+            self._engine.set_buffers(self._buffers)
+            self._engine.reset_each_into_buffers(setups)
         except managym.AgentError as error:
             raise DeckRejectedError(str(error)) from error
 
@@ -293,7 +293,7 @@ class _ManabotBatch:
         # Indexing copies, so a caller may keep a board after later steps overwrite the engine's arrays.
         return Decisions(
             games=self._game[playing],
-            seats=np.array(self._games.current_agent_indices(), dtype=np.int64)[playing],
+            seats=np.array(self._engine.current_agent_indices(), dtype=np.int64)[playing],
             boards={name: self._buffers[name][playing] for name in self._reported},
             action_counts=self._buffers["actions_valid"][playing].sum(axis=1).astype(np.int64),
         )
@@ -305,8 +305,8 @@ class _ManabotBatch:
         # An isolated step reports a game the engine cannot continue, such as a board too large
         # for the observation arrays, in that slot's info and lets every other game advance. A
         # slot with no game is not stepped.
-        self._games.step_isolated_into_buffers(every_slot.tolist(), playing.tolist(), recover_capacity=True)
-        results = self._games.get_last_info()
+        self._engine.step_isolated_into_buffers(every_slot.tolist(), playing.tolist(), recover_capacity=True)
+        results = self._engine.get_last_info()
         # A game the engine could not continue, or one it cut short, has no result. `jace.engine.scoring`
         # counts the same two as abandoned.
         failed = np.array([result.get("game_error") is not None for result in results]) & playing
@@ -315,7 +315,7 @@ class _ManabotBatch:
         if not ended.any():
             return ()
         if failed.any():
-            self._games.replace_failed_into_buffers(failed.tolist())
+            self._engine.replace_failed_into_buffers(failed.tolist())
         # The engine has already dealt each ended slot a new game from the old decks. The next
         # matchup of the list is dealt over it below, and a slot with none left is never stepped again.
         finished: list[Finished] = []
@@ -333,7 +333,7 @@ class _ManabotBatch:
             self._started += 1
             setups[slot] = self._setup(slot)
         try:
-            self._games.reassign_roots_into_buffers(setups)
+            self._engine.reassign_roots_into_buffers(setups)
         except managym.AgentError as error:
             raise DeckRejectedError(str(error)) from error
         return tuple(finished)
@@ -344,7 +344,7 @@ class _ManabotBatch:
         held = [
             (slot, seat, self._cards_by_name[name], copies)
             for seat in range(SEATS)
-            for slot, hand in enumerate(self._games.hand_snapshots([seat] * slots))
+            for slot, hand in enumerate(self._engine.hand_snapshots([seat] * slots))
             for name, copies in hand.cards.items()
             if name in self._cards_by_name
         ]
@@ -363,7 +363,7 @@ class _ManabotBatch:
         # Returns int64 [slots, 2, cards]: copies of each card that the acting seat's board lists on each
         # seat's side outside the hand and the library, which is the battlefield, graveyard, exile and stack.
         counts = np.zeros_like(self._deck_counts)
-        acting = np.array(self._games.current_agent_indices(), dtype=np.int64)
+        acting = np.array(self._engine.current_agent_indices(), dtype=np.int64)
         # definitions: int64 [slots, 2, card rows], the engine definition id of each listed card, acting seat first.
         definitions = self._buffers["semantic_cards"].astype(np.int64) - 1
         for side, name in enumerate(("agent_cards", "opponent_cards")):

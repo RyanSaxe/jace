@@ -38,8 +38,8 @@ def sequences(games: Tensor, seats: Tensor) -> Sequences:
     starts = torch.ones_like(sorted_keys, dtype=torch.bool)
     starts[1:] = sorted_keys[1:] != sorted_keys[:-1]
     sequence_sorted = starts.long().cumsum(0) - 1
-    first_row = torch.zeros_like(rows).scatter_reduce(0, sequence_sorted, rows, reduce="amin", include_self=False)
-    position_sorted = rows - first_row[sequence_sorted]
+    sequence_start = torch.zeros_like(rows).scatter_reduce(0, sequence_sorted, rows, reduce="amin", include_self=False)
+    position_sorted = rows - sequence_start[sequence_sorted]
     sequence = torch.empty_like(rows).scatter(0, order, sequence_sorted)
     position = torch.empty_like(rows).scatter(0, order, position_sorted)
     count = int(sequence_sorted[-1]) + 1 if len(rows) else 0
@@ -82,8 +82,8 @@ def earlier_guesses(guesses: Guess, layout: Sequences, *, rows: Tensor, history:
     `guesses`, which holds one guess per rollout row, so nothing is stored
     twice.
     """
-    back = torch.arange(1, history + 1, device=rows.device)
-    positions = layout.position[rows][:, None] - back
+    steps_back = torch.arange(1, history + 1, device=rows.device)
+    positions = layout.position[rows][:, None] - steps_back
     mask = positions >= 0
-    earlier = layout.table[layout.sequence[rows][:, None], positions.clamp_min(0)]
-    return Earlier(guesses=Guess(deck=guesses.deck[earlier], hand=guesses.hand[earlier]), mask=mask)
+    earlier_rows = layout.table[layout.sequence[rows][:, None], positions.clamp_min(0)]
+    return Earlier(guesses=Guess(deck=guesses.deck[earlier_rows], hand=guesses.hand[earlier_rows]), mask=mask)

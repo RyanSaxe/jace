@@ -177,12 +177,12 @@ def play_on_workers(
 
 def _spawn(build: BuildActor, *, seed: int) -> Starting:
     context = multiprocessing.get_context("spawn")
-    ours, theirs = context.Pipe()
+    parent_end, child_end = context.Pipe()
     steps = context.RawValue(ctypes.c_int64, 0)
-    process = context.Process(target=_work, args=(theirs, steps), kwargs={"build": build, "seed": seed}, daemon=True)
+    process = context.Process(target=_work, args=(child_end, steps), kwargs={"build": build, "seed": seed}, daemon=True)
     process.start()
-    theirs.close()
-    child = _Child(process=process, connection=ours, steps=steps, build=build, seed=seed)
+    child_end.close()
+    child = _Child(process=process, connection=parent_end, steps=steps, build=build, seed=seed)
     return Starting(child=child, since=time.monotonic())
 
 
@@ -204,7 +204,7 @@ def _await_ready(worker: Worker, *, stall_seconds: float) -> Ready:
 
 def _assign(worker: Ready, *, weights: bytes, matchups: Sequence[Matchup], share: tuple[int, ...]) -> Playing:
     # Ready -> Playing.
-    worker.child.connection.send((weights, [matchups[at] for at in share]))
+    worker.child.connection.send((weights, [matchups[position] for position in share]))
     return Playing(child=worker.child, share=share, steps=worker.child.steps.value, since=time.monotonic())
 
 

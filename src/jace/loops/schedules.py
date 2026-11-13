@@ -107,12 +107,12 @@ def phased_schedule(*, decks_start: int, drafter_starts: int, pull_ends: int) ->
     """
 
     def schedule(iteration: int) -> Dials:
-        warm = drafter_starts + max(1, round(drafter_starts * _DRAFTER_WARM_UP))
+        drafter_warm_end = drafter_starts + max(1, round(drafter_starts * _DRAFTER_WARM_UP))
         return Dials(
             player_rate=power_decay(iteration, scale=_RATE_SCALE, power=_RATE_POWER, low=_RATE_FLOOR, high=_RATE_CAP),
             spread=power_decay(iteration, scale=_SPREAD_START, power=_SPREAD_POWER, low=0.0, high=_SPREAD_START),
             deck_rate=_DECK_RATE if iteration >= decks_start else 0.0,
-            drafter_rate=ramp(iteration, start=drafter_starts, end=warm, first=0.0, last=_DRAFTER_RATE),
+            drafter_rate=ramp(iteration, start=drafter_starts, end=drafter_warm_end, first=0.0, last=_DRAFTER_RATE),
             human_pull=ramp(iteration, start=drafter_starts, end=pull_ends, first=1.0, last=0.0),
             drafter_entropy=_DRAFTER_ENTROPY,
             explore_share=_EXPLORE_SHARE,
@@ -129,12 +129,12 @@ def warm_up_then_decay(steps: int) -> RateScale:
     line to a tenth at the last step. Multiply an optimizer's peak learning
     rate by it with `scale_rates`.
     """
-    warm = max(1, round(steps * _WARM_UP_SHARE))
+    warm_up_steps = max(1, round(steps * _WARM_UP_SHARE))
 
     def rate_scale(step: int) -> float:
-        if step <= warm:
-            return step / warm
-        return ramp(step, start=warm, end=steps, first=1.0, last=_LAST_RATE_SHARE)
+        if step <= warm_up_steps:
+            return step / warm_up_steps
+        return ramp(step, start=warm_up_steps, end=steps, first=1.0, last=_LAST_RATE_SHARE)
 
     return rate_scale
 

@@ -201,19 +201,19 @@ def model_seat(seed: int, *, policy: Policy, guesser: Guesser, cards: int, histo
     """
     generator = torch.Generator().manual_seed(seed)
     earlier = Guess(deck=torch.zeros(1, history, cards), hand=torch.zeros(1, history, cards))
-    made = 0
+    guesses_made = 0
 
     def seat(_game: object, observation: Mapping[str, npt.NDArray[Any]]) -> tuple[int, Tensor]:
-        nonlocal earlier, made
+        nonlocal earlier, guesses_made
         boards = {name: torch.from_numpy(array)[None] for name, array in observation.items()}
         with torch.no_grad():
-            guess = guesser(boards, Earlier(guesses=earlier, mask=(torch.arange(history) < made)[None]))
+            guess = guesser(boards, Earlier(guesses=earlier, mask=(torch.arange(history) < guesses_made)[None]))
             logits, _ = policy(boards, guess)
         earlier = Guess(
             deck=torch.cat((guess.deck[:, None], earlier.deck), dim=1)[:, :history],
             hand=torch.cat((guess.hand[:, None], earlier.hand), dim=1)[:, :history],
         )
-        made += 1
+        guesses_made += 1
         action = torch.multinomial(logits.softmax(dim=-1), 1, generator=generator)
         return int(action), guess.hand[0]
 
@@ -266,8 +266,8 @@ def win_rate(results: Tensor, *, resamples: int, generator: torch.Generator) -> 
     their range overstates certainty: pass one mean result per deal, as
     `score_match` does.
     """
-    picks = torch.randint(0, len(results), (resamples, len(results)), generator=generator)
-    rates = results[picks].mean(dim=1)
+    draws = torch.randint(0, len(results), (resamples, len(results)), generator=generator)
+    rates = results[draws].mean(dim=1)
     low, high = rates.quantile(torch.tensor([_RANGE_TAIL, 1.0 - _RANGE_TAIL])).tolist()
     return WinRate(rate=float(results.mean()), low=low, high=high)
 

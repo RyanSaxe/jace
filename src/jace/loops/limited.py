@@ -164,8 +164,8 @@ def _build(
         parts = [learners.score(part) for part in decks.split(setup.score_chunk)]
         return torch.cat(parts)
 
-    played: list[Candidate] = []
-    best: list[Candidate] = []
+    played_decks: list[Candidate] = []
+    best_decks: list[Candidate] = []
     for record in records:
         for pool in record.pools:
             # A drafter that took too many lands still gets a deck, with as many lands as it must play.
@@ -181,9 +181,9 @@ def _build(
                 rounds=setup.search_rounds,
             )
             explore = len(candidates) > 1 and rng.random() < dials.explore_share
-            played.append(rng.choice(candidates[1:]) if explore else candidates[0])
-            best.append(candidates[0])
-    return played, best
+            played_decks.append(rng.choice(candidates[1:]) if explore else candidates[0])
+            best_decks.append(candidates[0])
+    return played_decks, best_decks
 
 
 def _counts(decks: Sequence[Deck], *, cards: int, device: torch.device) -> Tensor:
@@ -225,13 +225,13 @@ def _deck_records(
     # (wins [decks], games played [decks]) over the games that finished; a draw counts as half
     # a win for each deck. Decks are told apart by number, so two equal decks stay two decks.
     wins = torch.zeros(decks)
-    played = torch.zeros(decks)
+    games_played = torch.zeros(decks)
     for game in games:
         learner_deck, other_deck = (schedule[game.game][seat] for seat in (game.learner_seat, 1 - game.learner_seat))
         wins[learner_deck] += game.learner_result
         wins[other_deck] += 1.0 - game.learner_result
-        played[[learner_deck, other_deck]] += 1
-    return wins, played
+        games_played[[learner_deck, other_deck]] += 1
+    return wins, games_played
 
 
 def _update_drafter(
@@ -241,10 +241,10 @@ def _update_drafter(
     records: Sequence[DraftRecord],
     learner_seats: int,
     win_rates: Tensor,
-    played: Tensor,
+    games_played: Tensor,
     dials: Dials,
 ) -> Metrics:
-    # win_rates, played: [pods * seats] in pod then seat order. Seats whose deck played no game teach nothing.
+    # win_rates, games_played: [pods * seats] in pod then seat order. Seats whose deck played no game teach nothing.
     seats = setup.draft_format.seats
     views: list[SeatView] = []
     chosen: list[int] = []
@@ -252,7 +252,7 @@ def _update_drafter(
     for pod, record in enumerate(records):
         for seat in range(learner_seats):
             deck = pod * seats + seat
-            if played[deck] == 0:
+            if games_played[deck] == 0:
                 continue
             views.extend(record.views[seat])
             chosen.extend(record.pools[seat])
@@ -303,16 +303,16 @@ def _update_play_models(
 
 
 def _update_deck_score(
-    setup: LimitedSetup, learners: Learners, *, decks: Sequence[Deck], wins: Tensor, played: Tensor
+    setup: LimitedSetup, learners: Learners, *, decks: Sequence[Deck], wins: Tensor, games_played: Tensor
 ) -> Metrics:
-    # wins, played: [decks]. Decks that played no game teach nothing.
-    seen_play = played > 0
-    if not bool(seen_play.any()):
+    # wins, games_played: [decks]. Decks that played no game teach nothing.
+    has_games = games_played > 0
+    if not bool(has_games.any()):
         nothing: dict[str, float] = {}
         return nothing
     device = learners.drafter.embedding.starting.device
-    logits = learners.score(_counts(decks, cards=len(setup.pool), device=device)[seen_play.to(device)])
-    loss = score_loss(logits, wins=wins[seen_play].to(device), games=played[seen_play].to(device))
+    logits = learners.score(_counts(decks, cards=len(setup.pool), device=device)[has_games.to(device)])
+    loss = score_loss(logits, wins=wins[has_games].to(device), games=games_played[has_games].to(device))
     apply(loss, [learners.optimizers["deck_score"]], max_grad_norm=setup.max_grad_norm)
     return {"deck_score/loss": float(loss.detach())}
 
@@ -374,7 +374,7 @@ def limited_iteration(
     )
     matchups: list[Matchup] = [(decks[first], decks[second]) for first, second in schedule]
     collected = play(matchups)
-    wins, played = _deck_records(schedule, collected.games, decks=len(decks))
+    wins, games_played = _deck_records(schedule, collected.games, decks=len(decks))
     finished = time.perf_counter()
 
     metrics: dict[str, float] = {
@@ -385,7 +385,7 @@ def limited_iteration(
     }
     metrics |= _update_play_models(setup, learners, rollout=collected.rollout, dials=dials, generator=generator)
     if dials.deck_rate > 0:
-        metrics |= _update_deck_score(setup, learners, decks=decks, wins=wins, played=played)
+        metrics |= _update_deck_score(setup, learners, decks=decks, wins=wins, games_played=games_played)
         metrics |= _update_builder(setup, learners, records=records, best_decks=best_decks, generator=generator)
     if dials.drafter_rate > 0:
         metrics |= _update_drafter(
@@ -393,8 +393,8 @@ def limited_iteration(
             learners,
             records=records,
             learner_seats=setup.draft_format.seats - len(other_seats),
-            win_rates=wins / played.clamp_min(1.0),
-            played=played,
+            win_rates=wins / games_played.clamp_min(1.0),
+            games_played=games_played,
             dials=dials,
         )
     return metrics | {

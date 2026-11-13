@@ -115,13 +115,13 @@ def player_loss(
     ratio = (log_probs.gather(1, chosen) - old_log_probs.gather(1, chosen)).squeeze(1).exp()
     gain = torch.minimum(ratio * advantages, ratio.clamp(1.0 - rule.clip, 1.0 + rule.clip) * advantages)
     kept = keep.float()
-    weight = kept.sum().clamp_min(1.0)
-    stay = (log_probs.exp() * (log_probs - old_log_probs) * available).sum(dim=-1)
-    even = available.float().sum(dim=-1).log() - entropy(logits)
-    policy = ((-gain + rule.stay * stay + rule.spread * even) * kept).sum() / weight
-    played = learner.float()
-    value = ((values - value_targets).pow(2) * played).sum() / played.sum().clamp_min(1.0)
-    return policy + rule.value_weight * value
+    kept_count = kept.sum().clamp_min(1.0)
+    kl_to_old = (log_probs.exp() * (log_probs - old_log_probs) * available).sum(dim=-1)
+    kl_to_even = available.float().sum(dim=-1).log() - entropy(logits)
+    policy_loss = ((-gain + rule.stay * kl_to_old + rule.spread * kl_to_even) * kept).sum() / kept_count
+    value_rows = learner.float()
+    value_error = ((values - value_targets).pow(2) * value_rows).sum() / value_rows.sum().clamp_min(1.0)
+    return policy_loss + rule.value_weight * value_error
 
 
 def guess_loss(guess: Guess, *, deck_truth: Tensor, hand_truth: Tensor) -> Tensor:

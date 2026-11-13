@@ -162,21 +162,21 @@ def _decide(
 def _truth(batch: GameBatch, seats: Tensor) -> tuple[Tensor, Tensor]:
     # Returns (deck_truth, hand_truth), each [n, cards], for the opponent of the seat acting in each game in play.
     hidden = batch.hidden_cards()
-    slot_index = torch.arange(len(seats))
-    hands = torch.from_numpy(hidden.hands)[slot_index, 1 - seats].float()
-    unseen = hands + torch.from_numpy(hidden.libraries)[slot_index, 1 - seats].float()
+    in_play = torch.arange(len(seats))
+    hands = torch.from_numpy(hidden.hands)[in_play, 1 - seats].float()
+    unseen = hands + torch.from_numpy(hidden.libraries)[in_play, 1 - seats].float()
     return unseen / unseen.sum(dim=-1, keepdim=True).clamp_min(1.0), (hands > 0).float()
 
 
 def _finished_rows(parts: Sequence[Rollout], finished: Sequence[GameResult], *, abandoned: set[int]) -> Rollout:
     # Joins the steps of a round, drops the rows of abandoned games and fills in every row's result.
     joined = join(parts)
-    rows = select(joined, ~torch.isin(joined.games, torch.tensor(sorted(abandoned), dtype=torch.int64)))
+    kept = select(joined, ~torch.isin(joined.games, torch.tensor(sorted(abandoned), dtype=torch.int64)))
     seat_0_result = torch.zeros(int(joined.games.max()) + 1)
     for game in finished:
         seat_0_result[game.game] = game.learner_result if game.learner_seat == 0 else 1.0 - game.learner_result
-    result = seat_0_result[rows.games]
-    return replace(rows, results=torch.where(rows.seats == 0, result, 1.0 - result))
+    row_seat_0_result = seat_0_result[kept.games]
+    return replace(kept, results=torch.where(kept.seats == 0, row_seat_0_result, 1.0 - row_seat_0_result))
 
 
 def _guess(
@@ -185,13 +185,13 @@ def _guess(
     # Makes the acting seat's guess in every game in play and puts it at the front of that seat's
     # history, in place. games, seats: int64 [n]. history: [games of the round, 2, h, cards]
     # each; history_count: int64 [games of the round, 2].
-    shown = history.deck.shape[2]
+    history_length = history.deck.shape[2]
     earlier = Guess(deck=history.deck[games, seats], hand=history.hand[games, seats])
-    mask = torch.arange(shown) < history_count[games, seats][:, None]
+    mask = torch.arange(history_length) < history_count[games, seats][:, None]
     guess = guesser(boards, Earlier(guesses=earlier, mask=mask))
-    history.deck[games, seats] = torch.cat([guess.deck[:, None], earlier.deck], dim=1)[:, :shown]
-    history.hand[games, seats] = torch.cat([guess.hand[:, None], earlier.hand], dim=1)[:, :shown]
-    history_count[games, seats] = (history_count[games, seats] + 1).clamp_max(shown)
+    history.deck[games, seats] = torch.cat([guess.deck[:, None], earlier.deck], dim=1)[:, :history_length]
+    history.hand[games, seats] = torch.cat([guess.hand[:, None], earlier.hand], dim=1)[:, :history_length]
+    history_count[games, seats] = (history_count[games, seats] + 1).clamp_max(history_length)
     return guess
 
 
@@ -232,8 +232,8 @@ def play_games(
         raise NoGamesError
     batch = start(matchups)
     empty = torch.zeros(len(matchups), SEATS, history, cards)
-    guesses = Guess(deck=empty, hand=empty.clone())
-    guess_count = torch.zeros(len(matchups), SEATS, dtype=torch.long)
+    guess_history = Guess(deck=empty, hand=empty.clone())
+    history_count = torch.zeros(len(matchups), SEATS, dtype=torch.long)
     first_seat = int(torch.randint(0, SEATS, (1,), generator=generator))
     learner_seat = (torch.arange(len(matchups)) + first_seat) % SEATS
     # `==`, not `is`: a bound method is a new object each time it is read from its model.
@@ -246,7 +246,7 @@ def play_games(
         games = torch.from_numpy(pending.games.copy())
         seats = torch.from_numpy(pending.seats.copy())
         boards = {name: torch.from_numpy(np.array(array)) for name, array in pending.boards.items()}
-        guess = _guess(guesser, boards, games=games, seats=seats, history=guesses, history_count=guess_count)
+        guess = _guess(guesser, boards, games=games, seats=seats, history=guess_history, history_count=history_count)
         is_learner = torch.ones_like(seats, dtype=torch.bool) if self_play else seats == learner_seat[games]
         logits, values = _decide(boards, guess, is_learner=is_learner, learner=learner, opponent=opponent)
         log_probs = logits.log_softmax(dim=-1)

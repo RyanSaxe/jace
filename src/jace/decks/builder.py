@@ -189,10 +189,10 @@ def writing_steps(
     count, cards = decks.shape
     _, is_basic = _land_kinds(rules, cards=cards, device=decks.device)
     every_card = torch.arange(cards, device=decks.device)
-    listed = torch.stack([every_card.repeat_interleave(row) for row in decks.long()])  # [n, size]
+    deck_cards = torch.stack([every_card.repeat_interleave(row) for row in decks.long()])  # [n, size]
     # The generator lives on the CPU, so the random order is drawn there and moved.
-    shuffle = torch.rand(listed.shape, generator=generator).to(decks.device).argsort(dim=1)
-    chosen = listed.gather(1, shuffle)
+    random_order = torch.rand(deck_cards.shape, generator=generator).to(decks.device).argsort(dim=1)
+    chosen = deck_cards.gather(1, random_order)
     counts_after_step = torch.nn.functional.one_hot(chosen, cards).float().cumsum(dim=1)  # [n, size, cards]
     partial = torch.cat([torch.zeros_like(counts_after_step[:, :1]), counts_after_step[:, :-1]], dim=1)
     available = (pool_counts[:, None, :] - partial).clamp_min(0)
@@ -232,16 +232,17 @@ def improve(decks: Tensor, *, pool_counts: Tensor, score: Scorer, rules: BuildRu
             if not bool(legal.any()):
                 break
             swap_scores = _swap_scores(decks[climbing], legal, movable=movable, score=score)
-            best, flat = swap_scores.flatten(1).max(dim=1)  # [a]; flat indexes a deck's [m out, m in] swaps
-            better = best > scores[climbing]
+            # best_score, best_swap: [a]. best_swap indexes a deck's [m out, m in] swaps, flattened.
+            best_score, best_swap = swap_scores.flatten(1).max(dim=1)
+            better = best_score > scores[climbing]
             climbing = climbing[better]
             if climbing.shape[0] == 0:
                 break
-            out = flat[better] // movable.shape[0]
-            into = flat[better] % movable.shape[0]
+            out = best_swap[better] // movable.shape[0]
+            into = best_swap[better] % movable.shape[0]
             decks[climbing, movable[out]] -= 1
             decks[climbing, movable[into]] += 1
-            scores[climbing] = best[better].to(scores.dtype)
+            scores[climbing] = best_score[better].to(scores.dtype)
     return decks
 
 
@@ -298,9 +299,9 @@ def build_decks(
     distinct = improved.cpu().unique(dim=0)  # float [d, cards]
     with torch.no_grad():
         scores = score(distinct.to(device)).cpu()
-    ids = torch.arange(cards)
+    every_card = torch.arange(cards)
     return tuple(
-        Candidate(deck=tuple(ids.repeat_interleave(distinct[index].long()).tolist()), score=float(scores[index]))
+        Candidate(deck=tuple(every_card.repeat_interleave(distinct[index].long()).tolist()), score=float(scores[index]))
         for index in scores.argsort(descending=True).tolist()
     )
 
@@ -354,7 +355,7 @@ def _write_decks(
     # Returns float [n, cards]. Every row is a legal deck because a step only offers moves that leave one reachable.
     is_land, is_basic = _land_kinds(rules, cards=pool_counts.shape[0], device=pool_counts.device)
     decks = torch.zeros((min_lands.shape[0], pool_counts.shape[0]), device=pool_counts.device)
-    one = torch.ones((min_lands.shape[0], 1), device=pool_counts.device)
+    one_copy = torch.ones((min_lands.shape[0], 1), device=pool_counts.device)
     for cards_added in range(rules.size):
         available = (pool_counts - decks).clamp_min(0)
         available[:, is_basic] = rules.size - cards_added
@@ -370,5 +371,5 @@ def _write_decks(
             # The generator lives on the CPU, so the card is drawn there and moved back.
             chances = logits.softmax(dim=1).to(generator.device)
             choice = torch.multinomial(chances, 1, generator=generator).to(logits.device)
-        decks.scatter_add_(1, choice, one)
+        decks.scatter_add_(1, choice, one_copy)
     return decks

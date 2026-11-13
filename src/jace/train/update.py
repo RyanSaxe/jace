@@ -67,17 +67,17 @@ def update_player(
     layout = sequences(rollout.games, rollout.seats)
     advantage = advantages(rollout.values, rollout.results, layout=layout, lam=lam_advantage)
     value_targets = rollout.values + advantages(rollout.values, rollout.results, layout=layout, lam=lam_value)
-    size = advantage.abs()
-    learner_sizes = size[rollout.learner]
+    advantage_size = advantage.abs()
+    learner_sizes = advantage_size[rollout.learner]
     threshold = float(learner_sizes.quantile(rule.keep_quantile)) if len(learner_sizes) else 0.0
-    keep = rollout.learner & (size >= max(threshold, rule.keep_floor))
+    keep = rollout.learner & (advantage_size >= max(threshold, rule.keep_floor))
     if rule.normalize and int(keep.sum()) > 1:
         advantage = (advantage - advantage[keep].mean()) / advantage[keep].std().clamp_min(_SMALLEST_SPREAD)
-    total = 0.0
-    slices = 0
+    loss_total = 0.0
+    slice_count = 0
     for _ in range(passes):
         for rows in torch.randperm(len(advantage), generator=generator).split(slice_rows):
-            total += _player_step(
+            loss_total += _player_step(
                 policy,
                 select(rollout, rows),
                 advantages=advantage[rows],
@@ -87,9 +87,9 @@ def update_player(
                 max_grad_norm=max_grad_norm,
                 optimizers=optimizers,
             )
-            slices += 1
+            slice_count += 1
     return {
-        "loss": total / max(slices, 1),
+        "loss": loss_total / max(slice_count, 1),
         "kept_share": float(keep.float().mean()),
         "advantage_size": float(learner_sizes.mean()) if len(learner_sizes) else 0.0,
     }
@@ -142,13 +142,13 @@ def update_guess(
     order of the rows does not matter to them. Returns the mean loss.
     """
     layout = sequences(rollout.games, rollout.seats)
-    total = 0.0
-    slices = 0
+    loss_total = 0.0
+    slice_count = 0
     for rows in torch.randperm(len(rollout.games), generator=generator).split(slice_rows):
         part = select(rollout, rows)
         guess = guesser(part.boards, earlier_guesses(rollout.guesses, layout, rows=rows, history=history))
         loss = guess_loss(guess, deck_truth=part.deck_truth, hand_truth=part.hand_truth)
         apply(loss, optimizers, max_grad_norm=max_grad_norm)
-        total += float(loss.detach())
-        slices += 1
-    return {"loss": total / max(slices, 1)}
+        loss_total += float(loss.detach())
+        slice_count += 1
+    return {"loss": loss_total / max(slice_count, 1)}

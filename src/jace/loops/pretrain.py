@@ -65,7 +65,7 @@ __all__ = (
 # every step, finite for a card in the pack and -inf for every other. `DrafterModel.whole_draft` is one.
 type PickScorer = Callable[[Tensor, Tensor], Tensor]
 
-_TOP = (1, 2, 3)
+_TOP_RANKS = (1, 2, 3)
 # What a starting vector can be made from, in the order the parts are joined.
 _SOURCES = ("statistics", "text", "program")
 _PROGRAM_WIDTH = 64
@@ -176,8 +176,8 @@ def pretrain_drafter(
             accuracy = pick_accuracy(
                 model.whole_draft, drafts, rows=held_out, cards=cards, device=device, settings=settings
             )
-            since = step - (curve[-1].step if curve else 0)
-            point = CurvePoint(step, loss_sum / since, accuracy.top1, accuracy.top2, accuracy.top3)
+            steps_since_point = step - (curve[-1].step if curve else 0)
+            point = CurvePoint(step, loss_sum / steps_since_point, accuracy.top1, accuracy.top2, accuracy.top3)
             metrics = {"loss": point.loss, "held_out_top1": point.top1, "held_out_top2": point.top2}
             log_update(run, model="drafter", update=step, metrics={**metrics, "held_out_top3": point.top3})
             curve.append(point)
@@ -207,7 +207,7 @@ def pick_accuracy(
     Raises `NonFiniteScoreError` when a card in a pack gets a score that is
     NaN or infinite, which is what a model that diverged returns.
     """
-    hits = torch.zeros(len(_TOP), dtype=torch.int64)
+    hits = torch.zeros(len(_TOP_RANKS), dtype=torch.int64)
     counted = 0
     with torch.no_grad():
         for start in range(0, len(rows), settings.evaluate_drafts):
@@ -220,7 +220,7 @@ def pick_accuracy(
                 raise NonFiniteScoreError
             # [m], the other cards ranked level with the pick or above it. The pick is level with itself.
             ahead = (scores >= scores.gather(2, picks[:, :, None])).sum(dim=-1)[real] - 1
-            hits += torch.stack([(ahead < top).sum() for top in _TOP]).cpu()
+            hits += torch.stack([(ahead < top).sum() for top in _TOP_RANKS]).cpu()
             counted += int(real.sum())
     top1, top2, top3 = (hits / max(counted, 1)).tolist()
     return PickAccuracy(top1=top1, top2=top2, top3=top3, picks=counted)
@@ -228,17 +228,17 @@ def pick_accuracy(
 
 def _seen(packs: Tensor, *, cards: int) -> Tensor:
     # packs: int16 [b, t, pack_size] card ids, -1 past a pack's end. Returns float [b, t, cards] 0/1.
-    slots = torch.zeros(*packs.shape[:2], cards + 1, device=packs.device)
-    slots.scatter_(2, packs.long() + 1, 1.0)
-    return slots[:, :, 1:]
+    with_padding = torch.zeros(*packs.shape[:2], cards + 1, device=packs.device)
+    with_padding.scatter_(2, packs.long() + 1, 1.0)
+    return with_padding[:, :, 1:]
 
 
 def _prior_loss(logits: Tensor, picked: Tensor, *, weights: Tensor, priors: PickPriors) -> Tensor:
     # logits: [m, cards] with cards outside the pack at -inf. picked: int64 [m]. weights: [m].
     chances = logits.softmax(dim=-1)
-    rare = (1.0 - priors.rare[picked]) * (chances * priors.rare).sum(dim=-1)
-    costlier = (chances * priors.mana_value).sum(dim=-1) - priors.mana_value[picked] + priors.mana_margin
-    return (weights * (priors.rare_weight * rare + priors.mana_weight * costlier.clamp_min(0.0))).mean()
+    rare_penalty = (1.0 - priors.rare[picked]) * (chances * priors.rare).sum(dim=-1)
+    mana_excess = (chances * priors.mana_value).sum(dim=-1) - priors.mana_value[picked] + priors.mana_margin
+    return (weights * (priors.rare_weight * rare_penalty + priors.mana_weight * mana_excess.clamp_min(0.0))).mean()
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,7 +341,7 @@ def _baselines(
     )
     real = drafts.weights[held_out] > 0
     sizes = (drafts.packs[held_out] >= 0).sum(dim=-1)[real].float()  # [m] cards in each scored pack
-    uniform = {f"top{top}": float((sizes.clamp_max(top) / sizes).mean()) for top in _TOP}
+    uniform = {f"top{top}": float((sizes.clamp_max(top) / sizes).mean()) for top in _TOP_RANKS}
     return uniform, by_ata
 
 
@@ -410,7 +410,10 @@ def main(argv: Sequence[str]) -> None:
         "training_drafts": int((~drafts.held_out).sum()),
         "held_out_drafts": int(drafts.held_out.sum()),
         "held_out_picks": by_ata.picks,
-        "baselines": {"uniform": uniform, "best_ata": {f"top{top}": getattr(by_ata, f"top{top}") for top in _TOP}},
+        "baselines": {
+            "uniform": uniform,
+            "best_ata": {f"top{top}": getattr(by_ata, f"top{top}") for top in _TOP_RANKS},
+        },
         "curve": [asdict(point) for point in curve],
     }
     curve_file.write_text(json.dumps(summary, indent=2) + "\n")

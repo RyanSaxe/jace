@@ -326,11 +326,11 @@ def land_and_spell_rates(rollout: Rollout) -> dict[str, float]:
     """
     turns = torch.stack((rollout.games.double(), rollout.seats.double(), turn_numbers(rollout.boards).double()), dim=1)
     _, turn = turns.unique(dim=0, return_inverse=True)  # int64 [n], the turn each decision belongs to
-    nothing = torch.zeros(int(turn.max()) + 1 if len(turn) else 0)
+    per_turn = torch.zeros(int(turn.max()) + 1 if len(turn) else 0)
     rates: dict[str, float] = {}
     for name, offered in zip(("land_rate", "spell_rate"), land_and_spell_actions(rollout.boards), strict=True):
         took = offered.gather(1, rollout.actions[:, None]).squeeze(1)
-        could = nothing.scatter_reduce(0, turn, offered.any(dim=-1).float(), reduce="amax")
-        did = nothing.scatter_reduce(0, turn, took.float(), reduce="amax")
-        rates[name] = float(did.sum() / could.sum().clamp_min(1.0))
+        turn_offered = per_turn.scatter_reduce(0, turn, offered.any(dim=-1).float(), reduce="amax")
+        turn_took = per_turn.scatter_reduce(0, turn, took.float(), reduce="amax")
+        rates[name] = float(turn_took.sum() / turn_offered.sum().clamp_min(1.0))
     return rates

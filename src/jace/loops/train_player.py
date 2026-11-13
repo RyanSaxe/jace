@@ -230,7 +230,7 @@ def _train(
             first, second = rng.sample(decks, SEATS)
             matchups.append((first, second))
         collected = play(matchups)
-        played = time.perf_counter()
+        play_ended = time.perf_counter()
         updates = _update(arguments, models, rollout=collected.rollout, optimizers=optimizers, generator=generator)
         decisions = len(collected.rollout.games)
         metrics = {
@@ -238,9 +238,9 @@ def _train(
             "abandoned": float(collected.abandoned),
             "lost": float(collected.lost),
             "decisions": float(decisions),
-            "play_seconds": played - began,
-            "update_seconds": time.perf_counter() - played,
-            "decisions_per_second": decisions / (played - began),
+            "play_seconds": play_ended - began,
+            "update_seconds": time.perf_counter() - play_ended,
+            "decisions_per_second": decisions / (play_ended - began),
             **updates,
         }
         log_update(run, model="player", update=iteration, metrics=metrics)

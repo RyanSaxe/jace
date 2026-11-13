@@ -42,14 +42,16 @@ def program_vectors(pool: CardPool, *, width: int) -> Tensor:
     known = [card for card, program in enumerate(programs) if program]
     if not known:
         raise NoProgramsError
-    counts = [_pair_counts(programs[card]) for card in known]
-    column = {pairs: index for index, pairs in enumerate(sorted({pairs for count in counts for pairs in count}))}
-    table = torch.zeros(len(known), len(column))  # [known, vocabulary] how often each card has each entry
-    for row, count in enumerate(counts):
-        table[row, [column[pairs] for pairs in count]] = torch.tensor(list(count.values()), dtype=torch.float32)
+    card_entries = [_pair_counts(programs[card]) for card in known]
+    column_of = {
+        entry: index for index, entry in enumerate(sorted({entry for entries in card_entries for entry in entries}))
+    }
+    table = torch.zeros(len(known), len(column_of))  # [known, vocabulary] how often each card has each entry
+    for row, entries in enumerate(card_entries):
+        table[row, [column_of[entry] for entry in entries]] = torch.tensor(list(entries.values()), dtype=torch.float32)
     # An entry every card has gets weight zero; one that a single card has gets the most.
-    rarity = (len(known) / (table > 0).sum(dim=0)).log()  # [vocabulary]
-    weighted = table.log1p() * rarity
+    inverse_frequency = (len(known) / (table > 0).sum(dim=0)).log()  # [vocabulary]
+    weighted = table.log1p() * inverse_frequency
     weighted = weighted / weighted.pow(2).sum(dim=1, keepdim=True).sqrt().clamp_min(SMALLEST_SPREAD)
     left, strengths, _ = torch.linalg.svd(weighted - weighted.mean(dim=0), full_matrices=False)
     reduced = (left * strengths)[:, :width]  # [known, columns]
