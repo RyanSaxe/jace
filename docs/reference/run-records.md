@@ -96,7 +96,15 @@ load_checkpoint(run_folder.parent, reference, into=drafter, keeping=embedding)
 a run. `load_checkpoint` checks the file's hash against the reference
 before loading it, and refuses a file that does not match.
 
-A model's checkpoint also holds the card embedding the model was saved
-with. `keeping` names a module the load must leave as it was, so loading a
-model never replaces the shared embedding. Load the embedding from its own
-checkpoint, with `keeping=None`.
+A model's checkpoint also holds the card vectors the model was saved
+with. `keeping` names a module the load must leave as it was: the
+checkpoint's keys under it are left out of the load, and every other key
+must match. Loading a model therefore never replaces the shared card
+vectors, and a drafter saved with a card encoder loads into a drafter that
+reads a table.
+
+The "embedding" checkpoint of a drafter pretraining run holds a card
+encoder, and that of every later run holds a card table.
+`load_card_table` in `jace.loops.entry_points` loads either as a table: it
+rebuilds the encoder with the shape the run's config records, loads it and
+freezes it.

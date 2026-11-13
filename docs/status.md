@@ -35,6 +35,11 @@ One run on Avatar: The Last Airbender, on an Apple M3 Max GPU: 2,500 steps
 of 256 drafts in 17 minutes, measured on 421,562 picks from 10,282 held-out
 drafts. [Data](reference/data.md) describes the data.
 
+These runs read the earlier card embedding: a fixed starting vector for
+each card, made from the sources each row names, adjusted by a head shared
+by every card. The card encoder replaced it and has not been measured on
+held-out picks yet.
+
 | Picker                                  | Top 1 | Top 2 | Top 3 | Reads 17Lands statistics |
 | --------------------------------------- | ----- | ----- | ----- | ------------------------ |
 | The pretrained drafter, starting vectors from 17Lands statistics | 0.661 | 0.856 | 0.934 | Yes |
@@ -57,9 +62,11 @@ again; the earliest-average-pick row was, and did not change.
 ## Pretraining on human decks
 
 Two runs on the same set and GPU, both starting from the pretrained
-drafter's card embedding: 2,000 steps of 256 decks for the deck score and
-3,000 steps of 32 decks for the deck builder, in about 10 minutes. One run
-trained the embedding and the other kept it fixed.
+drafter's card embedding, the earlier one built from 17Lands statistics:
+2,000 steps of 256 decks for the deck score and 3,000 steps of 32 decks for
+the deck builder, in about 10 minutes. One run trained the embedding and
+the other kept it fixed. Deck pretraining now always keeps the card vectors
+fixed.
 
 | Measure on held-out decks                           | Embedding trained | Embedding fixed | Baseline |
 | --------------------------------------------------- | ----------------- | --------------- | -------- |
@@ -113,11 +120,11 @@ On an Apple M3 Max CPU:
 
 | Gap                         | Detail                                                     |
 | --------------------------- | ---------------------------------------------------------- |
-| Card starting vectors       | Text and program vectors exist and are frozen. Every card in the comparison above was in the training drafts, so a card with no play data is untested, and only drafter pretraining uses them |
+| Cards from other sets       | The card encoder reads only what a card has before anyone plays it, but it has been trained only on cards from the training drafts. A card with no play data is untested |
 | Booster rarities            | The engine has no rarity. The Avatar booster's wildcard and foil odds are placeholders |
 | Scoring the other models in self-play | The training loops score only the player, on paired deals against random play, scripted greedy and the heuristic player |
 | A constructed loop          | `train_player` plays human decks. None builds its own constructed decks |
-| The embedding in self-play  | Not trained, as a working choice. A drafter meant to be frozen fell from 65.5% to 50.7% agreement with human picks when another model's loss moved the embedding, so no self-play update steps it. Whether and how it should learn from self-play is undecided |
+| The card vectors in self-play | Not trained, as a working choice. A drafter meant to be frozen fell from 65.5% to 50.7% agreement with human picks when another model's loss moved the earlier embedding, so only the drafter's pretraining trains the card encoder. Whether and how the card vectors should learn from self-play is undecided |
 | GPU                         | Pretraining and the update of `train_player` can run on one. `train_limited` uses the CPU |
 
 ## Known problems
@@ -127,5 +134,5 @@ On an Apple M3 Max CPU:
 | Slow deck search            | About two million deck scores and 24 seconds per pool at 200 proposals and full depth |
 | Library labels              | manabot's batched games report hands but not libraries. The adapter works a library out from the board, and is one card off while the other seat holds a foretold card or controls a permanent that both decks contain |
 | Abandoned games             | A game the engine fails on, cuts short, or whose board outgrows the board arrays is abandoned and replaced. Its decisions teach nothing. With 80 cards and 64 permanents a seat, that was 15 of 5,491 games of a scripted player on human decks |
-| Held-out statistics         | 17Lands statistics cover the held-out drafts too, which inflates every held-out score of a model that reads them |
+| Held-out statistics         | 17Lands statistics cover the held-out drafts too. They inflate the held-out score of the earliest-average-pick baseline, the one picker that still reads them, and of every measurement above marked as reading them |
 | Schedule numbers            | The drafter's rates and the explore share are guesses with no source |

@@ -119,15 +119,16 @@ of each reached 46% against scripted greedy at 30 iterations with them and
 
 Every model reads cards through the shared embedding. If one model's loss
 steps it, every other model's input changes, including a model whose own
-rate is zero. That was measured on a saved run: a drafter that was meant to
-be frozen agreed with human picks 65.5% of the time before the run. With
-the run's embedding it agreed 50.7%, though its own weights had barely
-moved (64.2% on its original embedding).
+rate is zero. That was measured on a saved run of the earlier embedding: a
+drafter that was meant to be frozen agreed with human picks 65.5% of the
+time before the run. With the run's embedding it agreed 50.7%, though its
+own weights had barely moved (64.2% on its original embedding).
 
-So, as a working choice, the self-play loops do not train the embedding at
-all. Pretraining on human data trains it as before. In self-play each model
-adapts through its own projection of the card vectors. Whether the
-embedding should learn from self-play, and how, is an open decision.
+So, as a working choice, only the drafter's pretraining on human picks
+trains the card encoder. Deck pretraining and the self-play loops read its
+vectors as a `CardTable`, which has no parameters, and each model adapts
+through its own projection of the card vectors. Whether the card vectors
+should learn from self-play, and how, is an open decision.
 
 ## The other losses
 
@@ -152,8 +153,9 @@ includes the embedding's. Build the model's optimizer from
 optimizer = torch.optim.Adam(own_parameters(model, embedding), lr=rate)
 ```
 
-Pretraining on human data passes a second optimizer over
-`embedding.parameters()` alongside it. The self-play loops pass none.
+The drafter's pretraining passes a second optimizer over the encoder's
+parameters alongside it. Every later loop reads a table with no
+parameters, so it passes none.
 
 ## Dials on a schedule
 

@@ -10,14 +10,14 @@ each module owns and how games reach the code that learns from them.
 
 | Module          | Owns                                                      |
 | --------------- | --------------------------------------------------------- |
-| `jace.cards`    | Card records, card ids and the shared card embedding      |
+| `jace.cards`    | Card records, card ids, the card encoder and the table frozen from it |
 | `jace.engine`   | `GameBatch`, the interface games are played through, and the games that score two players |
 | `jace.play`     | The guess model and the player                            |
 | `jace.draft`    | Boosters, the draft pod and the drafter                   |
 | `jace.decks`    | The deck score and the deck builder                       |
 | `jace.train`    | Game collection, the losses and the update step           |
 | `jace.eval`     | Paired deals, win rates and the check on the guess model  |
-| `jace.data`     | Human drafts and decks from 17Lands, and card starting vectors |
+| `jace.data`     | Human drafts and decks from 17Lands, and the card encoder's inputs |
 | `jace.loops`    | Training loops, schedules and the command-line entry points |
 | `jace.tracking` | A training run's record on disk                           |
 

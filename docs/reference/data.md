@@ -36,17 +36,21 @@ drafts = load_drafts(data.picks, pool=cards.pool, cache_dir=folder, held_out_sha
 decks = load_decks(data.games, pool=cards.pool, cache_dir=folder, held_out_share=0.1)
 ```
 
-`cards` holds the `CardPool` and a starting vector for each card. The
-vector holds the card's 17Lands statistics, such as its win rate when in
-hand and the average pick it is taken at, and a few printed facts. A
-missing statistic becomes zero, and a separate column marks it as missing.
+`cards` holds the `CardPool` and the facts printed on each card: its mana
+value, power and toughness, a column that marks a missing power and one
+that marks a missing toughness, and flags for its colours, types, rarity
+and the bonus sheet. The three numbers are standardised over the cards that
+have one. Of the 17Lands statistics, `cards` keeps only each card's average
+pick position, which a baseline picker ranks by. No card vector holds a
+statistic.
 
 17Lands aggregates the statistics over every draft and game of the set,
-held-out drafts included. A model that reads them has seen a summary of
-the held-out data, so its held-out scores are a little too high.
+held-out drafts included. The baseline that ranks by average pick position
+has therefore seen a summary of the held-out data, so its held-out score is
+a little too high.
 
-A card from a set nobody has played has no statistics, so two other
-starting vectors use only what exists before release:
+The card encoder reads two more things about each card. Both exist before
+anyone has played the card:
 
 ```python
 from jace.data.hugging_face import hugging_face_encoder
@@ -54,7 +58,7 @@ from jace.data.hugging_face import hugging_face_encoder
 texts = card_texts(data.attributes)
 encode = hugging_face_encoder(TEXT_MODEL, device=torch.device("cpu"))
 text = text_vectors(texts, encode=encode, model_name=TEXT_MODEL, cache_dir=folder)
-program = program_vectors(cards.pool, width=64)
+program = program_tokens(cards.pool, vocabulary=program_vocabulary())
 ```
 
 `card_texts` writes each card as its mana cost, type line, power and
@@ -65,15 +69,20 @@ with a frozen language model, by default `all-MiniLM-L6-v2` (Apache 2.0,
 runs once per card list. `hugging_face_encoder` has its own module so that
 importing `jace.data` does not load `transformers`.
 
-`program_vectors` reads the engine program stored in the pool for each
-card. It counts the program's entries and adjacent pairs of entries,
-weights the ones few cards share, and keeps the 64 directions along which
-cards differ most. A last column marks a card the engine has no program
-for. Both functions standardise over the cards they are given, so vectors
-made for different card lists are not comparable.
+`text_vectors` standardises over the texts it is given, so vectors made
+for different card lists are not comparable.
 
-`python -m jace.loops.pretrain --starting-vectors text,program` trains on
-any combination of `statistics`, `text` and `program`.
+`program_tokens` writes the engine program stored in the pool for each card
+as token ids, one for each (kind, value) pair. `program_vocabulary`, in
+`jace.engine.manabot`, numbers every pair in the engine's catalog, so a
+pair's id does not depend on the pool. A card the engine cannot play gets
+one token that says so, and a pair the vocabulary lacks gets a token that
+marks it unknown. On Avatar the longest program has 149 pairs, and every
+pair is in the vocabulary.
+
+`card_inputs`, in `jace.loops.entry_points`, puts the text vectors, the
+program tokens and the printed facts together as the `CardInputs` the
+encoder reads.
 
 `drafts` holds every pack, every pick and a weight for each pick. `decks`
 holds one deck per draft, its pool, and the event's wins and losses.

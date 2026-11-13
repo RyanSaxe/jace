@@ -14,24 +14,31 @@ each is a small transformer.
 ## The card embedding
 
 ```python
-embedding = CardEmbedding(starting, hidden=64, offset_bound=None)
-vectors = embedding(card_ids)  # [..., width]
+vocabulary = FIRST_PROGRAM_TOKEN + len(program_vocabulary())
+encoder = CardEncoder(inputs, width=64, program_vocabulary=vocabulary, program_layers=1, heads=4)
+vectors = encoder(card_ids)  # [..., 64]
+table = frozen_table(encoder)  # the same vectors, with nothing to train
 ```
 
-`starting` holds one fixed vector per card. The embedding of a card is its
-starting vector plus the output of a small head:
+`inputs` is a `CardInputs`, which holds three things for each card: the
+vector a frozen language model gives its printed text, its engine program
+as token ids, and its printed facts. The encoder maps the text vector and
+the printed facts to 64 numbers each. It reads the program's tokens, each
+with a learned position, with a one-layer transformer and averages them. A
+small network joins the three vectors and a layer norm ends it. A card's
+vector depends only on that card's inputs, so the vectors do not change
+when other cards join the pool.
 
-```text
-embedding = starting + head(starting)
-```
+The drafter's pretraining trains the encoder. Deck pretraining and
+self-play read `frozen_table(encoder)`, a `CardTable` that holds every
+card's vector and has no parameters, so no later loss can move what the
+drafter learned. A model takes either one as `CardVectors`: the number of
+cards, the width, the device, and a call that turns card ids into vectors.
 
-The head is shared by every card and starts at zero, so before training the
-embedding equals the starting vector. Training changes the head, never the
-starting vectors.
-
-Setting `offset_bound` adds a per-card correction whose length is capped at
-that bound. It lets a card with a lot of data move a little away from what
-the head gives it. Both versions exist so they can be compared.
+The program's token ids start at `FIRST_PROGRAM_TOKEN`. The three ids
+below it pad a program, stand for a card the engine cannot play, and mark a
+(kind, value) pair the vocabulary lacks. `program_vocabulary` numbers every
+pair in the engine's catalog, so a pair's id does not depend on the pool.
 
 ## Scoring cards by embedding
 

@@ -31,7 +31,9 @@ for each, and lets the result of every game teach all of them.
 Three ideas hold the design together:
 
 - **One card embedding.** Every model reads a card as the same vector, and
-  scores cards by that vector. A card from a new set can be drafted and
+  scores cards by that vector. An encoder makes the vector from the card's
+  printed text, its engine program and a few printed facts, all of which a
+  card has before anyone plays it. A card from a new set can be drafted and
   played without retraining an output layer.
 - **A guess of hidden cards.** A separate model predicts the opponent's deck
   and hand from what has happened, and the player reads its guess. Self-play
