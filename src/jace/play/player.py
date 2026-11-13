@@ -91,6 +91,9 @@ class PlayerModel(nn.Module):
         card_table = self.embedding(pool)  # [cards, card_width]
 
         entities = self.entities.embed(tokens, card_table)
+        # TODO: The player reads only the likeliest cards of each guess, so most of an early-game guess is dropped.
+        # Revisit adding every card's chance as one token each for hand and deck, `guess.hand @ card_table`: it works
+        # on any set, but it blurs the cards into one average vector.
         chances, likeliest = guess.hand.topk(min(self.guess_cards, guess.hand.shape[-1]), dim=-1)
         guessed = self.guessed_card(card_table[likeliest]) + self.guessed_chance(chances[..., None])
         shares, largest = guess.deck.topk(min(self.deck_guess_cards, guess.deck.shape[-1]), dim=-1)

@@ -67,6 +67,10 @@ ignore = [
     "PLR0913",
     # Seeded pseudo-random generators drive simulations here; nothing is cryptographic.
     "S311",
+    # TODO comments mark open design questions in the code itself, with no author or issue link.
+    "FIX002",
+    "TD002",
+    "TD003",
 ]
 
 [tool.ruff.lint.mccabe]
