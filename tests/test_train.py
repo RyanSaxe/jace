@@ -16,7 +16,6 @@ from torch import Tensor, nn
 
 from jace.engine import Finished, Outcome
 from jace.engine.toy import HAND_SIZE, TOY_CARDS, ToyBatch
-from jace.modules import run
 from jace.play import Boards, Earlier, Guess
 from jace.train import PlayerRule, advantages, earlier_guesses, play_games, sequences, update_player
 
@@ -99,7 +98,7 @@ def test_a_player_learns_to_pick_its_highest_card(*, several_shuffled_passes_on_
     model = nn.Sequential(nn.Linear(HAND_SIZE + 1, 32), nn.Tanh(), nn.Linear(32, HAND_SIZE + 1))
 
     def policy(boards: Boards, _guess: Guess) -> tuple[Tensor, Tensor]:
-        output = run(model, torch.cat([boards["hand"], boards["seen"]], dim=-1))
+        output = model(torch.cat([boards["hand"], boards["seen"]], dim=-1))
         return output[:, :HAND_SIZE], output[:, HAND_SIZE].sigmoid()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-3)

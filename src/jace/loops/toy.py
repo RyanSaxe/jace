@@ -13,7 +13,6 @@ import torch
 from torch import Tensor, nn
 
 from jace.engine.toy import HAND_SIZE, TOY_CARDS, ToyBatch
-from jace.modules import run
 from jace.play import Boards, Earlier, Guess
 from jace.train import PlayerRule, play_games, update_player
 
@@ -36,7 +35,7 @@ def main() -> None:
 
     def policy(boards: Boards, _guess: Guess) -> tuple[Tensor, Tensor]:
         # Returns a score for each of the three cards and the player's chance of winning.
-        output = run(model, torch.cat([boards["hand"], boards["seen"]], dim=-1))
+        output = model(torch.cat([boards["hand"], boards["seen"]], dim=-1))
         return output[:, :HAND_SIZE], output[:, HAND_SIZE].sigmoid()
 
     def even_policy(boards: Boards, _guess: Guess) -> tuple[Tensor, Tensor]:

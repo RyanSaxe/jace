@@ -22,7 +22,6 @@ from jace.decks import (
     random_proposer,
     rules_for_pool,
 )
-from jace.modules import run
 
 __all__ = ()
 
@@ -93,7 +92,7 @@ def test_proposed_and_improved_decks_are_legal(rules: BuildRules, pool: Pool) ->
 
         assert _legal(proposed, pool=pool, rules=rules).all()
         assert _legal(improved, pool=pool, rules=rules).all()
-        assert (run(scorer, improved) >= run(scorer, proposed) - 1e-5).all()
+        assert (scorer(improved) >= scorer(proposed) - 1e-5).all()
 
 
 def test_build_decks_finds_the_best_deck_that_swaps_from_one_start_cannot_reach() -> None:
@@ -145,11 +144,11 @@ def test_models_give_the_same_answers_when_the_card_pool_grows() -> None:
             for grown, original in zip(large.parameters(), small.parameters(), strict=True):
                 grown.copy_(original)
             if isinstance(small, DeckScore):
-                before = run(small, deck)
-                after = run(large, torch.cat((deck, padding), dim=1))
+                before = small(deck)
+                after = large(torch.cat((deck, padding), dim=1))
             else:
-                before = run(small, available, deck)
-                after = run(large, torch.cat((available, padding), dim=1), torch.cat((deck, padding), dim=1))[:, :6]
+                before = small(available, deck)
+                after = large(torch.cat((available, padding), dim=1), torch.cat((deck, padding), dim=1))[:, :6]
 
         assert torch.allclose(before, after, atol=1e-5)
 

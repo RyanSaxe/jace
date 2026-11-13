@@ -17,7 +17,6 @@ import torch
 from torch import Tensor, nn
 
 from jace.engine.batch import SEATS, BoardLayout
-from jace.modules import run
 from jace.play.types import Boards
 
 __all__ = ("BOARD_ARRAYS", "BoardTokens", "EntityEncoder", "board_tokens", "legal_actions")
@@ -147,6 +146,6 @@ class EntityEncoder(nn.Module):
         # card_table: float [pool cards, card_width], the shared embedding of every card in the pool.
         known = tokens.card_ids >= 0
         vectors = card_table[tokens.card_ids.clamp_min(0)] * known[..., None]
-        objects = torch.cat((run(self.cards, tokens.cards), run(self.permanents, tokens.permanents)), dim=1)
-        players = run(self.players, tokens.players) + self.seats
-        return torch.cat((players, objects + run(self.card_vectors, vectors)), dim=1)
+        objects = torch.cat((self.cards(tokens.cards), self.permanents(tokens.permanents)), dim=1)
+        players = self.players(tokens.players) + self.seats
+        return torch.cat((players, objects + self.card_vectors(vectors)), dim=1)

@@ -10,7 +10,6 @@ Decks travel as float count vectors `[cards]` until `build_decks` turns the
 survivors into tuples of card ids.
 """
 
-import functools
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import override
@@ -20,7 +19,6 @@ from torch import Tensor, nn
 
 from jace.cards import CardEmbedding, CardId, Deck, Pool
 from jace.decks.score import CardSetEncoder, Scorer
-from jace.modules import run
 
 __all__ = (
     "BuildRules",
@@ -111,9 +109,9 @@ class DeckBuilderModel(nn.Module):
         # available: float [b, cards], copies that can still be added.
         # partial: float [b, cards], copies already in the deck.
         # Returns float [b, cards] logits, -inf where no copy is available.
-        query = run(self.query, run(self.cards, torch.stack((available, partial), dim=-1)))  # [b, width]
+        query = self.query(self.cards(torch.stack((available, partial), dim=-1)))  # [b, width]
         every_card = torch.arange(available.shape[1], device=available.device)
-        keys = run(self.key, run(self.cards.embedding, every_card))  # [cards, width]
+        keys = self.key(self.cards.embedding(every_card))  # [cards, width]
         return (query @ keys.T).masked_fill(available <= 0, float("-inf"))
 
 
@@ -134,7 +132,7 @@ def model_proposer(
         lands = torch.full((decks,), fewest, device=pool_counts.device)
         with torch.no_grad():
             return _write_decks(
-                functools.partial(run, model),
+                model,
                 pool_counts=pool_counts,
                 min_lands=lands,
                 max_lands=lands + (most - fewest),

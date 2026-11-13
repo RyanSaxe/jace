@@ -15,7 +15,7 @@ from torch import Tensor, nn
 
 from jace.cards import CardEmbedding
 from jace.engine import BoardLayout
-from jace.modules import encode_real, run, transformer
+from jace.modules import encode_real, transformer
 from jace.play.tokens import EntityEncoder, board_tokens
 from jace.play.types import Boards, Earlier, Guess
 
@@ -78,16 +78,16 @@ class GuessModel(nn.Module):
         # earlier.mask: bool [b, t]. Returns deck and hand, each float [b, cards].
         tokens = board_tokens(boards, layout=self.layout, engine_to_card=self.engine_to_card)
         pool = torch.arange(self.embedding.starting.shape[0], device=self.embedding.starting.device)
-        card_table = run(self.embedding, pool)  # [cards, card_width]
+        card_table = self.embedding(pool)  # [cards, card_width]
 
         entities = self.entities.embed(tokens, card_table)
         # Events are oldest first and earlier guesses newest first, so their ages count in opposite directions.
         event_age = tokens.event_mask.flip(1).cumsum(1).flip(1) - 1
-        events = run(self.events, tokens.events) + _age_encoding(event_age, width=self.width)
+        events = self.events(tokens.events) + _age_encoding(event_age, width=self.width)
         # One token per earlier guess: its two probability vectors, each as a weighted sum of card embeddings.
         earlier_cards = torch.cat((earlier.guesses.deck @ card_table, earlier.guesses.hand @ card_table), dim=-1)
         earlier_age = earlier.mask.cumsum(1) - 1
-        earlier_tokens = run(self.earlier, earlier_cards) + _age_encoding(earlier_age, width=self.width)
+        earlier_tokens = self.earlier(earlier_cards) + _age_encoding(earlier_age, width=self.width)
 
         batch = entities.shape[0]
         queries = self.queries.expand(batch, -1, -1)
@@ -96,6 +96,6 @@ class GuessModel(nn.Module):
         mask = torch.cat((query_mask, tokens.entity_mask, tokens.event_mask, earlier.mask), dim=1)
         encoded = encode_real(self.encoder, sequence, mask=mask)
 
-        keys = run(self.card_keys, card_table)  # [cards, width]
+        keys = self.card_keys(card_table)  # [cards, width]
         scores = encoded[:, :_GUESS_PARTS] @ keys.T * self.width**-0.5  # [b, guess parts, cards]
         return Guess(deck=scores[:, 0].softmax(dim=-1), hand=(scores[:, 1] + self.hand_bias).sigmoid())

@@ -14,8 +14,6 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional
 
-from jace.modules import run
-
 __all__ = ("CardEmbedding", "own_parameters")
 
 
@@ -45,7 +43,7 @@ class CardEmbedding(nn.Module):
     def forward(self, cards: Tensor) -> Tensor:
         # cards: int64 card ids of any shape [...]. Returns [..., width].
         starting = self.starting[cards]
-        embedded = starting + run(self.head, starting)
+        embedded = starting + self.head(starting)
         if self.offset is None or self.offset_bound is None:
             return embedded
         offset = functional.embedding(cards, self.offset)
@@ -55,7 +53,7 @@ class CardEmbedding(nn.Module):
     def pull(self) -> Tensor:
         # Scalar: the mean squared length of the head's change over all cards.
         # Added to a loss, it is the penalty that keeps the embedding near its start.
-        change = run(self.head, self.starting)
+        change = self.head(self.starting)
         return change.pow(2).sum(dim=-1).mean()
 
 

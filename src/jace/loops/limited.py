@@ -47,7 +47,6 @@ from jace.draft import (
 )
 from jace.engine import SEATS, Matchup
 from jace.loops.schedules import Dials
-from jace.modules import run
 from jace.play import Guesser, Policy
 from jace.tracking import ModelName
 from jace.train import (
@@ -162,7 +161,7 @@ def _build(
     generator = torch.Generator().manual_seed(rng.getrandbits(_SEED_BITS))
 
     def score(decks: Tensor) -> Tensor:
-        parts = [run(learners.score, part) for part in decks.split(setup.score_chunk)]
+        parts = [learners.score(part) for part in decks.split(setup.score_chunk)]
         return torch.cat(parts)
 
     played: list[Candidate] = []
@@ -312,7 +311,7 @@ def _update_deck_score(
         nothing: dict[str, float] = {}
         return nothing
     device = learners.drafter.embedding.starting.device
-    logits = run(learners.score, _counts(decks, cards=len(setup.pool), device=device)[seen_play.to(device)])
+    logits = learners.score(_counts(decks, cards=len(setup.pool), device=device)[seen_play.to(device)])
     loss = score_loss(logits, wins=wins[seen_play].to(device), games=played[seen_play].to(device))
     apply(loss, [learners.optimizers["deck_score"]], max_grad_norm=setup.max_grad_norm)
     return {"deck_score/loss": float(loss.detach())}
@@ -332,9 +331,7 @@ def _update_builder(
     pools = _counts([pool for record in records for pool in record.pools], cards=cards, device=device)
     best = _counts([candidate.deck for candidate in best_decks], cards=cards, device=device)
     available, partial, chosen = writing_steps(best, pool_counts=pools, rules=setup.rules, generator=generator)
-    loss = choice_loss(
-        run(learners.builder, available, partial), chosen, weights=torch.ones(len(chosen), device=device)
-    )
+    loss = choice_loss(learners.builder(available, partial), chosen, weights=torch.ones(len(chosen), device=device))
     apply(loss, [learners.optimizers["deck_builder"]], max_grad_norm=setup.max_grad_norm)
     return {"deck_builder/loss": float(loss.detach())}
 

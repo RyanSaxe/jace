@@ -21,7 +21,7 @@ from torch import Tensor, nn
 
 from jace.cards import CardEmbedding, CardId
 from jace.draft.drafting import Drafter, SeatView
-from jace.modules import run, transformer
+from jace.modules import transformer
 
 __all__ = ("DrafterModel", "model_drafter", "view_tensors")
 
@@ -58,24 +58,22 @@ class DrafterModel(nn.Module):
         if steps >= self.positions.num_embeddings:
             message = f"{steps} earlier picks do not fit a model built for {self.positions.num_embeddings} picks"
             raise ValueError(message)
-        cards = run(self.embedding, torch.arange(seen.shape[2], device=seen.device))  # [cards, card_width]
+        cards = self.embedding(torch.arange(seen.shape[2], device=seen.device))  # [cards, card_width]
         padding = seen.sum(dim=-1) == 0  # [b, t]
         earlier = (
-            run(self.picked_card, cards[picks])
-            + run(self.pack_mean, _mean_card(seen, cards))
-            + run(self.positions, torch.arange(steps, device=seen.device))
+            self.picked_card(cards[picks])
+            + self.pack_mean(_mean_card(seen, cards))
+            + self.positions(torch.arange(steps, device=seen.device))
         )  # [b, t, width]
         current = (
-            self.current
-            + run(self.pack_mean, _mean_card(pack, cards))
-            + run(self.positions, steps - padding.sum(dim=-1))
+            self.current + self.pack_mean(_mean_card(pack, cards)) + self.positions(steps - padding.sum(dim=-1))
         )  # [b, width]
         tokens = torch.cat([earlier, current.unsqueeze(1)], dim=1)  # [b, t + 1, width]
         ignored = torch.cat([padding, padding.new_zeros(len(padding), 1)], dim=1)  # [b, t + 1]
         order = torch.arange(steps + 1, device=seen.device)
         later = order[:, None] < order[None, :]  # [t + 1, t + 1], True where a token may not look
         query = self.encoder.forward(tokens, mask=later, src_key_padding_mask=ignored)[:, -1]  # [b, width]
-        candidates = run(self.candidate, cards)  # [cards, width]
+        candidates = self.candidate(cards)  # [cards, width]
         scores = query @ candidates.T / math.sqrt(candidates.shape[1])  # [b, cards]
         return scores.masked_fill(pack == 0, float("-inf"))
 
@@ -93,10 +91,10 @@ class DrafterModel(nn.Module):
         if steps > self.positions.num_embeddings:
             message = f"{steps} picks do not fit a model built for {self.positions.num_embeddings} picks"
             raise ValueError(message)
-        cards = run(self.embedding, torch.arange(seen.shape[2], device=seen.device))  # [cards, card_width]
+        cards = self.embedding(torch.arange(seen.shape[2], device=seen.device))  # [cards, card_width]
         order = torch.arange(steps, device=seen.device)
-        packs = run(self.pack_mean, _mean_card(seen, cards)) + run(self.positions, order)  # [b, t, width]
-        tokens = torch.cat([run(self.picked_card, cards[picks]) + packs, self.current + packs], dim=1)
+        packs = self.pack_mean(_mean_card(seen, cards)) + self.positions(order)  # [b, t, width]
+        tokens = torch.cat([self.picked_card(cards[picks]) + packs, self.current + packs], dim=1)
         later = order[:, None] < order[None, :]  # [t, t]
         other = order[:, None] != order[None, :]  # [t, t]
         # Rows are the token that looks. A picked token sees picked tokens up to its own. A query
@@ -105,7 +103,7 @@ class DrafterModel(nn.Module):
             [torch.cat([later, torch.ones_like(later)], dim=1), torch.cat([later | ~other, other], dim=1)]
         )  # [2t, 2t], True where a token may not look
         queries = self.encoder.forward(tokens, mask=hidden)[:, steps:]  # [b, t, width]
-        candidates = run(self.candidate, cards)  # [cards, width]
+        candidates = self.candidate(cards)  # [cards, width]
         scores = queries @ candidates.T / math.sqrt(candidates.shape[1])  # [b, t, cards]
         return scores.masked_fill(seen == 0, float("-inf"))
 

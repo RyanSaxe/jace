@@ -22,7 +22,6 @@ from jace.decks import BuildRules, DeckBuilderModel, DeckScore
 from jace.draft import DrafterModel, DraftFormat
 from jace.engine.toy import HAND_SIZE, TOY_CARDS, ToyBatch
 from jace.loops import Learners, LimitedSetup, balanced_matchups, limited_iteration, phased_schedule
-from jace.modules import run
 from jace.play import Boards, Earlier, Guess
 from jace.train import PlayerRule, PlayGames, play_games
 
@@ -55,11 +54,11 @@ def _toy_loop() -> _Toy:
     score = DeckScore(embedding, width=16, layers=1, heads=2)
 
     def policy(boards: Boards, _guess: Guess) -> tuple[Tensor, Tensor]:
-        output = run(player, torch.cat([boards["hand"], boards["seen"]], dim=-1))
+        output = player(torch.cat([boards["hand"], boards["seen"]], dim=-1))
         return output[:, :HAND_SIZE], output[:, HAND_SIZE].sigmoid()
 
     def guesser(boards: Boards, _earlier: Earlier) -> Guess:
-        output = run(guess, torch.cat([boards["hand"], boards["seen"]], dim=-1))
+        output = guess(torch.cat([boards["hand"], boards["seen"]], dim=-1))
         return Guess(deck=output[:, :TOY_CARDS].softmax(dim=-1), hand=output[:, TOY_CARDS:].sigmoid())
 
     trained = {"player": player, "guess": guess, "drafter": drafter, "deck_builder": builder, "deck_score": score}

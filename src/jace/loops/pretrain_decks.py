@@ -30,7 +30,6 @@ import torch
 from torch import Tensor, nn
 from torch.optim import Optimizer
 
-from jace import modules
 from jace.cards import CardEmbedding, own_parameters
 from jace.data import RESULT_FLOOR, HumanDecks, card_table, load_decks, read_set
 from jace.decks import (
@@ -159,12 +158,12 @@ def pretrain_deck_score(
     loss_sum = 0.0
     for step in range(1, settings.steps + 1):
         chosen = training[torch.randint(len(training), (settings.decks_per_step,), generator=generator)].to(device)
-        loss = score_loss(modules.run(model, counts[chosen]), wins=wins[chosen], games=games[chosen])
+        loss = score_loss(model(counts[chosen]), wins=wins[chosen], games=games[chosen])
         scale_rates(optimizers, starting_rates, factor=rate_scale(step))
         apply(loss, optimizers, max_grad_norm=settings.max_grad_norm)
         loss_sum += float(loss.detach())
         if step % settings.evaluate_every == 0 or step == settings.steps:
-            fit = score_fit(functools.partial(modules.run, model), decks, rows=held_out, device=device)
+            fit = score_fit(model, decks, rows=held_out, device=device)
             since = step - (curve[-1].step if curve else 0)
             point = ScorePoint(step, loss_sum / since, fit.log_loss, fit.correlation)
             metrics = {"loss": point.loss, "held_out_log_loss": point.log_loss}
@@ -235,7 +234,7 @@ def pretrain_deck_builder(
             decks.decks[chosen].float(), pool_counts=decks.pools[chosen].float(), rules=rules, generator=generator
         )
         weights = result[chosen].repeat_interleave(rules.size)  # [b * size], in the order of the steps
-        logits = modules.run(model, available.to(device), partial.to(device))
+        logits = model(available.to(device), partial.to(device))
         loss = choice_loss(logits, added.to(device), weights=(weights / weights.mean()).to(device))
         scale_rates(optimizers, starting_rates, factor=rate_scale(step))
         apply(loss, optimizers, max_grad_norm=settings.max_grad_norm)

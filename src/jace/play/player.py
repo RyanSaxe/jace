@@ -13,7 +13,7 @@ from torch import Tensor, nn
 
 from jace.cards import CardEmbedding
 from jace.engine import BoardLayout, Decisions
-from jace.modules import encode_real, run, transformer
+from jace.modules import encode_real, transformer
 from jace.play.tokens import EntityEncoder, board_tokens, legal_actions
 from jace.play.types import Boards, Guess
 
@@ -88,15 +88,13 @@ class PlayerModel(nn.Module):
         # and the acting seat's chance to win, float [b].
         tokens = board_tokens(boards, layout=self.layout, engine_to_card=self.engine_to_card)
         pool = torch.arange(self.embedding.starting.shape[0], device=self.embedding.starting.device)
-        card_table = run(self.embedding, pool)  # [cards, card_width]
+        card_table = self.embedding(pool)  # [cards, card_width]
 
         entities = self.entities.embed(tokens, card_table)
         chances, likeliest = guess.hand.topk(min(self.guess_cards, guess.hand.shape[-1]), dim=-1)
-        guessed = run(self.guessed_card, card_table[likeliest]) + run(self.guessed_chance, chances[..., None])
+        guessed = self.guessed_card(card_table[likeliest]) + self.guessed_chance(chances[..., None])
         shares, largest = guess.deck.topk(min(self.deck_guess_cards, guess.deck.shape[-1]), dim=-1)
-        guessed_deck = run(self.guessed_deck_card, card_table[largest]) + run(
-            self.guessed_deck_share, shares[..., None]
-        )
+        guessed_deck = self.guessed_deck_card(card_table[largest]) + self.guessed_deck_share(shares[..., None])
         sequence = torch.cat((entities, guessed, guessed_deck), dim=1)
         guess_mask = torch.ones((likeliest.shape[0], likeliest.shape[1] + largest.shape[1]), dtype=torch.bool)
         mask = torch.cat((tokens.entity_mask, guess_mask.to(likeliest.device)), dim=1)
@@ -109,13 +107,13 @@ class PlayerModel(nn.Module):
         offered = int(tokens.action_mask.sum(dim=1).max())
         focused = _focus_vectors(encoded[:, : entities.shape[1]], tokens.action_focus[:, :offered])
         scored = torch.cat(
-            (run(self.actions, tokens.actions[:, :offered]), focused, summary[:, None].expand(-1, offered, -1)),
+            (self.actions(tokens.actions[:, :offered]), focused, summary[:, None].expand(-1, offered, -1)),
             dim=-1,
         )  # [b, offered, scored vectors * width]
         logits = torch.full_like(tokens.action_mask, -torch.inf, dtype=scored.dtype)
-        logits[:, :offered] = run(self.action_head, scored).squeeze(-1)
+        logits[:, :offered] = self.action_head(scored).squeeze(-1)
         logits = logits.masked_fill(~tokens.action_mask, -torch.inf)
-        return logits, run(self.value_head, summary).squeeze(-1).sigmoid()
+        return logits, self.value_head(summary).squeeze(-1).sigmoid()
 
 
 def _focus_vectors(entities: Tensor, focus: Tensor) -> Tensor:

@@ -15,7 +15,7 @@ import torch
 from torch import Tensor, nn
 
 from jace.cards import CardEmbedding
-from jace.modules import DROPOUT, FEEDFORWARD_EXPANSION, run
+from jace.modules import DROPOUT, FEEDFORWARD_EXPANSION
 
 __all__ = ("CardSetEncoder", "DeckScore", "EmptyCardSetError", "Scorer")
 
@@ -65,7 +65,7 @@ class CardSetEncoder(nn.Module):
         cards = present.int().argsort(dim=1, descending=True, stable=True)[:, :longest]  # int64 [b, longest]
         padding = ~present.gather(1, cards)  # bool [b, longest]
         kept = amounts.gather(1, cards.unsqueeze(-1).expand(-1, -1, amounts.shape[-1]))  # [b, longest, amounts]
-        tokens = run(self.project, run(self.embedding, cards)) + run(self.amount, kept.log1p())
+        tokens = self.project(self.embedding(cards)) + self.amount(kept.log1p())
         # `forward` is called directly because it is typed and takes the mask by keyword.
         encoded = self.encoder.forward(tokens, src_key_padding_mask=padding)  # [b, longest, width]
         real = (~padding).unsqueeze(-1).to(encoded.dtype)
@@ -81,5 +81,5 @@ class DeckScore(nn.Module):
     @override
     def forward(self, decks: Tensor) -> Tensor:
         # decks: float [b, cards] copy counts. Returns float [b], the logit of winning a game.
-        encoded = run(self.cards, decks.unsqueeze(-1).to(torch.float32))
-        return run(self.head, encoded).squeeze(-1)
+        encoded = self.cards(decks.unsqueeze(-1).to(torch.float32))
+        return self.head(encoded).squeeze(-1)
