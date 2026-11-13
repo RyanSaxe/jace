@@ -44,7 +44,6 @@ __all__ = (
     "add_tallies",
     "check_guess",
     "guess_report",
-    "learner_results",
     "legs",
     "model_seat",
     "score_match",
@@ -125,15 +124,16 @@ class GuessTally:
 
     Tallies of separate games add, field by field, into the tally of all
     their decisions, so a process that plays games can send one small
-    record per game. `pairs` is how many pairs were scored, `held` how many
-    of them had the card in hand, and `loss` their total log loss. The three
-    tuples hold one entry per range of stated chance: how many pairs fell in
-    it, the sum of their stated chances and how many had the card in hand.
+    record per game. `pairs` is how many pairs were scored and `loss` their
+    total log loss. `held` has one entry per card: the decisions at which
+    it was in hand. The other three tuples hold one entry per range of
+    stated chance: how many pairs fell in it, the sum of their stated
+    chances and how many had the card in hand.
     """
 
     pairs: float
-    held: float
     loss: float
+    held: tuple[float, ...]
     counts: tuple[float, ...]
     stated: tuple[float, ...]
     observed: tuple[float, ...]
@@ -144,8 +144,9 @@ class GuessReport:
     """How good and how honest the hand guess is.
 
     `loss` and `base_rate_loss` are the average log loss of the guess and of
-    a guess that gives every card its overall frequency; the model is useful
-    only when `loss` is lower. `stated` and `observed` hold, for each of the
+    a guess that gives each card its own frequency over these decisions,
+    whatever the board shows; the model is useful only when `loss` is
+    lower. `stated` and `observed` hold, for each of the
     `CHANCE_RANGES` equal ranges of stated chance, the mean chance the model stated and how
     often the card was really in hand; they match when the model is honest.
     A range with no guesses in it is NaN in both.
@@ -196,7 +197,7 @@ def model_seat(seed: int, *, policy: Policy, guesser: Guesser, cards: int, histo
     to the policy and samples an action from the policy's scores with a
     generator made from `seed`. It keeps its last `history` guesses of this
     game, newest first, and shows them to the guess model as
-    `jace.train.collect` does. `cards` is the number of cards in the pool.
+    `jace.train.play_games` does. `cards` is the number of cards in the pool.
     """
     generator = torch.Generator().manual_seed(seed)
     earlier = Guess(deck=torch.zeros(1, history, cards), hand=torch.zeros(1, history, cards))
@@ -256,16 +257,6 @@ def score_match(
     )
 
 
-def learner_results(games: Tensor, *, learner: Tensor, results: Tensor) -> Tensor:
-    # games: int64 [n]; learner: bool [n]; results: [n]. Returns the learner's result in each game, [games].
-    mine = games[learner]
-    order = torch.argsort(mine, stable=True)
-    sorted_games = mine[order]
-    first = torch.ones_like(sorted_games, dtype=torch.bool)
-    first[1:] = sorted_games[1:] != sorted_games[:-1]
-    return results[learner][order][first]
-
-
 def win_rate(results: Tensor, *, resamples: int, generator: torch.Generator) -> WinRate:
     """Summarize results (1 win, 0.5 draw, 0 loss) as a rate with a range.
 
@@ -291,8 +282,8 @@ def tally_guess(hand_guess: Tensor, hand_truth: Tensor) -> GuessTally:
     empty = torch.zeros(CHANCE_RANGES, dtype=torch.float64)
     return GuessTally(
         pairs=float(stated.numel()),
-        held=float(truth.sum()),
         loss=float(-(truth * safe.log() + (1.0 - truth) * (1.0 - safe).log()).sum()),
+        held=tuple(hand_truth.double().sum(dim=0).tolist()),
         counts=tuple(empty.scatter_add(0, chance_range, torch.ones_like(stated)).tolist()),
         stated=tuple(empty.scatter_add(0, chance_range, stated).tolist()),
         observed=tuple(empty.scatter_add(0, chance_range, truth).tolist()),
@@ -300,25 +291,32 @@ def tally_guess(hand_guess: Tensor, hand_truth: Tensor) -> GuessTally:
 
 
 def add_tallies(tallies: Iterable[GuessTally]) -> GuessTally:
-    # The tally of every pair in `tallies`. No tallies give the tally of no pairs.
-    total = torch.zeros(3 + 3 * CHANCE_RANGES, dtype=torch.float64)
-    for tally in tallies:
-        total += torch.tensor(
-            (tally.pairs, tally.held, tally.loss, *tally.counts, *tally.stated, *tally.observed), dtype=torch.float64
-        )
-    pairs, held, loss = total[:3].tolist()
-    counts, stated, observed = (tuple(part.tolist()) for part in total[3:].chunk(3))
-    return GuessTally(pairs=pairs, held=held, loss=loss, counts=counts, stated=stated, observed=observed)
+    # The tally of every pair in `tallies`, which must all be over the same cards. No tallies
+    # give the tally of no pairs.
+    parts = [
+        torch.tensor((tally.pairs, tally.loss, *tally.counts, *tally.stated, *tally.observed, *tally.held))
+        for tally in tallies
+    ]
+    if not parts:
+        nothing = (0.0,) * CHANCE_RANGES
+        return GuessTally(pairs=0.0, loss=0.0, held=(), counts=nothing, stated=nothing, observed=nothing)
+    total = torch.stack(parts).double().sum(dim=0)
+    pairs, loss = total[:2].tolist()
+    counts, stated, observed = (tuple(part.tolist()) for part in total[2 : 2 + 3 * CHANCE_RANGES].chunk(3))
+    held = tuple(total[2 + 3 * CHANCE_RANGES :].tolist())
+    return GuessTally(pairs=pairs, loss=loss, held=held, counts=counts, stated=stated, observed=observed)
 
 
 def guess_report(tally: GuessTally) -> GuessReport:
     # The report of a tally with no pairs is NaN throughout.
     counts = torch.tensor(tally.counts, dtype=torch.float64)
-    base_rate = torch.tensor(tally.held / tally.pairs if tally.pairs else math.nan, dtype=torch.float64)
+    held = torch.tensor(tally.held, dtype=torch.float64)
+    # base_rate: [cards], how often each card was in hand over the decisions scored.
+    base_rate = held * len(held) / tally.pairs if tally.pairs else held
     safe = base_rate.clamp(_CHANCE_MARGIN, 1.0 - _CHANCE_MARGIN)
     return GuessReport(
         loss=tally.loss / tally.pairs if tally.pairs else math.nan,
-        base_rate_loss=float(-(base_rate * safe.log() + (1.0 - base_rate) * (1.0 - safe).log())),
+        base_rate_loss=float(-(base_rate * safe.log() + (1.0 - base_rate) * (1.0 - safe).log()).mean()),
         stated=tuple((torch.tensor(tally.stated, dtype=torch.float64) / counts).tolist()),
         observed=tuple((torch.tensor(tally.observed, dtype=torch.float64) / counts).tolist()),
     )

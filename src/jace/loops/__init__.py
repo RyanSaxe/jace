@@ -6,7 +6,7 @@ limited loop shows the whole system working together and how dials are
 scheduled; it is meant to be read, copied and changed.
 """
 
-from jace.loops.limited import Learners, LimitedSetup, StartBatch, limited_iteration
+from jace.loops.limited import Learners, LimitedSetup, UnevenDecksError, balanced_matchups, limited_iteration
 from jace.loops.schedules import (
     Dials,
     RateScale,
@@ -25,7 +25,8 @@ __all__ = (
     "LimitedSetup",
     "RateScale",
     "Schedule",
-    "StartBatch",
+    "UnevenDecksError",
+    "balanced_matchups",
     "current_rates",
     "limited_iteration",
     "phased_schedule",

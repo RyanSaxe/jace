@@ -20,7 +20,31 @@ from jace.engine.batch import SEATS, BoardLayout
 from jace.modules import run
 from jace.play.types import Boards
 
-__all__ = ("BoardTokens", "EntityEncoder", "board_tokens", "legal_actions")
+__all__ = ("BOARD_ARRAYS", "BoardTokens", "EntityEncoder", "board_tokens", "legal_actions")
+
+
+# Every engine array `board_tokens` reads. Whatever plays or stores boards for these models
+# needs these and no others, which is less than half of what the engine encodes.
+_ENTITY_ARRAYS = (
+    "agent_player",
+    "opponent_player",
+    "agent_cards",
+    "opponent_cards",
+    "agent_permanents",
+    "opponent_permanents",
+)
+BOARD_ARRAYS = (
+    *_ENTITY_ARRAYS,
+    *(f"{name}_valid" for name in _ENTITY_ARRAYS),
+    "player_turn_state",
+    "card_turn_state",
+    "semantic_cards",
+    "actions",
+    "actions_valid",
+    "action_focus",
+    "events",
+    "events_valid",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,17 +110,7 @@ def board_tokens(boards: Boards, *, layout: BoardLayout, engine_to_card: Tensor)
     card_ids = torch.where(engine_ids >= 0, engine_to_card[engine_ids.clamp_min(0)], -1)
     # The definition id is an identity, read through the card embedding, never a numeric feature.
     permanents[..., layout.permanent_definition] = 0.0
-    entity_valid = torch.cat(
-        (
-            boards["agent_player_valid"],
-            boards["opponent_player_valid"],
-            boards["agent_cards_valid"],
-            boards["opponent_cards_valid"],
-            boards["agent_permanents_valid"],
-            boards["opponent_permanents_valid"],
-        ),
-        dim=1,
-    )
+    entity_valid = torch.cat([boards[f"{name}_valid"] for name in _ENTITY_ARRAYS], dim=1)
     return BoardTokens(
         players=_squash(players),
         cards=_squash(cards),

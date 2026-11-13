@@ -24,20 +24,11 @@ records = _draft(setup, drafter=drafter, other_seats=other_seats, rng=rng)
 played_decks, best_decks = _build(setup, learners, records=records, dials=dials, rng=rng)
 decks = [candidate.deck for candidate in played_decks]
 
-collected = collect(
-    start(matchup),
-    None,
-    learner=learners.policy,
-    opponent=opponent,
-    guesser=learners.guesser,
-    cards=len(setup.pool),
-    history=setup.history,
-    decisions=setup.decisions,
-    generator=generator,
-)
-wins, played = _deck_records(decks, collected.games)
+schedule = balanced_matchups(setup.pods, seats=..., games_per_deck=setup.games_per_deck, rng=rng)
+collected = play([(decks[first], decks[second]) for first, second in schedule])
+wins, played = _deck_records(schedule, collected.games, decks=len(decks))
 
-metrics |= _update_play_models(setup, learners, rollout=collected.rollout, dials=dials)
+metrics |= _update_play_models(setup, learners, rollout=collected.rollout, dials=dials, generator=generator)
 metrics |= _update_deck_score(setup, learners, decks=decks, wins=wins, played=played)
 metrics |= _update_builder(setup, learners, records=records, best_decks=best_decks, generator=generator)
 if dials.drafter_rate > 0:
@@ -48,12 +39,14 @@ if dials.drafter_rate > 0:
 | ----- | ------------------------------------------------------------------------- |
 | Draft | Every pod drafts at once. The learner fills the seats `other_seats` does not |
 | Build | Each pool gets ranked candidate decks, and one is chosen to play          |
-| Play  | Random pairs of those decks play until enough decisions are collected     |
+| Play  | Every deck plays the same number of games, against decks of other pods, each game to its end |
 | Learn | The player, guess model, deck score, builder and drafter each take a step |
 
 `jace.loops.train_limited` runs this loop on real games. It builds the
-models, loads checkpoints trained on human data, calls `limited_iteration`
-once per iteration and scores the player against random play:
+models, loads checkpoints trained on human data, plays the games in worker
+processes, calls `limited_iteration` once per iteration, and every few
+iterations scores the player on paired deals against three scripted
+players:
 
 ```sh
 uv run python -m jace.loops.train_limited --help
@@ -68,16 +61,16 @@ uv run python -m jace.loops.train_limited --help
 | `setup`       | What stays fixed: the card pool, draft format, deck rules, sizes |
 | `learners`    | The models and one optimizer for each                         |
 | `dials`       | This iteration's values from the schedule                     |
-| `opponent`    | The policy in the seat the learner does not play              |
 | `other_seats` | Drafters for seats the learner does not draft, such as past versions |
-| `start`       | A function that starts a batch of games on your engine        |
+| `play`        | A function that plays a list of matchups to the end and returns the decisions |
 
-The player and the guess model arrive as functions, so the same loop runs
-on manabot and on the toy game.
+The player and the guess model arrive as functions, and the games through
+`play`, so the same loop runs on manabot in worker processes and on the toy
+game in one.
 
-Build each model's optimizer from `own_parameters(model, embedding)`. The
-embedding then sits only in its own optimizer, and one update steps it
-once.
+Build each model's optimizer from `own_parameters(model, embedding)`. No
+optimizer of this loop holds the shared embedding, so a model whose rate is
+zero does not change. [Training](../concepts/training.md) has the reason.
 
 ## Changing it
 
@@ -91,7 +84,7 @@ once.
 
 ## Constructed
 
-A constructed loop skips the draft and build steps. It starts at `collect`
-with decks you supply, and updates the player, the guess model and the deck
-score. Nothing in those steps imports `jace.draft`. No constructed loop is
-written yet.
+A constructed loop skips the draft and build steps. It starts at `play`
+with matchups of decks you supply. `jace.loops.train_player` is the
+smallest one: it plays human decks and updates the player and the guess
+model. Nothing in it imports `jace.draft`.

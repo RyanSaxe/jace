@@ -96,6 +96,7 @@ def player_loss(
     advantages: Tensor,
     value_targets: Tensor,
     keep: Tensor,
+    learner: Tensor,
     rule: PlayerRule,
 ) -> Tensor:
     """Compute the clipped policy loss with its two pulls and the value error.
@@ -103,8 +104,10 @@ def player_loss(
     `logits` `[m, k]` and `values` `[m]` are the policy's fresh output on the
     rows; `old_logits` are what it output when it played them. `actions` is
     int64 `[m]`, `advantages` and `value_targets` are `[m]`, and `keep` is
-    bool `[m]`, True for the rows that teach the policy. Rows outside `keep`
-    still train the win chance.
+    bool `[m]`, True for the rows that teach the policy. `learner` is bool
+    `[m]`, True for the rows the learner played. Those train the win chance,
+    in or out of `keep`. An opponent's rows do not, because their targets
+    come from the opponent's own predictions.
     """
     log_probs, available = _masked_log_probs(logits)
     old_log_probs, _ = _masked_log_probs(old_logits)
@@ -116,7 +119,9 @@ def player_loss(
     stay = (log_probs.exp() * (log_probs - old_log_probs) * available).sum(dim=-1)
     even = available.float().sum(dim=-1).log() - entropy(logits)
     policy = ((-gain + rule.stay * stay + rule.spread * even) * kept).sum() / weight
-    return policy + rule.value_weight * functional.mse_loss(values, value_targets)
+    played = learner.float()
+    value = ((values - value_targets).pow(2) * played).sum() / played.sum().clamp_min(1.0)
+    return policy + rule.value_weight * value
 
 
 def guess_loss(guess: Guess, *, deck_truth: Tensor, hand_truth: Tensor) -> Tensor:

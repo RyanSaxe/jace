@@ -3,8 +3,8 @@
 High Card needs no game engine: each seat holds three cards, picks one, and
 the higher pick wins. The best play is always the highest card, so the share
 of decisions where the player picks it shows whether training works. The
-script uses the same pieces a real loop does: `collect` plays the games and
-`update_player` learns from them. Run it with `uv run python -m jace.loops.toy`.
+script uses the same pieces a real loop does: `play_games` plays a list of
+games to the end and `update_player` learns from them. Run it with `uv run python -m jace.loops.toy`.
 """
 
 import sys
@@ -15,13 +15,13 @@ from torch import Tensor, nn
 from jace.engine.toy import HAND_SIZE, TOY_CARDS, ToyBatch
 from jace.modules import run
 from jace.play import Boards, Earlier, Guess
-from jace.train import PlayerRule, collect, update_player
+from jace.train import PlayerRule, play_games, update_player
 
 __all__ = ("main",)
 
 GAMES_AT_ONCE = 64
 ITERATIONS = 40
-DECISIONS_PER_ITERATION = 512
+GAMES_PER_ITERATION = 512
 REPORT_EVERY = 5
 HIDDEN_WIDTH = 32
 LEARNING_RATE = 3e-3
@@ -50,21 +50,18 @@ def main() -> None:
         even = torch.full((rows, TOY_CARDS), 1 / TOY_CARDS)
         return Guess(deck=even, hand=even)
 
-    batch = ToyBatch(lambda: ((0,), (1,)), games=GAMES_AT_ONCE, seed=0)
-    pending = None
+    matchups = [((0,), (1,))] * GAMES_PER_ITERATION
     for iteration in range(1, ITERATIONS + 1):
-        collected = collect(
-            batch,
-            pending,
+        collected = play_games(
+            lambda games, seed=iteration: ToyBatch(games, games=GAMES_AT_ONCE, seed=seed),
+            matchups,
             learner=policy,
             opponent=even_policy,
             guesser=blank_guesser,
             cards=TOY_CARDS,
             history=1,
-            decisions=DECISIONS_PER_ITERATION,
             generator=generator,
         )
-        pending = collected.pending
         rollout = collected.rollout
         mine = rollout.learner
         best_card_rate = (rollout.boards["hand"][mine].argmax(dim=-1) == rollout.actions[mine]).float().mean()
@@ -79,7 +76,7 @@ def main() -> None:
             max_grad_norm=1.0,
             optimizers=[optimizer],
             passes=1,
-            generator=None,
+            generator=generator,
         )
         if iteration == 1 or iteration % REPORT_EVERY == 0:
             sys.stdout.write(f"iteration {iteration:2d}  best card {best_card_rate:.2f}  win rate {win_rate:.2f}\n")

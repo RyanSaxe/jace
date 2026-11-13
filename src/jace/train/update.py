@@ -1,12 +1,12 @@
 """Turn a loss into a training step, and the two updates that need a rollout.
 
 `apply` is the one place a gradient step happens: it steps every optimizer
-it is given, which is how the shared card embedding's own optimizer moves
-together with a model's. `update_player` and `update_guess` walk a rollout
-in slices, because the player's rule filters decisions over the whole
-rollout and the guess model needs each decision's earlier guesses. The
-player's update can pass over the rollout several times, in a new random
-order each time. The guess model's makes one pass, in order.
+it is given. `update_player` and `update_guess` walk a rollout in slices,
+because the player's rule filters decisions over the whole rollout and the
+guess model needs each decision's earlier guesses. Both take the rows in a
+new random order on every pass. A rollout lists its games one worker after
+another, so a slice cut in play order would hold a handful of games, and
+its gradient would follow those games and not the round.
 """
 
 from collections.abc import Mapping, Sequence
@@ -51,7 +51,7 @@ def update_player(
     max_grad_norm: float,
     optimizers: Sequence[Optimizer],
     passes: int,
-    generator: torch.Generator | None,
+    generator: torch.Generator,
 ) -> Metrics:
     """Run `passes` passes of the player's update over `rollout`.
 
@@ -59,11 +59,10 @@ def update_player(
     `lam_value`. Both are computed once, from the win chances the player
     predicted when it played. The decisions that teach the policy are also
     chosen once over the whole rollout: the learner's own, with an
-    advantage at least as large as `rule` asks. With a `generator` every
-    pass takes the rows in a new random order, and without one every pass
-    takes them in the order they were played. Returns the mean loss, the
-    share of decisions kept, and the learner's mean advantage size before
-    any normalizing.
+    advantage at least as large as `rule` asks. Every pass takes the rows
+    in a new random order drawn from `generator`. Returns the mean loss,
+    the share of decisions kept, and the learner's mean advantage size
+    before any normalizing.
     """
     layout = sequences(rollout.games, rollout.seats)
     advantage = advantages(rollout.values, rollout.results, layout=layout, lam=lam_advantage)
@@ -77,10 +76,7 @@ def update_player(
     total = 0.0
     slices = 0
     for _ in range(passes):
-        order = (
-            torch.arange(len(advantage)) if generator is None else torch.randperm(len(advantage), generator=generator)
-        )
-        for rows in order.split(slice_rows):
+        for rows in torch.randperm(len(advantage), generator=generator).split(slice_rows):
             total += _player_step(
                 policy,
                 select(rollout, rows),
@@ -120,6 +116,7 @@ def _player_step(
         advantages=advantages,
         value_targets=value_targets,
         keep=keep,
+        learner=part.learner,
         rule=rule,
     )
     apply(loss, optimizers, max_grad_norm=max_grad_norm)
@@ -134,19 +131,20 @@ def update_guess(
     slice_rows: int,
     max_grad_norm: float,
     optimizers: Sequence[Optimizer],
+    generator: torch.Generator,
 ) -> Metrics:
-    """Run one pass of the guess model's update over `rollout`, in order.
+    """Run one pass of the guess model's update over `rollout`, in a random order.
 
     Each decision is scored against the opponent's true deck and hand. Its
     input includes the same seat's last `history` guesses in that game, as
     they were made during play, so the model learns from its own earlier
-    guesses and not from the truth. Returns the mean loss.
+    guesses and not from the truth. Those are looked up by row, so the
+    order of the rows does not matter to them. Returns the mean loss.
     """
     layout = sequences(rollout.games, rollout.seats)
     total = 0.0
     slices = 0
-    for start in range(0, len(rollout.games), slice_rows):
-        rows = torch.arange(start, min(start + slice_rows, len(rollout.games)))
+    for rows in torch.randperm(len(rollout.games), generator=generator).split(slice_rows):
         part = select(rollout, rows)
         guess = guesser(part.boards, earlier_guesses(rollout.guesses, layout, rows=rows, history=history))
         loss = guess_loss(guess, deck_truth=part.deck_truth, hand_truth=part.hand_truth)

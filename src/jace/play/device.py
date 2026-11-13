@@ -2,7 +2,7 @@
 
 Games are collected and rollouts are stored on the CPU, where the engine
 writes its boards. A model can still live on a GPU: these wrappers move a
-call's inputs to the model's device and its outputs back, so `collect` and
+call's inputs to the model's device and its outputs back, so `play_games` and
 the update functions keep handing over and receiving CPU tensors. Gradients
 flow through the move back, so a wrapped policy trains like a bare one.
 """

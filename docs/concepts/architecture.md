@@ -26,8 +26,9 @@ The diagram leaves out `jace.data`. It imports only `jace.cards`, and only
 
 ## Games go through one interface
 
-Everything that plays a game uses `GameBatch`. It steps many games at once,
-and a single game is a batch of one.
+Everything that plays a game in training uses `GameBatch`. A batch is made
+for a fixed list of matchups and plays exactly those games, a few at a
+time, until all are over.
 
 ```python
 class GameBatch(Protocol):
@@ -38,12 +39,13 @@ class GameBatch(Protocol):
 
 | Method         | Returns                                                             |
 | -------------- | ------------------------------------------------------------------- |
-| `decisions`    | The pending decision in every game: who acts, the board they see    |
+| `decisions`    | The pending decision of every game in play: which game, who acts, the board they see |
 | `act`          | The games that ended on this step, with their decks and outcome     |
 | `hidden_cards` | Both seats' true hands and libraries, for training the guess model  |
 
-A slot always holds a game waiting on a decision. When a game ends, the slot
-starts the next matchup before `act` returns.
+When a game ends, the next matchup of the list takes its place. Once none
+is left, `decisions` has no rows. A game is known by its position in the
+list.
 
 Two things implement the interface:
 

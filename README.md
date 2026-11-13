@@ -59,9 +59,9 @@ The last command needs no game engine. The player learns a game where the
 highest card wins, and prints how often it picks its best card:
 
 ```text
-iteration  1  best card 0.36  win rate 0.56
-iteration 20  best card 0.59  win rate 0.60
-iteration 40  best card 0.78  win rate 0.74
+iteration  1  best card 0.35  win rate 0.51
+iteration 20  best card 0.63  win rate 0.72
+iteration 40  best card 0.78  win rate 0.77
 ```
 
 ## Documentation

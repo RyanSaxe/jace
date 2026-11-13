@@ -19,7 +19,7 @@ says what it was measured on.
 | Deck build  | Every deck is legal, and the search escapes a local best            |
 | Real games  | The adapter on managym 0.2.3 replays a seed exactly and hides the opponent's decklist |
 | Models      | All five run on a larger card pool than they were built with        |
-| Training    | A player learns the toy game, and unfinished games carry over       |
+| Training    | A player learns the toy game, a round plays exactly its list of games, and a model whose rate is zero does not change |
 | End to end  | One limited round on the toy game updates every model               |
 | Real engine | The player and guess model take one training step on real games     |
 | Records     | A run survives a killed writer and rejects a tampered checkpoint    |
@@ -80,9 +80,11 @@ basic lands: 17.3 on average where the humans play 15.3.
 
 ## Training on real games
 
-Two runs of `jace.loops.train_limited` on a Mac CPU. The player is scored
-against uniformly random play on held-out human decks, about 80 games per
-point.
+Two early runs of `jace.loops.train_limited` on a Mac CPU. The player was
+scored against uniformly random play on held-out human decks, about 80
+games per point. They came before the loop played every game to its end,
+shuffled its updates and stopped training the embedding, so they say
+little about the loop as it is now.
 
 | Player's settings                                           | Iterations | Win rate against random |
 | ----------------------------------------------------------- | ---------- | ----------------------- |
@@ -113,10 +115,10 @@ On an Apple M3 Max CPU:
 | --------------------------- | ---------------------------------------------------------- |
 | Card starting vectors       | Text and program vectors exist and are frozen. Every card in the comparison above was in the training drafts, so a card with no play data is untested, and only drafter pretraining uses them |
 | Booster rarities            | The engine has no rarity. The Avatar booster's wildcard and foil odds are placeholders |
-| Scoring the other models in self-play | `train_limited` scores only the player, against random play |
-| A constructed loop          | Not written                                                |
-| Scoring during training     | `train_limited` still scores the player on unpaired games against random play. `jace.loops.score` scores checkpoints afterwards on paired deals |
-| GPU                         | Only the pretraining on human picks and decks runs on one. `train_limited` uses the CPU |
+| Scoring the other models in self-play | The training loops score only the player, on paired deals against random play, scripted greedy and the heuristic player |
+| A constructed loop          | `train_player` plays human decks. None builds its own constructed decks |
+| The embedding in self-play  | Not trained, as a working choice. A drafter meant to be frozen fell from 65.5% to 50.7% agreement with human picks when another model's loss moved the embedding, so no self-play update steps it. Whether and how it should learn from self-play is undecided |
+| GPU                         | Pretraining and the update of `train_player` can run on one. `train_limited` uses the CPU |
 
 ## Known problems
 

@@ -8,9 +8,11 @@ on the `Policy` and `Guesser` function types, never on a model class.
 from jace.play.device import guesser_on, policy_on
 from jace.play.guess import GuessModel
 from jace.play.player import PlayerModel, as_boards, random_policy
+from jace.play.tokens import BOARD_ARRAYS
 from jace.play.types import Boards, Earlier, Guess, Guesser, Policy
 
 __all__ = (
+    "BOARD_ARRAYS",
     "Boards",
     "Earlier",
     "Guess",

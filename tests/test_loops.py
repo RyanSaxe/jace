@@ -1,13 +1,18 @@
 """Run the limited loop end to end on the toy engine with tiny models.
 
-One test drives a whole iteration through `limited_iteration`, the way a
-user would, and checks that every model was updated. It proves the pieces
-fit together; it says nothing about how well anything learns, which the
-tests of each piece cover.
+The tests drive a whole iteration through `limited_iteration`, the way a
+user would. One checks that every model was updated. One checks that a
+drafter whose rate is zero does not change, which fails if any other
+model's update moves something the drafter reads. One checks the schedule
+of games: every deck plays the same number, none against itself. They prove
+the pieces fit together; they say nothing about how well anything learns,
+which the tests of each piece cover.
 """
 
+import collections
 import functools
 import random
+from dataclasses import dataclass
 
 import torch
 from torch import Tensor, nn
@@ -16,15 +21,25 @@ from jace.cards import CardEmbedding, CardPool, CardRecord, Rarity, own_paramete
 from jace.decks import BuildRules, DeckBuilderModel, DeckScore
 from jace.draft import DrafterModel, DraftFormat
 from jace.engine.toy import HAND_SIZE, TOY_CARDS, ToyBatch
-from jace.loops import Learners, LimitedSetup, limited_iteration, phased_schedule
+from jace.loops import Learners, LimitedSetup, balanced_matchups, limited_iteration, phased_schedule
 from jace.modules import run
 from jace.play import Boards, Earlier, Guess
-from jace.train import PlayerRule
+from jace.train import PlayerRule, PlayGames, play_games
 
 __all__ = ()
 
 
-def test_one_limited_iteration_updates_every_model() -> None:
+@dataclass(frozen=True, slots=True)
+class _Toy:
+    setup: LimitedSetup
+    learners: Learners
+    play: PlayGames
+    # trained: every model the loop updates, by name.
+    trained: dict[str, nn.Module]
+    embedding: CardEmbedding
+
+
+def _toy_loop() -> _Toy:
     torch.manual_seed(0)
     records = [CardRecord(name="Island", set_code="toy", rarity=Rarity.BASIC, text="", program=())]
     records += [
@@ -47,16 +62,7 @@ def test_one_limited_iteration_updates_every_model() -> None:
         output = run(guess, torch.cat([boards["hand"], boards["seen"]], dim=-1))
         return Guess(deck=output[:, :TOY_CARDS].softmax(dim=-1), hand=output[:, TOY_CARDS:].sigmoid())
 
-    own = functools.partial(own_parameters, embedding=embedding)
-
-    trained = {
-        "player": player,
-        "guess": guess,
-        "drafter": drafter,
-        "deck_builder": builder,
-        "deck_score": score,
-    }
-    before = {name: [parameter.detach().clone() for parameter in own(module)] for name, module in trained.items()}
+    trained = {"player": player, "guess": guess, "drafter": drafter, "deck_builder": builder, "deck_score": score}
     setup = LimitedSetup(
         pool=pool,
         draft_format=DraftFormat(seats=2, rounds=1, picks_per_round=3),
@@ -67,13 +73,14 @@ def test_one_limited_iteration_updates_every_model() -> None:
         proposals=8,
         search_rounds=2,
         score_chunk=256,
-        decisions=64,
+        games_per_deck=6,
         history=2,
         slice_rows=64,
         max_grad_norm=1.0,
         player_rule=PlayerRule(
-            clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.0, keep_floor=0.0, value_weight=0.5, normalize=False
+            clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.0, keep_floor=0.0, value_weight=0.5, normalize=True
         ),
+        passes=2,
         lam_advantage=0.5,
         lam_value=0.8,
     )
@@ -85,26 +92,77 @@ def test_one_limited_iteration_updates_every_model() -> None:
         builder=builder,
         score=score,
         optimizers={
-            "player": torch.optim.Adam(own(player), lr=1e-2),
-            "guess": torch.optim.Adam(own(guess), lr=1e-2),
-            "drafter": torch.optim.Adam(own(drafter), lr=1e-2),
-            "deck_builder": torch.optim.Adam(own(builder), lr=1e-2),
-            "deck_score": torch.optim.Adam(own(score), lr=1e-2),
-            "embedding": torch.optim.Adam(embedding.parameters(), lr=1e-2),
+            "player": torch.optim.Adam(own_parameters(player, embedding), lr=1e-2),
+            "guess": torch.optim.Adam(own_parameters(guess, embedding), lr=1e-2),
+            "drafter": torch.optim.Adam(own_parameters(drafter, embedding), lr=1e-2),
+            "deck_builder": torch.optim.Adam(own_parameters(builder, embedding), lr=1e-2),
+            "deck_score": torch.optim.Adam(own_parameters(score, embedding), lr=1e-2),
         },
     )
+    play = functools.partial(
+        play_games,
+        lambda matchups: ToyBatch(matchups, games=8, seed=0),
+        learner=policy,
+        opponent=policy,
+        guesser=guesser,
+        cards=TOY_CARDS,
+        history=2,
+        generator=torch.Generator().manual_seed(0),
+    )
+    return _Toy(setup=setup, learners=learners, play=play, trained=trained, embedding=embedding)
+
+
+def test_one_limited_iteration_updates_every_model() -> None:
+    toy = _toy_loop()
+    own = functools.partial(own_parameters, embedding=toy.embedding)
+    before = {name: [parameter.detach().clone() for parameter in own(module)] for name, module in toy.trained.items()}
 
     metrics = limited_iteration(
-        setup,
-        learners,
+        toy.setup,
+        toy.learners,
         dials=phased_schedule(drafter_starts=0, pull_ends=10)(5),
-        opponent=policy,
         other_seats=[],
-        start=lambda matchups: ToyBatch(matchups, games=8, seed=0),
+        play=toy.play,
         rng=random.Random(0),
     )
 
-    assert metrics["games"] > 0
-    for name, module in trained.items():
+    # Eight decks play six games each, and every game was played to its end.
+    assert metrics["games"] == 24
+    for name, module in toy.trained.items():
         moved = any(not torch.equal(old, new) for old, new in zip(before[name], own(module), strict=True))
         assert moved, f"{name} was not updated"
+
+
+def test_a_drafter_whose_rate_is_zero_picks_exactly_as_before_the_iteration() -> None:
+    toy = _toy_loop()
+    drafter = toy.learners.drafter
+    generator = torch.Generator().manual_seed(1)
+    seen = (torch.rand(5, 2, TOY_CARDS, generator=generator) < 0.5).float()
+    picks = torch.randint(0, TOY_CARDS, (5, 2), generator=generator)
+    pack = torch.ones(5, TOY_CARDS)
+    with torch.no_grad():
+        before = drafter.forward(seen, picks, pack=pack)
+
+    limited_iteration(
+        toy.setup,
+        toy.learners,
+        dials=phased_schedule(drafter_starts=100, pull_ends=200)(5),
+        other_seats=[],
+        play=toy.play,
+        rng=random.Random(0),
+    )
+
+    with torch.no_grad():
+        assert torch.equal(drafter.forward(seen, picks, pack=pack), before)
+
+
+def test_every_deck_plays_the_same_number_of_games_against_other_pods_and_never_itself() -> None:
+    seats = 8
+    for pods in (1, 2, 3):
+        games = balanced_matchups(pods, seats=seats, games_per_deck=5, rng=random.Random(pods))
+
+        played = collections.Counter(deck for game in games for deck in game)
+        assert played == dict.fromkeys(range(pods * seats), 5)
+        assert all(first != second for first, second in games)
+        if pods > 1:
+            assert all(first // seats != second // seats for first, second in games)

@@ -41,7 +41,8 @@ _ANY_RARITY: SlotOdds = {
     Rarity.MYTHIC: _PLACEHOLDER_MYTHIC_CHANCE,
 }
 
-# The land slot holds a basic land or a common land, each half the time.
+# The land slot holds a basic land half the time and any common card the other half. The printed
+# booster's other half is a common land, which a slot cannot ask for: a slot draws by rarity alone.
 _BASIC_LAND_CHANCE = 0.5
 _LAND: SlotOdds = {Rarity.BASIC: _BASIC_LAND_CHANCE, Rarity.COMMON: 1 - _BASIC_LAND_CHANCE}
 

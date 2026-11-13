@@ -6,6 +6,26 @@ game at a time between any two players, in `jace.engine.scoring`. Those two
 files are the only ones in the package allowed to import manabot.
 """
 
-from jace.engine.batch import SEATS, Board, BoardLayout, Decisions, Finished, GameBatch, HiddenCards, Outcome
+from jace.engine.batch import (
+    SEATS,
+    Board,
+    BoardLayout,
+    Decisions,
+    Finished,
+    GameBatch,
+    HiddenCards,
+    Matchup,
+    Outcome,
+)
 
-__all__ = ("SEATS", "Board", "BoardLayout", "Decisions", "Finished", "GameBatch", "HiddenCards", "Outcome")
+__all__ = (
+    "SEATS",
+    "Board",
+    "BoardLayout",
+    "Decisions",
+    "Finished",
+    "GameBatch",
+    "HiddenCards",
+    "Matchup",
+    "Outcome",
+)

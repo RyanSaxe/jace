@@ -20,7 +20,6 @@ import functools
 import itertools
 import json
 import math
-import random
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -29,25 +28,19 @@ from pathlib import Path
 
 import torch
 
-from jace.cards import CardEmbedding, Deck
+from jace.cards import CardEmbedding
 from jace.data import SetCards, card_table, load_decks, read_set
-from jace.engine import SEATS, BoardLayout
+from jace.engine import BoardLayout
 from jace.engine.manabot import board_layout, engine_card_ids, engine_cards
 from jace.engine.scoring import (
     Played,
     Player,
     RatedGame,
     Rating,
-    Seating,
     fit_ratings,
     flat_seat,
-    greedy_seat,
-    heuristic_seat,
-    play_games,
-    random_seat,
 )
 from jace.eval import (
-    Deal,
     Game,
     GuessTally,
     MatchScore,
@@ -58,9 +51,9 @@ from jace.eval import (
     legs,
     model_seat,
     score_match,
-    tally_guess,
 )
 from jace.loops.entry_points import playable_decks
+from jace.loops.matches import SCRIPTED, draw_deals, guess_details, play_match
 from jace.play import GuessModel, PlayerModel
 from jace.tracking import CheckpointRef, ModelName, Running, evaluating, load_checkpoint, record_evaluation
 
@@ -68,10 +61,7 @@ __all__ = ("main",)
 
 # The player every rating is measured from, at 1000.
 _ANCHOR = "random"
-_SCRIPTED: Mapping[str, Player] = {"random": random_seat, "greedy": greedy_seat, "heuristic": heuristic_seat}
 _FLAT_PREFIX = "flat-"
-# The engine takes an unsigned 32-bit seed.
-_ENGINE_SEED_BITS = 31
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,8 +155,8 @@ def _players(
     players: dict[str, Player] = {}
     checkpoints: dict[str, CheckpointRef] = {}
     for name in names:
-        if name in _SCRIPTED:
-            players[name] = _SCRIPTED[name]
+        if name in SCRIPTED:
+            players[name] = SCRIPTED[name]
         elif name.startswith(_FLAT_PREFIX):
             players[name] = functools.partial(flat_seat, sims=int(name.removeprefix(_FLAT_PREFIX)))
         else:
@@ -190,21 +180,6 @@ def _guesses(name: str, match: _Match, *, games: Sequence[Game]) -> GuessTally:
         seats = {seat for seat, seated in ((game.a_seat, match.a), (1 - game.a_seat, match.b)) if seated == name}
         tallies += [tally for seat in seats if (tally := played.guesses[seat]) is not None]
     return add_tallies(tallies)
-
-
-def _guess_details(tally: GuessTally) -> dict[str, object]:
-    # The guess report as JSON values, with null for a range of stated chance that holds no guess.
-    if not tally.pairs:
-        return {}
-    report = guess_report(tally)
-    return {
-        "guess": {
-            "loss": report.loss,
-            "base_rate_loss": report.base_rate_loss,
-            "stated": [None if math.isnan(value) else value for value in report.stated],
-            "observed": [None if math.isnan(value) else value for value in report.observed],
-        }
-    }
 
 
 def _record_match(
@@ -242,7 +217,7 @@ def _record_match(
                 "seed": arguments.seed,
                 "game_seconds": arguments.game_seconds,
                 "games_per_second": len(games) / match.seconds,
-                **_guess_details(_guesses(name, match, games=games)),
+                **guess_details(_guesses(name, match, games=games)),
             },
         )
     return score
@@ -324,16 +299,6 @@ def _write_guesses(matches: Sequence[_Match], *, games: Sequence[Game], names: S
                 _write(f"  {stated:13.3f}   {observed:8.3f}   {int(count):7d}")
 
 
-def _deals(decks: Sequence[Deck], *, count: int, seed: int) -> list[Deal]:
-    # Draws `count` deals: two different decks and an engine seed each.
-    rng = random.Random(seed)
-    deals: list[Deal] = []
-    for _ in range(count):
-        first, second = rng.sample(decks, SEATS)
-        deals.append(Deal(decks=(first, second), seed=rng.getrandbits(_ENGINE_SEED_BITS)))
-    return deals
-
-
 def main(argv: Sequence[str]) -> None:
     """Play every pair, print the table and append each checkpoint's results to its run.
 
@@ -355,7 +320,7 @@ def main(argv: Sequence[str]) -> None:
     )
     # The decks the run kept out of training, the same ones it scored itself on.
     decks = playable_decks(human.decks[human.held_out], pool=cards.pool, count=arguments.decks)
-    deals = _deals(decks, count=arguments.deals, seed=arguments.seed)
+    deals = draw_deals(decks, count=arguments.deals, seed=arguments.seed)
     games = legs(deals)
     players, checkpoints = _players(
         arguments.players, run=arguments.run, config=config, cards=cards, layout=board_layout()
@@ -370,18 +335,9 @@ def main(argv: Sequence[str]) -> None:
     with evaluating(arguments.run) as run:
         for a, b in pairs:
             began = time.perf_counter()
-            seatings = [
-                Seating(
-                    seed=game.seed,
-                    decks=game.decks,
-                    players=(players[a], players[b]) if game.a_seat == 0 else (players[b], players[a]),
-                    player_seeds=game.player_seeds,
-                )
-                for game in games
-            ]
-            played = play_games(
-                seatings,
-                check_guesses=tally_guess,
+            played = play_match(
+                games,
+                (players[a], players[b]),
                 names=names,
                 workers=arguments.workers,
                 game_seconds=arguments.game_seconds,

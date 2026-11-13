@@ -29,7 +29,7 @@ cannot be told from the controller.
 
 import collections
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -41,8 +41,8 @@ from manabot.env.observation import ObservationSpace
 from manabot.infra.config import ObservationConfig
 from torch import Tensor
 
-from jace.cards import CardPool, Deck
-from jace.engine.batch import SEATS, BoardLayout, Decisions, Finished, GameBatch, HiddenCards, Outcome
+from jace.cards import CardPool
+from jace.engine.batch import SEATS, BoardLayout, Decisions, Finished, GameBatch, HiddenCards, Matchup, Outcome
 
 __all__ = (
     "POLICY_INPUT_VERSION",
@@ -56,6 +56,7 @@ __all__ = (
     "land_and_spell_actions",
     "observation_space",
     "start_batch",
+    "turn_numbers",
 )
 
 POLICY_INPUT_VERSION = 10
@@ -72,11 +73,11 @@ _TOKEN_COLUMN = int(_ARRAYS["agent_cards"]["columns"]["is_token"]["index"])
 # Columns of a row of the `actions` board.
 _PLAY_LAND_COLUMN = int(_ARRAYS["actions"]["columns"]["play_land"]["index"])
 _CAST_SPELL_COLUMN = int(_ARRAYS["actions"]["columns"]["cast_spell"]["index"])
+# The column of a player's row that holds the number of the turn being played.
+_TURN_COLUMN = int(_ARRAYS["agent_player"]["columns"]["turn"]["index"])
 # What `jace.play.tokens` assumes about the arrays, in the engine's own words.
 _DEFINITION_ENCODING = "CardDefId + 1; 0 means absent"
 _FOCUS_ORDER = "agent player, opponent player, agent cards, opponent cards, agent permanents, opponent permanents"
-# The step results the engine writes beside the boards, which no player reads.
-_STEP_RESULTS = ("rewards", "terminated", "truncated")
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,9 +197,21 @@ def board_layout() -> BoardLayout:
     )
 
 
-def start_batch(matchups: Callable[[], tuple[Deck, Deck]], *, pool: CardPool, games: int, seed: int) -> GameBatch:
+def start_batch(
+    matchups: Sequence[Matchup], *, pool: CardPool, games: int, seed: int, boards: Collection[str]
+) -> GameBatch:
+    """Start the games of `matchups` on the engine, at most `games` of them at once.
+
+    `matchups` must hold at least one game. `boards` names the board arrays
+    a decision reports, out of the ones `observation_space` lists. The
+    engine encodes them all, and the ones no model reads are more than half
+    of a decision's bytes, so a caller that stores decisions names only
+    what it reads, such as `jace.play.BOARD_ARRAYS`. Raises
+    `DeckRejectedError` when the engine refuses a deck.
+    """
     names = tuple(pool[card].name for card in range(len(pool)))
-    return _ManabotBatch(matchups, names=names, card_ids=engine_card_ids(pool).numpy(), games=games, seed=seed)
+    card_ids = engine_card_ids(pool).numpy()
+    return _ManabotBatch(matchups, names=names, card_ids=card_ids, games=games, seed=seed, boards=boards)
 
 
 def land_and_spell_actions(boards: Mapping[str, Tensor]) -> tuple[Tensor, Tensor]:
@@ -209,6 +222,12 @@ def land_and_spell_actions(boards: Mapping[str, Tensor]) -> tuple[Tensor, Tensor
     lands = kinds[..., _PLAY_LAND_COLUMN] > 0
     spells = kinds[..., _CAST_SPELL_COLUMN] > 0
     return lands & legal, spells & legal
+
+
+def turn_numbers(boards: Mapping[str, Tensor]) -> Tensor:
+    # boards: the engine's arrays as tensors, each [n, ...]. Returns float [n]: a number that is
+    # the same for every decision of one turn of a game and differs between turns.
+    return boards["agent_player"][:, 0, _TURN_COLUMN]
 
 
 def _rules_texts() -> dict[str, str]:
@@ -230,33 +249,38 @@ def _rules_texts() -> dict[str, str]:
 class _ManabotBatch:
     def __init__(
         self,
-        matchups: Callable[[], tuple[Deck, Deck]],
+        matchups: Sequence[Matchup],
         *,
         names: tuple[str, ...],
         card_ids: npt.NDArray[np.int64],
         games: int,
         seed: int,
+        boards: Collection[str],
     ) -> None:
-        self._matchups: Callable[[], tuple[Deck, Deck]] = matchups
+        self._matchups: Sequence[Matchup] = matchups
         self._names: tuple[str, ...] = names
         self._cards_by_name: dict[str, int] = {name: card for card, name in enumerate(names)}
         # card_ids: int64 [engine definition ids], the `CardId` of each engine definition or -1.
         self._card_ids: npt.NDArray[np.int64] = card_ids
-        self._decks: list[tuple[Deck, Deck]] = [matchups() for _ in range(games)]
-        # deck_counts: int64 [n, 2, cards], copies of each card in each seat's deck.
-        self._deck_counts: npt.NDArray[np.int64] = np.zeros((games, SEATS, len(names)), dtype=np.int64)
+        self._reported: tuple[str, ...] = tuple(boards)
+        slots = min(games, len(matchups))
+        # game: int64 [slots], the position in `matchups` of the game each slot plays, or -1 for none.
+        self._game: npt.NDArray[np.int64] = np.arange(slots, dtype=np.int64)
+        self._started: int = slots
+        # deck_counts: int64 [slots, 2, cards], copies of each card in each seat's deck.
+        self._deck_counts: npt.NDArray[np.int64] = np.zeros((slots, SEATS, len(names)), dtype=np.int64)
         # The engine gives slot i the seeds base + i, base + i + n, ... for its successive games, so a
         # slot's games do not change with how fast the other slots finish. The base is hashed so that
         # batches started from neighbouring seeds share no game, and halved so the additions cannot overflow.
         base = int(np.random.SeedSequence(seed).generate_state(1, np.uint64)[0]) >> 1
-        self._games: managym.VectorEnv = managym.VectorEnv(games, seed=base, opponent_policy="none")
-        setups = [self._setup(slot) for slot in range(games)]
+        self._games: managym.VectorEnv = managym.VectorEnv(slots, seed=base, opponent_policy="none")
+        setups = [self._setup(slot) for slot in range(slots)]
         # The engine writes the boards into the arrays it is given, and encodes by their names and sizes.
-        self._buffers: dict[str, npt.NDArray[Any]] = observation_space().encoder.allocate(games)
+        self._buffers: dict[str, npt.NDArray[Any]] = observation_space().encoder.allocate(slots)
         self._buffers.update(
-            rewards=np.zeros(games, dtype=np.float64),
-            terminated=np.zeros(games, dtype=np.uint8),
-            truncated=np.zeros(games, dtype=np.uint8),
+            rewards=np.zeros(slots, dtype=np.float64),
+            terminated=np.zeros(slots, dtype=np.uint8),
+            truncated=np.zeros(slots, dtype=np.uint8),
         )
         try:
             self._games.set_buffers(self._buffers)
@@ -265,39 +289,48 @@ class _ManabotBatch:
             raise DeckRejectedError(str(error)) from error
 
     def decisions(self) -> Decisions:
-        # Copies, so a caller may keep a board after later steps overwrite the engine's arrays.
-        boards = {name: board.copy() for name, board in self._buffers.items() if name not in _STEP_RESULTS}
+        playing = np.flatnonzero(self._game >= 0)
+        # Indexing copies, so a caller may keep a board after later steps overwrite the engine's arrays.
         return Decisions(
-            seats=np.array(self._games.current_agent_indices(), dtype=np.int64),
-            boards=boards,
-            action_counts=self._buffers["actions_valid"].sum(axis=1).astype(np.int64),
+            games=self._game[playing],
+            seats=np.array(self._games.current_agent_indices(), dtype=np.int64)[playing],
+            boards={name: self._buffers[name][playing] for name in self._reported},
+            action_counts=self._buffers["actions_valid"][playing].sum(axis=1).astype(np.int64),
         )
 
     def act(self, actions: npt.NDArray[np.int64]) -> tuple[Finished, ...]:
-        slots = len(self._decks)
+        playing = self._game >= 0
+        every_slot = np.zeros(len(playing), dtype=np.int64)
+        every_slot[playing] = actions
         # An isolated step reports a game the engine cannot continue, such as a board too large
-        # for the observation arrays, in that slot's info and lets every other game advance.
-        self._games.step_isolated_into_buffers(actions.tolist(), [True] * slots, recover_capacity=True)
+        # for the observation arrays, in that slot's info and lets every other game advance. A
+        # slot with no game is not stepped.
+        self._games.step_isolated_into_buffers(every_slot.tolist(), playing.tolist(), recover_capacity=True)
         results = self._games.get_last_info()
         # A game the engine could not continue, or one it cut short, has no result. `jace.engine.scoring`
         # counts the same two as abandoned.
-        failed = [result.get("game_error") is not None for result in results]
+        failed = np.array([result.get("game_error") is not None for result in results]) & playing
         cut_short = self._buffers["truncated"] > 0
-        ended = (self._buffers["terminated"] > 0) | cut_short | np.array(failed)
+        ended = ((self._buffers["terminated"] > 0) | cut_short | failed) & playing
         if not ended.any():
             return ()
-        if any(failed):
-            self._games.replace_failed_into_buffers(failed)
+        if failed.any():
+            self._games.replace_failed_into_buffers(failed.tolist())
         # The engine has already dealt each ended slot a new game from the old decks. The next
-        # matchup is dealt over it below.
+        # matchup of the list is dealt over it below, and a slot with none left is never stepped again.
         finished: list[Finished] = []
-        setups: list[list[managym.PlayerConfig] | None] = [None] * slots
+        setups: list[list[managym.PlayerConfig] | None] = [None] * len(playing)
         for slot in np.flatnonzero(ended).tolist():
             winner = results[slot].get("winner_index")
-            unfinished = failed[slot] or bool(cut_short[slot])
+            unfinished = bool(failed[slot] or cut_short[slot])
             outcome = Outcome.ABANDONED if unfinished else _outcome(winner if isinstance(winner, int) else None)
-            finished.append(Finished(slot=slot, outcome=outcome, decks=self._decks[slot]))
-            self._decks[slot] = self._matchups()
+            game = int(self._game[slot])
+            finished.append(Finished(game=game, outcome=outcome, decks=self._matchups[game]))
+            if self._started == len(self._matchups):
+                self._game[slot] = -1
+                continue
+            self._game[slot] = self._started
+            self._started += 1
             setups[slot] = self._setup(slot)
         try:
             self._games.reassign_roots_into_buffers(setups)
@@ -306,34 +339,35 @@ class _ManabotBatch:
         return tuple(finished)
 
     def hidden_cards(self) -> HiddenCards:
-        games = len(self._decks)
+        slots = len(self._game)
         # The engine returns each hand as a name-to-copies mapping, so this one loop over games is unavoidable.
         held = [
             (slot, seat, self._cards_by_name[name], copies)
             for seat in range(SEATS)
-            for slot, hand in enumerate(self._games.hand_snapshots([seat] * games))
+            for slot, hand in enumerate(self._games.hand_snapshots([seat] * slots))
             for name, copies in hand.cards.items()
             if name in self._cards_by_name
         ]
-        slots, seats, cards, copies = np.array(held, dtype=np.int64).reshape(-1, 4).T
+        rows, seats, cards, copies = np.array(held, dtype=np.int64).reshape(-1, 4).T
         hands = np.zeros_like(self._deck_counts)
-        hands[slots, seats, cards] = copies
+        hands[rows, seats, cards] = copies
         public = self._cards_in_public_zones()
         # The board files a permanent under its controller. A side that shows more copies of a card
         # than its seat's deck holds must control the other seat's permanents, so the extra copies move back.
         borrowed = (hands + public - self._deck_counts).clip(min=0)
         libraries = self._deck_counts - hands - public + borrowed - borrowed[:, ::-1]
-        return HiddenCards(hands=hands, libraries=libraries.clip(min=0))
+        playing = self._game >= 0
+        return HiddenCards(hands=hands[playing], libraries=libraries.clip(min=0)[playing])
 
     def _cards_in_public_zones(self) -> npt.NDArray[np.int64]:
-        # Returns int64 [n, 2, cards]: copies of each card that the acting seat's board lists on each
+        # Returns int64 [slots, 2, cards]: copies of each card that the acting seat's board lists on each
         # seat's side outside the hand and the library, which is the battlefield, graveyard, exile and stack.
         counts = np.zeros_like(self._deck_counts)
         acting = np.array(self._games.current_agent_indices(), dtype=np.int64)
-        # definitions: int64 [n, 2, card rows], the engine definition id of each listed card, acting seat first.
+        # definitions: int64 [slots, 2, card rows], the engine definition id of each listed card, acting seat first.
         definitions = self._buffers["semantic_cards"].astype(np.int64) - 1
         for side, name in enumerate(("agent_cards", "opponent_cards")):
-            rows = self._buffers[name]  # float32 [n, card rows, features]
+            rows = self._buffers[name]  # float32 [slots, card rows, features]
             # The valid mask also drops the sideboard cards that `semantic_cards` lists after the acting seat's cards.
             hidden_zone_or_token = rows[:, :, [_LIBRARY_COLUMN, _HAND_COLUMN, _TOKEN_COLUMN]].any(axis=-1)
             slots, card_rows = np.nonzero((self._buffers[f"{name}_valid"] > 0) & ~hidden_zone_or_token)
@@ -345,7 +379,7 @@ class _ManabotBatch:
 
     def _setup(self, slot: int) -> list[managym.PlayerConfig]:
         players: list[managym.PlayerConfig] = []
-        for seat, deck in enumerate(self._decks[slot]):
+        for seat, deck in enumerate(self._matchups[int(self._game[slot])]):
             copies = collections.Counter(self._names[card] for card in deck)
             players.append(
                 managym.PlayerConfig(f"seat {seat}", dict(copies), world=managym.WORLD_SETUP, disclosure="closed")

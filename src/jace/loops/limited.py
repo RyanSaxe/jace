@@ -6,10 +6,16 @@ that order, as plain calls. Constructed play would be another short function
 that skips the first two steps. A user who wants a different order, another
 reward or another explore rule edits this function or writes their own; the
 pieces it calls do not change.
+
+No update here steps the shared card embedding. Every model reads cards
+through it, so a step taken for one model's loss would change what every
+other model sees, including a model whose own rate is zero. Each model
+adapts through its own projection of the card vectors instead.
 """
 
 import random
-from collections.abc import Callable, Mapping, Sequence
+import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 import torch
@@ -39,7 +45,7 @@ from jace.draft import (
     run_drafts,
     view_tensors,
 )
-from jace.engine import SEATS, GameBatch
+from jace.engine import SEATS, Matchup
 from jace.loops.schedules import Dials
 from jace.modules import run
 from jace.play import Guesser, Policy
@@ -48,10 +54,10 @@ from jace.train import (
     GameResult,
     Metrics,
     PlayerRule,
+    PlayGames,
     Rollout,
     apply,
     choice_loss,
-    collect,
     entropy,
     kl_to,
     score_loss,
@@ -59,13 +65,12 @@ from jace.train import (
     update_player,
 )
 
-__all__ = ("Learners", "LimitedSetup", "StartBatch", "limited_iteration")
+__all__ = ("Learners", "LimitedSetup", "UnevenDecksError", "balanced_matchups", "limited_iteration")
 
 # PyTorch seeds a generator with a signed 64-bit integer, so a seed drawn from `random` uses 63 bits.
 _SEED_BITS = 63
-
-# Starts a batch of games whose matchups come from the function it is given.
-type StartBatch = Callable[[Callable[[], tuple[Deck, Deck]]], GameBatch]
+# Either deck of a pair is as likely to take the first seat.
+_EVEN_ODDS = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,12 +79,13 @@ class LimitedSetup:
 
     `booster_cards` lists the cards a booster may hold, by rarity. `pods`
     drafts are run per iteration, and each pool gets `proposals`
-    candidate decks improved for `search_rounds` rounds. Games are played
-    until finished games hold `decisions` learner decisions. `history` is
-    how many earlier guesses the guess model is shown. `player_rule` is the
-    player's update rule; its `spread` is replaced each iteration by the
-    schedule's. `score_chunk` bounds how many decks the deck score rates in
-    one call during the search.
+    candidate decks improved for `search_rounds` rounds. Every deck then
+    plays `games_per_deck` games. `history` is how many earlier guesses the
+    guess model is shown. `player_rule` is the player's update rule; its
+    `spread` is replaced each iteration by the schedule's, and `passes` is
+    how many times the player's update goes over the games. `score_chunk`
+    bounds how many decks the deck score rates in one call during the
+    search.
     """
 
     pool: CardPool
@@ -91,13 +97,19 @@ class LimitedSetup:
     proposals: int
     search_rounds: int
     score_chunk: int
-    decisions: int
+    games_per_deck: int
     history: int
     slice_rows: int
     max_grad_norm: float
     player_rule: PlayerRule
+    passes: int
     lam_advantage: float
     lam_value: float
+
+
+class UnevenDecksError(ValueError):
+    def __init__(self, decks: int) -> None:
+        super().__init__(f"{decks} decks cannot each play the same number of games: the count must be even")
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,10 +119,10 @@ class Learners:
     `policy` and `guesser` are the player's and the guess model's functions,
     which depend on the engine's board layout. `human_drafter` is the frozen
     drafter trained on human picks that `Dials.human_pull` pulls toward, or
-    `None` for no pull. `optimizers` holds one optimizer per trained thing,
-    keyed "player", "guess", "drafter", "deck_builder", "deck_score" and
-    "embedding"; the embedding's steps together with whichever model is
-    being updated.
+    `None` for no pull. `optimizers` holds one optimizer per model, keyed
+    "player", "guess", "drafter", "deck_builder" and "deck_score", over
+    that model's own parameters. None of them may hold the shared card
+    embedding's parameters: build each from `own_parameters`.
     """
 
     policy: Policy
@@ -182,17 +194,43 @@ def _counts(decks: Sequence[Deck], *, cards: int) -> Tensor:
     return counts
 
 
-def _deck_records(decks: Sequence[Deck], games: Sequence[GameResult]) -> tuple[Tensor, Tensor]:
-    # Returns (wins [decks], games played [decks]); a draw counts as half a win for each deck.
-    index = {deck: row for row, deck in enumerate(decks)}
-    wins = torch.zeros(len(decks))
-    played = torch.zeros(len(decks))
+def balanced_matchups(pods: int, *, seats: int, games_per_deck: int, rng: random.Random) -> list[tuple[int, int]]:
+    """Schedule the games of an iteration's decks, as pairs of deck numbers.
+
+    Deck `pod * seats + seat` is the deck of that seat of that pod. Every
+    deck plays exactly `games_per_deck` games and never itself. With more
+    than one pod, every game is between decks of different pods, so a deck
+    is measured against decks that did not draft at its table. The first
+    deck of a pair takes seat 0, and which one that is is drawn at random.
+    Raises `UnevenDecksError` when the number of decks is odd.
+    """
+    decks = pods * seats
+    if decks % SEATS:
+        raise UnevenDecksError(decks)
+    half = decks // SEATS
+    games: list[tuple[int, int]] = []
+    for _ in range(games_per_deck):
+        # Pods in a random order, each a block of its decks in a random order. A deck plays the
+        # deck half the line away, which is in another pod whenever there are two pods or more.
+        line = [pod * seats + seat for pod in rng.sample(range(pods), pods) for seat in rng.sample(range(seats), seats)]
+        pairs = zip(line[:half], line[half:], strict=True)
+        games += [(first, second) if rng.random() < _EVEN_ODDS else (second, first) for first, second in pairs]
+    return games
+
+
+def _deck_records(
+    schedule: Sequence[tuple[int, int]], games: Sequence[GameResult], *, decks: int
+) -> tuple[Tensor, Tensor]:
+    # schedule: the deck numbers of each game that was to be played, seat 0's first. Returns
+    # (wins [decks], games played [decks]) over the games that finished; a draw counts as half
+    # a win for each deck. Decks are told apart by number, so two equal decks stay two decks.
+    wins = torch.zeros(decks)
+    played = torch.zeros(decks)
     for game in games:
-        learner_deck, other_deck = game.decks[game.learner_seat], game.decks[1 - game.learner_seat]
-        for deck, result in ((learner_deck, game.learner_result), (other_deck, 1.0 - game.learner_result)):
-            if deck in index:
-                wins[index[deck]] += result
-                played[index[deck]] += 1
+        learner_deck, other_deck = (schedule[game.game][seat] for seat in (game.learner_seat, 1 - game.learner_seat))
+        wins[learner_deck] += game.learner_result
+        wins[other_deck] += 1.0 - game.learner_result
+        played[[learner_deck, other_deck]] += 1
     return wins, played
 
 
@@ -231,16 +269,13 @@ def _update_drafter(
         with torch.no_grad():
             human = learners.human_drafter.forward(seen, picks, pack=pack)
         loss = loss + kl_to(logits, human).mean() * dials.human_pull
-    apply(
-        loss,
-        [learners.optimizers["drafter"], learners.optimizers["embedding"]],
-        max_grad_norm=setup.max_grad_norm,
-    )
+    apply(loss, [learners.optimizers["drafter"]], max_grad_norm=setup.max_grad_norm)
     return {"drafter/loss": float(loss.detach()), "drafter/mean_reward": float(reward.mean())}
 
 
-def _update_play_models(setup: LimitedSetup, learners: Learners, *, rollout: Rollout, dials: Dials) -> Metrics:
-    embedding = learners.optimizers["embedding"]
+def _update_play_models(
+    setup: LimitedSetup, learners: Learners, *, rollout: Rollout, dials: Dials, generator: torch.Generator
+) -> Metrics:
     player = update_player(
         learners.policy,
         rollout,
@@ -249,9 +284,9 @@ def _update_play_models(setup: LimitedSetup, learners: Learners, *, rollout: Rol
         lam_value=setup.lam_value,
         slice_rows=setup.slice_rows,
         max_grad_norm=setup.max_grad_norm,
-        optimizers=[learners.optimizers["player"], embedding],
-        passes=1,
-        generator=None,
+        optimizers=[learners.optimizers["player"]],
+        passes=setup.passes,
+        generator=generator,
     )
     guess = update_guess(
         learners.guesser,
@@ -259,7 +294,8 @@ def _update_play_models(setup: LimitedSetup, learners: Learners, *, rollout: Rol
         history=setup.history,
         slice_rows=setup.slice_rows,
         max_grad_norm=setup.max_grad_norm,
-        optimizers=[learners.optimizers["guess"], embedding],
+        optimizers=[learners.optimizers["guess"]],
+        generator=generator,
     )
     named = {f"player/{name}": value for name, value in player.items()}
     return named | {f"guess/{name}": value for name, value in guess.items()}
@@ -275,8 +311,7 @@ def _update_deck_score(
         return nothing
     logits = run(learners.score, _counts(decks, cards=len(setup.pool))[seen_play])
     loss = score_loss(logits, wins=wins[seen_play], games=played[seen_play])
-    optimizers = [learners.optimizers["deck_score"], learners.optimizers["embedding"]]
-    apply(loss, optimizers, max_grad_norm=setup.max_grad_norm)
+    apply(loss, [learners.optimizers["deck_score"]], max_grad_norm=setup.max_grad_norm)
     return {"deck_score/loss": float(loss.detach())}
 
 
@@ -294,8 +329,7 @@ def _update_builder(
     best = _counts([candidate.deck for candidate in best_decks], cards=cards)
     available, partial, chosen = writing_steps(best, pool_counts=pools, rules=setup.rules, generator=generator)
     loss = choice_loss(run(learners.builder, available, partial), chosen, weights=torch.ones(len(chosen)))
-    optimizers = [learners.optimizers["deck_builder"], learners.optimizers["embedding"]]
-    apply(loss, optimizers, max_grad_norm=setup.max_grad_norm)
+    apply(loss, [learners.optimizers["deck_builder"]], max_grad_norm=setup.max_grad_norm)
     return {"deck_builder/loss": float(loss.detach())}
 
 
@@ -304,49 +338,47 @@ def limited_iteration(
     learners: Learners,
     *,
     dials: Dials,
-    opponent: Policy,
     other_seats: Sequence[Drafter],
-    start: StartBatch,
+    play: PlayGames,
     rng: random.Random,
 ) -> Metrics:
     """Draft, build, play and learn once, and return the metrics of every update.
 
-    `dials` are this iteration's values from the schedule. `opponent` plays
-    the seat the learner does not, and `other_seats` are the drafters for
-    the last seats of every pod, such as past versions; the learner drafts
-    the rest. `start` begins a batch of games on whatever engine the caller
-    uses. Games still running when enough decisions are collected are
-    discarded, which matters little while `setup.decisions` is many games'
-    worth.
+    `dials` are this iteration's values from the schedule. `other_seats`
+    are the drafters for the last seats of every pod, such as past
+    versions; the learner drafts the rest. `play` plays a list of matchups
+    to the end with the learners' player in both seats, on whatever engine
+    and in whatever processes the caller chose. The games are the
+    `balanced_matchups` of the decks just built, so every deck plays the
+    same number of games and none is cut off. The metrics include the
+    seconds each of the four steps took.
     """
     generator = torch.Generator().manual_seed(rng.getrandbits(_SEED_BITS))
     _set_rate(learners.optimizers["player"], dials.player_rate)
     _set_rate(learners.optimizers["drafter"], dials.drafter_rate)
 
+    began = time.perf_counter()
     drafter = model_drafter(learners.drafter, generator=generator)
     records = _draft(setup, drafter=drafter, other_seats=other_seats, rng=rng)
+    drafted = time.perf_counter()
     played_decks, best_decks = _build(setup, learners, records=records, dials=dials, rng=rng)
     decks = [candidate.deck for candidate in played_decks]
-
-    def matchup() -> tuple[Deck, Deck]:
-        first, second = rng.sample(decks, SEATS)
-        return first, second
-
-    collected = collect(
-        start(matchup),
-        None,
-        learner=learners.policy,
-        opponent=opponent,
-        guesser=learners.guesser,
-        cards=len(setup.pool),
-        history=setup.history,
-        decisions=setup.decisions,
-        generator=generator,
+    built = time.perf_counter()
+    schedule = balanced_matchups(
+        setup.pods, seats=setup.draft_format.seats, games_per_deck=setup.games_per_deck, rng=rng
     )
-    wins, played = _deck_records(decks, collected.games)
+    matchups: list[Matchup] = [(decks[first], decks[second]) for first, second in schedule]
+    collected = play(matchups)
+    wins, played = _deck_records(schedule, collected.games, decks=len(decks))
+    finished = time.perf_counter()
 
-    metrics: dict[str, float] = {"games": float(len(collected.games)), "abandoned": float(collected.abandoned)}
-    metrics |= _update_play_models(setup, learners, rollout=collected.rollout, dials=dials)
+    metrics: dict[str, float] = {
+        "games": float(len(collected.games)),
+        "abandoned": float(collected.abandoned),
+        "lost": float(collected.lost),
+        "decisions": float(len(collected.rollout.games)),
+    }
+    metrics |= _update_play_models(setup, learners, rollout=collected.rollout, dials=dials, generator=generator)
     metrics |= _update_deck_score(setup, learners, decks=decks, wins=wins, played=played)
     metrics |= _update_builder(setup, learners, records=records, best_decks=best_decks, generator=generator)
     if dials.drafter_rate > 0:
@@ -359,4 +391,9 @@ def limited_iteration(
             played=played,
             dials=dials,
         )
-    return metrics
+    return metrics | {
+        "draft_seconds": drafted - began,
+        "build_seconds": built - drafted,
+        "play_seconds": finished - built,
+        "update_seconds": time.perf_counter() - finished,
+    }

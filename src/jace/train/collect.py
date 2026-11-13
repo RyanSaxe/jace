@@ -1,26 +1,41 @@
-"""Play games in a batch and record every decision of the games that finish.
+"""Play a list of games to the end and record every decision.
 
-`collect` steps a `GameBatch` with a learner policy in one seat and an
-opponent policy in the other, and returns the decisions of complete games
-as a `Rollout`. Games still running when it stops are not dropped, which
-would favour short games: they are handed back as a `Pending` value, and the
-next call continues them. Each model runs once per step over every game
-that needs it; the only Python loop over games visits the few that ended on
-a step.
+A round of training is a list of matchups. `play_games` plays every game of
+the list from its first decision to its last with the policies it is given,
+and returns the decisions as a `Rollout`. No game is cut off for being long
+and none carries over to a later call, so every row of a rollout was played
+by one version of the weights, and long games count as much as short ones.
+A game the engine abandons is counted and its decisions are left out.
+
+A training loop depends on `PlayGames`, the one-argument form: matchups in,
+`Collected` out. `play_games` with its other arguments bound is one, on a
+single batch in this process. `jace.train.workers` builds another on worker
+processes. Each model runs once per step over every game in play; the only
+Python loop over games visits the few that ended on a step.
 """
 
-from collections.abc import Sequence
-from dataclasses import dataclass, fields
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, fields, replace
 
 import numpy as np
 import torch
 from torch import Tensor
 
 from jace.cards import Deck
-from jace.engine import SEATS, Finished, GameBatch, Outcome
+from jace.engine import SEATS, Finished, GameBatch, Matchup, Outcome
 from jace.play import Boards, Earlier, Guess, Guesser, Policy
 
-__all__ = ("Collected", "GameResult", "Pending", "Rollout", "collect", "join", "select")
+__all__ = (
+    "Collected",
+    "GameResult",
+    "NoGamesError",
+    "PlayGames",
+    "Rollout",
+    "StartBatch",
+    "join",
+    "play_games",
+    "select",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,27 +68,8 @@ class Rollout:
 
 
 @dataclass(frozen=True, slots=True)
-class Pending:
-    """Everything `collect` must remember between calls on one batch.
-
-    `rows` are the decisions of games that have not finished, with `results`
-    not yet known. `history` holds each slot's and seat's most recent
-    guesses, newest first, as `[slots, 2, history, cards]`, and
-    `history_count` says how many are real. `learner_seat` is the learner's
-    seat in each slot's current game, `game_ids` is that game's id, and
-    `next_game` is the first unused id.
-    """
-
-    rows: Rollout | None
-    history: Guess
-    history_count: Tensor
-    learner_seat: Tensor
-    game_ids: Tensor
-    next_game: int
-
-
-@dataclass(frozen=True, slots=True)
 class GameResult:
+    # game: the game's position in the list of matchups that was played.
     game: int
     decks: tuple[Deck, Deck]
     learner_seat: int
@@ -83,13 +79,27 @@ class GameResult:
 
 @dataclass(frozen=True, slots=True)
 class Collected:
-    # rollout: the decisions of the games that finished. games: one entry per finished game.
+    # rollout: the decisions of the games that finished, each row's game being its position in
+    # the list of matchups. games: one entry per finished game.
     rollout: Rollout
     games: tuple[GameResult, ...]
-    # abandoned: how many games the engine could not finish; their decisions are in neither rollout.
+    # abandoned: how many games the engine could not finish. Their decisions are not in the rollout.
     abandoned: int
-    # pending: pass it to the next `collect` call on the same batch.
-    pending: Pending
+    # lost: how many games of the list were not played to the end because the process playing
+    # them was stopped. It is zero for games played in this process.
+    lost: int
+
+
+# Starts a batch that plays exactly the matchups it is given.
+type StartBatch = Callable[[Sequence[Matchup]], GameBatch]
+
+# Plays every game of a list of matchups to its end and returns their decisions.
+type PlayGames = Callable[[Sequence[Matchup]], Collected]
+
+
+class NoGamesError(ValueError):
+    def __init__(self) -> None:
+        super().__init__("a round needs at least one matchup to play")
 
 
 def select(rollout: Rollout, rows: Tensor) -> Rollout:
@@ -123,18 +133,6 @@ def join(parts: Sequence[Rollout]) -> Rollout:
     )
 
 
-def _fresh(slots: int, *, cards: int, history: int, generator: torch.Generator) -> Pending:
-    empty = torch.zeros(slots, SEATS, history, cards)
-    return Pending(
-        rows=None,
-        history=Guess(deck=empty, hand=empty.clone()),
-        history_count=torch.zeros(slots, SEATS, dtype=torch.long),
-        learner_seat=torch.randint(0, SEATS, (slots,), generator=generator),
-        game_ids=torch.arange(slots),
-        next_game=slots,
-    )
-
-
 def _decide(
     boards: Boards, guess: Guess, *, is_learner: Tensor, learner: Policy, opponent: Policy
 ) -> tuple[Tensor, Tensor]:
@@ -154,7 +152,7 @@ def _decide(
 
 
 def _truth(batch: GameBatch, seats: Tensor) -> tuple[Tensor, Tensor]:
-    # Returns (deck_truth, hand_truth), each [n, cards], for the opponent of the seat acting in each slot.
+    # Returns (deck_truth, hand_truth), each [n, cards], for the opponent of the seat acting in each game in play.
     hidden = batch.hidden_cards()
     slot_index = torch.arange(len(seats))
     hands = torch.from_numpy(hidden.hands)[slot_index, 1 - seats].float()
@@ -162,50 +160,37 @@ def _truth(batch: GameBatch, seats: Tensor) -> tuple[Tensor, Tensor]:
     return unseen / unseen.sum(dim=-1, keepdim=True).clamp_min(1.0), (hands > 0).float()
 
 
-def _split(parts: list[Rollout], finished: list[GameResult], *, abandoned: set[int]) -> tuple[Rollout, Rollout | None]:
-    # Drops the rows of abandoned games, fills in results and returns
-    # (rows of finished games, rows of games still running or None).
+def _finished_rows(parts: Sequence[Rollout], finished: Sequence[GameResult], *, abandoned: set[int]) -> Rollout:
+    # Joins the steps of a round, drops the rows of abandoned games and fills in every row's result.
     joined = join(parts)
     rows = select(joined, ~torch.isin(joined.games, torch.tensor(sorted(abandoned), dtype=torch.int64)))
-    result_for_seat_0 = {
-        game.game: game.learner_result if game.learner_seat == 0 else 1.0 - game.learner_result for game in finished
-    }
-    seat_0_result = torch.tensor([result_for_seat_0.get(game, float("nan")) for game in rows.games.tolist()])
-    results = torch.where(rows.seats == 0, seat_0_result, 1.0 - seat_0_result)
-    done = ~results.isnan()
-    plain = {
-        field.name: getattr(rows, field.name)
-        for field in fields(Rollout)
-        if field.name not in {"boards", "guesses", "results"}
-    }
-    everything = Rollout(boards=rows.boards, guesses=rows.guesses, results=results, **plain)
-    return select(everything, done), select(everything, ~done) if bool((~done).any()) else None
+    seat_0_result = torch.zeros(int(joined.games.max()) + 1)
+    for game in finished:
+        seat_0_result[game.game] = game.learner_result if game.learner_seat == 0 else 1.0 - game.learner_result
+    result = seat_0_result[rows.games]
+    return replace(rows, results=torch.where(rows.seats == 0, result, 1.0 - result))
 
 
-def _count_learner_rows(counts: dict[int, int], games: Tensor) -> None:
-    # Adds one to `counts[game]` for each game id in `games`, int64 [m], in place.
-    for game in games.tolist():
-        counts[game] = counts.get(game, 0) + 1
-
-
-def _guess(guesser: Guesser, boards: Boards, *, seats: Tensor, history: Guess, history_count: Tensor) -> Guess:
-    # Makes the acting seat's guess in every slot and puts it at the front of that seat's
-    # history, in place. history: [slots, 2, h, cards] each; history_count: int64 [slots, 2].
-    slots = torch.arange(len(seats))
+def _guess(
+    guesser: Guesser, boards: Boards, *, games: Tensor, seats: Tensor, history: Guess, history_count: Tensor
+) -> Guess:
+    # Makes the acting seat's guess in every game in play and puts it at the front of that seat's
+    # history, in place. games, seats: int64 [n]. history: [games of the round, 2, h, cards]
+    # each; history_count: int64 [games of the round, 2].
     shown = history.deck.shape[2]
-    earlier = Guess(deck=history.deck[slots, seats], hand=history.hand[slots, seats])
-    mask = torch.arange(shown) < history_count[slots, seats][:, None]
+    earlier = Guess(deck=history.deck[games, seats], hand=history.hand[games, seats])
+    mask = torch.arange(shown) < history_count[games, seats][:, None]
     guess = guesser(boards, Earlier(guesses=earlier, mask=mask))
-    history.deck[slots, seats] = torch.cat([guess.deck[:, None], earlier.deck[:, :-1]], dim=1)
-    history.hand[slots, seats] = torch.cat([guess.hand[:, None], earlier.hand[:, :-1]], dim=1)
-    history_count[slots, seats] = (history_count[slots, seats] + 1).clamp_max(shown)
+    history.deck[games, seats] = torch.cat([guess.deck[:, None], earlier.deck], dim=1)[:, :shown]
+    history.hand[games, seats] = torch.cat([guess.hand[:, None], earlier.hand], dim=1)[:, :shown]
+    history_count[games, seats] = (history_count[games, seats] + 1).clamp_max(shown)
     return guess
 
 
-def _game_result(ended: Finished, *, game: int, learner_seat: int) -> GameResult:
+def _game_result(ended: Finished, *, learner_seat: int) -> GameResult:
     seat_0_result = {Outcome.SEAT_0_WON: 1.0, Outcome.SEAT_1_WON: 0.0, Outcome.DRAW: 0.5}[ended.outcome]
     return GameResult(
-        game=game,
+        game=ended.game,
         decks=ended.decks,
         learner_seat=learner_seat,
         learner_result=seat_0_result if learner_seat == 0 else 1.0 - seat_0_result,
@@ -213,51 +198,48 @@ def _game_result(ended: Finished, *, game: int, learner_seat: int) -> GameResult
 
 
 @torch.no_grad()
-def collect(
-    batch: GameBatch,
-    pending: Pending | None,
+def play_games(
+    start: StartBatch,
+    matchups: Sequence[Matchup],
     *,
     learner: Policy,
     opponent: Policy,
     guesser: Guesser,
     cards: int,
     history: int,
-    decisions: int,
     generator: torch.Generator,
 ) -> Collected:
-    """Step `batch` until finished games hold at least `decisions` learner decisions.
+    """Play every game of `matchups` to its end on one batch and return their decisions.
 
-    Pass `pending=None` for a batch that has just been started and the
-    `Pending` from the previous call afterwards. `cards` is the number of
-    cards in the pool and `history` is how many earlier guesses the guesser
-    is shown. The learner's seat is drawn at random for each new game.
-    When `opponent` is the same policy as `learner`, which is self-play,
-    the decisions of both seats are the learner's: all of them count toward
-    `decisions` and all of them are marked as the learner's in the rollout.
-    `GameResult.learner_result` is still the result of the drawn seat.
-    Returns the decisions and results of the finished games, and the state
-    to continue from.
+    `start` makes the batch for the list. `cards` is the number of cards in
+    the pool and `history` is how many earlier guesses the guesser is
+    shown. The learner takes seat 0 in every second game of the list and
+    seat 1 in the others, starting from a seat drawn at random. When
+    `opponent` is the same policy as `learner`, which is self-play, the
+    decisions of both seats are marked as the learner's in the rollout, and
+    `GameResult.learner_result` is still the result of the learner's seat.
+    Raises `NoGamesError` when `matchups` is empty.
     """
-    pending_decisions = batch.decisions()
-    slots = len(pending_decisions.seats)
-    state = pending if pending is not None else _fresh(slots, cards=cards, history=history, generator=generator)
-    learner_seat, game_ids, next_game = state.learner_seat.clone(), state.game_ids.clone(), state.next_game
-    guesses = Guess(deck=state.history.deck.clone(), hand=state.history.hand.clone())
-    guess_count = state.history_count.clone()
-    parts: list[Rollout] = [] if state.rows is None else [state.rows]
-    finished: list[GameResult] = []
-    abandoned: set[int] = set()
-    learner_rows: dict[int, int] = {}
-    if state.rows is not None:
-        _count_learner_rows(learner_rows, state.rows.games[state.rows.learner])
-    finished_learner_rows = 0
+    if not matchups:
+        raise NoGamesError
+    batch = start(matchups)
+    empty = torch.zeros(len(matchups), SEATS, history, cards)
+    guesses = Guess(deck=empty, hand=empty.clone())
+    guess_count = torch.zeros(len(matchups), SEATS, dtype=torch.long)
+    first_seat = int(torch.randint(0, SEATS, (1,), generator=generator))
+    learner_seat = (torch.arange(len(matchups)) + first_seat) % SEATS
     # `==`, not `is`: a bound method is a new object each time it is read from its model.
     self_play = opponent == learner
-    while finished_learner_rows < decisions:
-        seats = torch.from_numpy(pending_decisions.seats.copy())
-        boards = {name: torch.from_numpy(np.array(array)) for name, array in pending_decisions.boards.items()}
-        guess = _guess(guesser, boards, seats=seats, history=guesses, history_count=guess_count)
-        is_learner = torch.ones_like(seats, dtype=torch.bool) if self_play else seats == learner_seat
+    parts: list[Rollout] = []
+    finished: list[GameResult] = []
+    abandoned: set[int] = set()
+    pending = batch.decisions()
+    while len(pending.games):
+        games = torch.from_numpy(pending.games.copy())
+        seats = torch.from_numpy(pending.seats.copy())
+        boards = {name: torch.from_numpy(np.array(array)) for name, array in pending.boards.items()}
+        guess = _guess(guesser, boards, games=games, seats=seats, history=guesses, history_count=guess_count)
+        is_learner = torch.ones_like(seats, dtype=torch.bool) if self_play else seats == learner_seat[games]
         logits, values = _decide(boards, guess, is_learner=is_learner, learner=learner, opponent=opponent)
         log_probs = logits.log_softmax(dim=-1)
         actions = torch.multinomial(log_probs.exp(), 1, generator=generator).squeeze(1)
@@ -270,37 +252,19 @@ def collect(
                 actions=actions,
                 log_probs=log_probs.gather(1, actions[:, None]).squeeze(1),
                 values=values,
-                games=game_ids.clone(),
+                games=games,
                 seats=seats,
                 learner=is_learner,
-                results=torch.full((slots,), float("nan")),
+                results=torch.zeros(len(games)),
                 deck_truth=deck_truth,
                 hand_truth=hand_truth,
             )
         )
-        _count_learner_rows(learner_rows, game_ids[is_learner])
-
         for ended in batch.act(actions.numpy()):
-            game = int(game_ids[ended.slot])
-            game_learner_rows = learner_rows.pop(game, 0)
             if ended.outcome is Outcome.ABANDONED:
-                abandoned.add(game)
+                abandoned.add(ended.game)
             else:
-                finished.append(_game_result(ended, game=game, learner_seat=int(learner_seat[ended.slot])))
-                finished_learner_rows += game_learner_rows
-            game_ids[ended.slot] = next_game
-            next_game += 1
-            learner_seat[ended.slot] = int(torch.randint(0, SEATS, (1,), generator=generator))
-            guess_count[ended.slot] = 0
-        pending_decisions = batch.decisions()
-
-    rollout, unfinished = _split(parts, finished, abandoned=abandoned)
-    carried = Pending(
-        rows=unfinished,
-        history=guesses,
-        history_count=guess_count,
-        learner_seat=learner_seat,
-        game_ids=game_ids,
-        next_game=next_game,
-    )
-    return Collected(rollout=rollout, games=tuple(finished), abandoned=len(abandoned), pending=carried)
+                finished.append(_game_result(ended, learner_seat=int(learner_seat[ended.game])))
+        pending = batch.decisions()
+    rollout = _finished_rows(parts, finished, abandoned=abandoned)
+    return Collected(rollout=rollout, games=tuple(finished), abandoned=len(abandoned), lost=0)

@@ -1,10 +1,12 @@
 """The interface between a game engine and everything that plays games.
 
-Training and evaluation step many games at once through `GameBatch` and never
-see the engine behind it, so tests can hand them a small fake. A single game
-is a batch of one. Each slot of a batch always holds a game that is waiting
-on a decision: when a game ends, `act` reports it and the slot starts the
-next matchup before `act` returns.
+Training steps many games at once through `GameBatch` and never sees the
+engine behind it, so tests can hand it a small fake. A batch is made for a
+fixed list of matchups and plays exactly those games, a few at a time: when
+a game ends, its place is taken by the next matchup of the list that has not
+started, and when none is left the place stays empty. A game is known by its
+position in the list, so nothing about a batch depends on a source of
+matchups that it would have to ask.
 """
 
 import enum
@@ -17,10 +19,23 @@ import numpy.typing as npt
 
 from jace.cards import Deck
 
-__all__ = ("SEATS", "Board", "BoardLayout", "Decisions", "Finished", "GameBatch", "HiddenCards", "Outcome")
+__all__ = (
+    "SEATS",
+    "Board",
+    "BoardLayout",
+    "Decisions",
+    "Finished",
+    "GameBatch",
+    "HiddenCards",
+    "Matchup",
+    "Outcome",
+)
 
 # Every game has two players, seat 0 and seat 1.
 SEATS = 2
+
+# The decks of one game: seat 0's, then seat 1's.
+type Matchup = tuple[Deck, Deck]
 
 # One named array per kind of thing a seat can see, each with a leading batch axis.
 type Board = Mapping[str, npt.NDArray[np.generic]]
@@ -60,6 +75,9 @@ class Outcome(enum.Enum):
 
 @dataclass(frozen=True, slots=True)
 class Decisions:
+    # One row for each game in play. n is zero once every game of the list is over.
+    # games: [n], each game's position in the batch's list of matchups.
+    games: npt.NDArray[np.int64]
     # seats: [n], the seat that must act in each game.
     seats: npt.NDArray[np.int64]
     # boards: each array [n, ...], only what the acting seat may see.
@@ -70,13 +88,15 @@ class Decisions:
 
 @dataclass(frozen=True, slots=True)
 class Finished:
-    slot: int
+    # game: the game's position in the batch's list of matchups.
+    game: int
     outcome: Outcome
     decks: tuple[Deck, Deck]
 
 
 @dataclass(frozen=True, slots=True)
 class HiddenCards:
+    # One row for each game in play, in the order of `Decisions`.
     # hands: [n, 2, cards], copies of each card in each seat's hand.
     hands: npt.NDArray[np.int64]
     # libraries: [n, 2, cards], copies of each card in each seat's library, order unknown.
@@ -84,13 +104,15 @@ class HiddenCards:
 
 
 class GameBatch(Protocol):
-    """A fixed number of games stepped together.
+    """A fixed list of games, stepped a few at a time until all are over.
 
-    `decisions` returns the pending decision in every slot. `act` applies
-    one action per slot and returns the games that ended on that step, in
-    slot order. `hidden_cards` returns both seats' true hands and libraries
-    in every slot as card counts; it exists to label training data for the
-    guess model and must never reach a player.
+    `decisions` returns the pending decision of every game in play. `act`
+    applies one action to each of those games, in the same order, and
+    returns the games that ended on that step. A game that ends makes room
+    for the next one of the list, so the rows of the next `decisions` may
+    belong to other games. `hidden_cards` returns both seats' true hands
+    and libraries in every game in play as card counts; it exists to label
+    training data for the guess model and must never reach a player.
     """
 
     def decisions(self) -> Decisions: ...

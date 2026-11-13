@@ -1,26 +1,25 @@
-"""Collect self-play games in worker processes, and replace a worker whose games stop moving.
+"""Play a round's games in worker processes, and replace a worker whose games stop moving.
 
-A game engine can stay inside one step for minutes, and a call into it
-cannot be interrupted from Python. When games are collected in the training
-process, that one step freezes the run. Here each worker process owns a
-small `GameBatch` and its own copy of the models, and runs
-`jace.train.collect` on it. The training process sends the weights at the
-start of a round, takes back the finished games in pieces, and kills a
-worker that completes no step for a time limit. The killed worker's games
-in progress are lost, the other workers' are not, and a new process takes
-its place for the next round. Games in progress stay inside their worker
-between rounds, so nothing is discarded when a round ends.
+A step of a game engine can take very long on a rare board, and a call
+into it cannot be interrupted from Python. When games are played in the
+training process, that one step freezes the run. Here each worker process
+has its own copy of the models and plays its share of a round's matchups
+with `jace.train.play_games`. The training process sends every worker the
+round's weights and its share, takes back the decisions, and kills a
+worker that completes no step for a time limit. The games of that worker's
+share are lost and counted, the other workers' are not, and a new process
+takes its place for the next round. Nothing carries over from one round to
+the next, so every decision of a round was made with that round's weights.
 
 A worker's life is explicit: it is `Starting` while its process builds the
-models and the games, `Ready` between rounds and `Collecting` during one.
-Each change of state is one function below. Workers are started with the
-spawn method, so a builder must be a module-level function or a
-`functools.partial` of one over plain values.
+models, `Ready` between rounds and `Playing` during one. Each change of
+state is one function below. Workers are started with the spawn method, so
+a builder must be a module-level function or a `functools.partial` of one
+over plain values.
 """
 
 import ctypes
 import io
-import math
 import multiprocessing
 import multiprocessing.connection
 import random
@@ -33,22 +32,20 @@ from multiprocessing.process import BaseProcess
 import torch
 from torch import Tensor, nn
 
-from jace.engine import GameBatch
+from jace.engine import Matchup
 from jace.play import Boards, Guess, Guesser, Policy
-from jace.train.collect import GameResult, Pending, Rollout, collect, join
+from jace.train.collect import Collected, StartBatch, join, play_games
 
 __all__ = (
     "Actor",
     "BuildActor",
-    "Collecting",
-    "Gathered",
-    "NoGamesError",
+    "Playing",
     "Ready",
     "Starting",
     "Weights",
     "Worker",
     "WorkerFailedError",
-    "gather",
+    "play_on_workers",
     "start_workers",
     "stop_workers",
 )
@@ -56,9 +53,6 @@ __all__ = (
 # The state dict of each module a worker plays with, by the name the worker's `Actor` gives it.
 type Weights = Mapping[str, Mapping[str, Tensor]]
 
-# A worker sends its finished games whenever they hold this many more decisions, so a worker
-# that is killed has already handed over most of what it finished.
-_PIECE_DECISIONS = 256
 # How often the training process looks at the workers' step counters while it waits for games.
 _WATCH_SECONDS = 0.5
 # A worker's seed has this many bits, the most a PyTorch generator takes.
@@ -69,14 +63,15 @@ _SEED_BITS = 63
 class Actor:
     """What a worker plays with, built inside its own process.
 
-    `policy` and `guesser` play both seats of every game of `batch`.
-    `modules` are the modules behind them, by name: at the start of each
-    round the worker loads the state dict sent under each name into the
-    module of that name. `cards` is the number of cards in the pool and
-    `history` how many earlier guesses the guesser is shown.
+    `start` makes a batch for the matchups of one round. `policy` and
+    `guesser` play both seats of every game. `modules` are the modules
+    behind them, by name: at the start of each round the worker loads the
+    state dict sent under each name into the module of that name. `cards`
+    is the number of cards in the pool and `history` how many earlier
+    guesses the guesser is shown.
     """
 
-    batch: GameBatch
+    start: StartBatch
     policy: Policy
     guesser: Guesser
     modules: Mapping[str, nn.Module]
@@ -112,43 +107,21 @@ class Ready:
 
 
 @dataclass(frozen=True, slots=True)
-class Collecting:
-    # The worker is playing a round. steps: its step count when last looked at. since: when that count last rose.
+class Playing:
+    # The worker is playing its share of a round. share: the position in the round's list of each
+    # matchup it was given. steps: its step count when last looked at. since: when that count last rose.
     child: _Child
+    share: tuple[int, ...]
     steps: int
     since: float
 
 
-type Worker = Starting | Ready | Collecting
-
-
-@dataclass(frozen=True, slots=True)
-class Gathered:
-    """One round of games from every worker that kept moving.
-
-    `rollout` holds the decisions of the finished games, with game ids
-    that are unique across workers, and `games` their results under the
-    same ids. `abandoned` counts the games the engine could not finish.
-    `lost_workers` counts the workers killed in this round for completing
-    no step within the time limit. `workers` are the workers to pass to the
-    next round.
-    """
-
-    rollout: Rollout
-    games: tuple[GameResult, ...]
-    abandoned: int
-    lost_workers: int
-    workers: tuple[Worker, ...]
+type Worker = Starting | Ready | Playing
 
 
 class WorkerFailedError(RuntimeError):
     def __init__(self, reason: str) -> None:
         super().__init__(f"a worker process {reason}")
-
-
-class NoGamesError(RuntimeError):
-    def __init__(self, lost: int) -> None:
-        super().__init__(f"no worker finished a game in this round, and {lost} were killed for making no progress")
 
 
 def start_workers(build: BuildActor, *, count: int, seed: int) -> tuple[Worker, ...]:
@@ -161,57 +134,45 @@ def stop_workers(workers: Sequence[Worker]) -> None:
         _kill(worker.child)
 
 
-def gather(workers: Sequence[Worker], *, weights: Weights, decisions: int, stall_seconds: float) -> Gathered:
-    """Play one round on every worker and return the games that finished in it.
+def play_on_workers(
+    workers: Sequence[Worker], matchups: Sequence[Matchup], *, weights: Weights, stall_seconds: float
+) -> tuple[Collected, tuple[Worker, ...]]:
+    """Play every game of `matchups` on the workers and return the decisions and the workers.
 
-    Each worker loads `weights`, then plays until its finished games hold
-    its share of `decisions` decisions, so the round holds about that many
-    unless a worker is lost. A worker that completes no step of its games
-    for `stall_seconds` is killed and a new process is started in its
-    place, which joins the next round. Its games in progress are lost, and
-    the round returns with what it had already sent and what the other
-    workers produce. A new process has the same `stall_seconds` to build
-    its actor.
+    The matchups are dealt out to the workers in turn. Each worker loads
+    `weights` and plays its share to the end in self-play. A game in the
+    result is known by its position in `matchups`. The workers that come
+    back are the ones to pass to the next round.
 
-    Raises `WorkerFailedError` when a process exits by itself or does not
-    finish building in time, and `NoGamesError` when the round ends with no
-    finished game.
+    A worker that completes no step of its games for `stall_seconds` is
+    killed, and a new process is started in its place for the next round.
+    The games of its share are not in the result and `Collected.lost`
+    counts them. A new process has the same `stall_seconds` to build its
+    actor. Raises `WorkerFailedError` when a process exits by itself, does
+    not finish building in time, or when every worker was killed.
     """
     packed = io.BytesIO()
     torch.save({name: dict(state) for name, state in weights.items()}, packed)
     ready = [_await_ready(worker, stall_seconds=stall_seconds) for worker in workers]
-    quota = math.ceil(decisions / len(ready))
-    states: list[Worker] = [_assign(worker, weights=packed.getvalue(), quota=quota) for worker in ready]
-    pieces: list[_Piece] = []
-    while any(isinstance(state, Collecting) for state in states):
+    shares = [tuple(range(first, len(matchups), len(ready))) for first in range(len(ready))]
+    states: list[Worker] = [
+        _assign(worker, weights=packed.getvalue(), matchups=matchups, share=share) if share else worker
+        for worker, share in zip(ready, shares, strict=True)
+    ]
+    played: list[tuple[tuple[int, ...], Collected]] = []
+    while any(isinstance(state, Playing) for state in states):
         multiprocessing.connection.wait(
-            [state.child.connection for state in states if isinstance(state, Collecting)], timeout=_WATCH_SECONDS
+            [state.child.connection for state in states if isinstance(state, Playing)], timeout=_WATCH_SECONDS
         )
         states = [
-            _advance(state, pieces=pieces, stall_seconds=stall_seconds) if isinstance(state, Collecting) else state
+            _advance(state, played=played, stall_seconds=stall_seconds) if isinstance(state, Playing) else state
             for state in states
         ]
-    # A worker that is starting now replaced one that was killed in this round.
-    lost = sum(isinstance(state, Starting) for state in states)
-    if not pieces:
+    if not played:
         stop_workers(states)
-        raise NoGamesError(lost)
-    rollout, games = _renumbered(pieces)
-    return Gathered(
-        rollout=rollout,
-        games=games,
-        abandoned=sum(piece.abandoned for piece in pieces),
-        lost_workers=lost,
-        workers=tuple(states),
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class _Piece:
-    # Some finished games of one worker, with game ids that are unique within that worker only.
-    rollout: Rollout
-    games: tuple[GameResult, ...]
-    abandoned: int
+        reason = "returned no game: every one that was playing stopped making progress"
+        raise WorkerFailedError(reason)
+    return _combined(played, games=len(matchups)), tuple(states)
 
 
 def _spawn(build: BuildActor, *, seed: int) -> Starting:
@@ -229,8 +190,8 @@ def _await_ready(worker: Worker, *, stall_seconds: float) -> Ready:
     # Starting -> Ready, once the process says its actor is built. A ready worker is returned as it is.
     if isinstance(worker, Ready):
         return worker
-    if isinstance(worker, Collecting):
-        reason = "is still collecting the round before"
+    if isinstance(worker, Playing):
+        reason = "is still playing the round before"
         raise WorkerFailedError(reason)
     remaining = worker.since + stall_seconds - time.monotonic()
     if not worker.child.connection.poll(max(remaining, 0.0)):
@@ -241,21 +202,23 @@ def _await_ready(worker: Worker, *, stall_seconds: float) -> Ready:
     return Ready(child=worker.child)
 
 
-def _assign(worker: Ready, *, weights: bytes, quota: int) -> Collecting:
-    # Ready -> Collecting.
-    worker.child.connection.send((weights, quota))
-    return Collecting(child=worker.child, steps=worker.child.steps.value, since=time.monotonic())
+def _assign(worker: Ready, *, weights: bytes, matchups: Sequence[Matchup], share: tuple[int, ...]) -> Playing:
+    # Ready -> Playing.
+    worker.child.connection.send((weights, [matchups[at] for at in share]))
+    return Playing(child=worker.child, share=share, steps=worker.child.steps.value, since=time.monotonic())
 
 
-def _advance(worker: Collecting, *, pieces: list[_Piece], stall_seconds: float) -> Worker:
-    # Collecting -> Ready once the worker says its round is done, after adding what it sent to
-    # `pieces`. Collecting -> Collecting while its step count rises. Collecting -> Starting, as
-    # a new process, once the count has not risen for `stall_seconds`.
-    while worker.child.connection.poll():
-        piece = _receive(worker.child.connection)
-        if piece is None:
-            return Ready(child=worker.child)
-        pieces.append(piece)
+def _advance(worker: Playing, *, played: list[tuple[tuple[int, ...], Collected]], stall_seconds: float) -> Worker:
+    # Playing -> Ready once the worker sends its games, which are added to `played` with its
+    # share. Playing -> Playing while its step count rises. Playing -> Starting, as a new
+    # process, once the count has not risen for `stall_seconds`.
+    if worker.child.connection.poll():
+        collected = _receive(worker.child.connection)
+        if collected is None:
+            reason = "said it was ready in the middle of a round"
+            raise WorkerFailedError(reason)
+        played.append((worker.share, collected))
+        return Ready(child=worker.child)
     now = time.monotonic()
     steps = worker.child.steps.value
     if steps != worker.steps:
@@ -272,36 +235,37 @@ def _kill(child: _Child) -> None:
     child.connection.close()
 
 
-def _receive(connection: Connection) -> _Piece | None:
-    # The next message of a child: a piece of finished games, or None when it is ready or its round is done.
+def _receive(connection: Connection) -> Collected | None:
+    # The next message of a child: the games of its share, or None when it has built its actor.
     try:
         message = connection.recv()
     except EOFError as error:
         reason = "exited by itself; its own error is printed above"
         raise WorkerFailedError(reason) from error
-    if message is None or isinstance(message, _Piece):
+    if message is None or isinstance(message, Collected):
         return message
-    reason = f"sent {type(message).__name__} where finished games were expected"
+    reason = f"sent {type(message).__name__} where games were expected"
     raise WorkerFailedError(reason)
 
 
-def _renumbered(pieces: Sequence[_Piece]) -> tuple[Rollout, tuple[GameResult, ...]]:
-    # Joins the pieces after giving every game an id no other piece uses. A game is whole within one piece.
-    rollouts: list[Rollout] = []
-    games: list[GameResult] = []
-    used = 0
-    for piece in pieces:
-        old_ids, rows = piece.rollout.games.unique(return_inverse=True)
-        new_id = {int(old): used + at for at, old in enumerate(old_ids.tolist())}
-        rollouts.append(replace(piece.rollout, games=rows + used))
-        games += [replace(game, game=new_id[game.game]) for game in piece.games]
-        used += len(old_ids)
-    return join(rollouts), tuple(games)
+def _combined(played: Sequence[tuple[tuple[int, ...], Collected]], *, games: int) -> Collected:
+    # Joins the workers' games, giving each game its position in the round's list in place of
+    # its position in its worker's share. Whatever no worker returned is counted as lost.
+    rollouts = [
+        replace(collected.rollout, games=torch.tensor(share)[collected.rollout.games]) for share, collected in played
+    ]
+    results = [replace(game, game=share[game.game]) for share, collected in played for game in collected.games]
+    return Collected(
+        rollout=join(rollouts),
+        games=tuple(results),
+        abandoned=sum(collected.abandoned for _, collected in played),
+        lost=games - sum(len(share) for share, _ in played),
+    )
 
 
 def _work(connection: Connection, steps: ctypes.c_int64, *, build: BuildActor, seed: int) -> None:
     # Runs in the worker's process. It says None once the actor is built. For each round it gets
-    # (weights, quota), sends pieces of finished games until they hold `quota` decisions, then says None.
+    # the weights and its matchups, and sends back the `Collected` of playing them.
     # One thread, because every worker would otherwise start a thread for each core.
     torch.set_num_threads(1)
     actor = build(seed)
@@ -312,25 +276,20 @@ def _work(connection: Connection, steps: ctypes.c_int64, *, build: BuildActor, s
         steps.value += 1
         return actor.policy(boards, guess)
 
-    pending: Pending | None = None
     connection.send(None)
     while True:
-        weights, quota = connection.recv()
+        weights, matchups = connection.recv()
         for name, state in torch.load(io.BytesIO(weights), weights_only=True).items():
             actor.modules[name].load_state_dict(state)
-        while quota > 0:
-            collected = collect(
-                actor.batch,
-                pending,
+        connection.send(
+            play_games(
+                actor.start,
+                matchups,
                 learner=counting,
                 opponent=counting,
                 guesser=actor.guesser,
                 cards=actor.cards,
                 history=actor.history,
-                decisions=min(quota, _PIECE_DECISIONS),
                 generator=generator,
             )
-            pending = collected.pending
-            quota -= len(collected.rollout.games)
-            connection.send(_Piece(rollout=collected.rollout, games=collected.games, abandoned=collected.abandoned))
-        connection.send(None)
+        )

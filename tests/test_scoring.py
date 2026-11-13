@@ -34,7 +34,7 @@ def _a_wins(game: Game) -> Outcome:
 
 def _highest_card_outcome(game: Game) -> Outcome:
     # Plays one game of High Card in which both seats pick their highest card.
-    batch = ToyBatch(lambda: game.decks, games=1, seed=game.seed)
+    batch = ToyBatch([game.decks], games=1, seed=game.seed)
     while True:
         highest = batch.decisions().boards["hand"].argmax(axis=1)
         finished = batch.act(highest.astype(np.int64))

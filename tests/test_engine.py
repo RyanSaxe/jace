@@ -16,6 +16,7 @@ import torch
 from jace.cards import CardPool, CardRecord, Deck, Rarity
 from jace.engine import Decisions, Finished, Outcome
 from jace.engine.manabot import DeckRejectedError, engine_card_ids, engine_cards, start_batch
+from jace.play import BOARD_ARRAYS
 
 __all__ = ()
 
@@ -53,13 +54,14 @@ def _random_actions(decisions: Decisions, rng: random.Random) -> npt.NDArray[np.
 def test_two_batches_with_one_seed_and_the_same_actions_play_identically() -> None:
     pool = _engine_pool()
     matchup = _matchup(pool)
-    first = start_batch(lambda: matchup, pool=pool, games=2, seed=11)
-    second = start_batch(lambda: matchup, pool=pool, games=2, seed=11)
+    first = start_batch([matchup] * 4, pool=pool, games=2, seed=11, boards=BOARD_ARRAYS)
+    second = start_batch([matchup] * 4, pool=pool, games=2, seed=11, boards=BOARD_ARRAYS)
     rng = random.Random(0)
     finished_games = 0
 
     for _ in range(400):
         decisions, repeated = first.decisions(), second.decisions()
+        assert np.array_equal(decisions.games, repeated.games)
         assert decisions.boards.keys() == repeated.boards.keys()
         for name, board in decisions.boards.items():
             assert np.array_equal(board, repeated.boards[name]), name
@@ -68,48 +70,50 @@ def test_two_batches_with_one_seed_and_the_same_actions_play_identically() -> No
         assert finished == second.act(actions)
         finished_games += len(finished)
 
-    # The comparison must reach past a game's end, where each slot draws a new seed.
+    # The comparison must reach past a game's end, where the next game of the list starts on a new seed.
     assert finished_games > 0
 
 
-def test_a_finished_game_reports_the_decks_it_was_played_with_and_its_slot_deals_a_new_game() -> None:
+def test_a_batch_plays_exactly_its_matchups_each_with_its_own_decks_and_then_holds_no_game() -> None:
     pool = _engine_pool()
     red = _deck(pool, land="Mountain", creatures=_RED_CREATURES)
-    issued: list[tuple[Deck, Deck]] = []
-
-    def distinct_matchups() -> tuple[Deck, Deck]:
-        # Rotating the creature list changes the copy counts, so no two issued matchups are equal.
-        turn = len(issued) % len(_WHITE_CREATURES)
-        white = _deck(pool, land="Plains", creatures=_WHITE_CREATURES[turn:] + _WHITE_CREATURES[:turn])
-        issued.append((white, red))
-        return issued[-1]
-
-    batch = start_batch(distinct_matchups, pool=pool, games=2, seed=5)
-    in_play = list(issued)
+    # Rotating the creature list changes the copy counts, so no two matchups are equal.
+    matchups = [
+        (_deck(pool, land="Plains", creatures=_WHITE_CREATURES[turn:] + _WHITE_CREATURES[:turn]), red)
+        for turn in range(len(_WHITE_CREATURES))
+    ]
+    batch = start_batch(matchups, pool=pool, games=2, seed=5, boards=BOARD_ARRAYS)
     rng = random.Random(1)
-    finished: tuple[Finished, ...] = ()
-    while not finished:
-        finished = batch.act(_random_actions(batch.decisions(), rng))
+    finished: list[Finished] = []
 
-    game = finished[0]
-    # A game of random play ends with a winner: the engine failed nothing and cut nothing short.
-    assert game.outcome in {Outcome.SEAT_0_WON, Outcome.SEAT_1_WON}
-    assert game.decks == in_play[game.slot]
-    hidden = batch.hidden_cards()
-    assert hidden.hands[game.slot].sum(axis=-1).tolist() == [_OPENING_HAND, _OPENING_HAND]
-    next_decks = issued[len(in_play)]
-    for seat in (0, 1):
-        dealt = hidden.hands[game.slot, seat] + hidden.libraries[game.slot, seat]
-        assert np.array_equal(dealt, np.bincount(next_decks[seat], minlength=len(pool)))
+    decisions = batch.decisions()
+    while len(decisions.games):
+        assert len(decisions.games) <= 2
+        ended = batch.act(_random_actions(decisions, rng))
+        decisions = batch.decisions()
+        if ended and not finished and len(decisions.games) == 2:
+            # The game that took the first free place was dealt from its own decks.
+            row = int(decisions.games.argmax())
+            hidden = batch.hidden_cards()
+            for seat in (0, 1):
+                dealt = hidden.hands[row, seat] + hidden.libraries[row, seat]
+                assert np.array_equal(dealt, np.bincount(matchups[2][seat], minlength=len(pool)))
+        finished += ended
+
+    assert sorted(game.game for game in finished) == list(range(len(matchups)))
+    for game in finished:
+        # A game of random play ends with a winner: the engine failed nothing and cut nothing short.
+        assert game.outcome in {Outcome.SEAT_0_WON, Outcome.SEAT_1_WON}
+        assert game.decks == matchups[game.game]
 
 
 def test_hidden_hand_equals_the_hand_the_acting_seat_sees_at_its_first_decision() -> None:
     pool = _engine_pool()
     matchup = _matchup(pool)
-    batch = start_batch(lambda: matchup, pool=pool, games=3, seed=2)
+    batch = start_batch([matchup] * 3, pool=pool, games=3, seed=2, boards=BOARD_ARRAYS)
     decisions, hidden = batch.decisions(), batch.hidden_cards()
     card_ids = engine_card_ids(pool)
-    # Slots share one matchup, so equal hands would mean they were dealt from one seed.
+    # The games share one matchup, so equal hands would mean they were dealt from one seed.
     assert not np.array_equal(hidden.hands[0], hidden.hands[1])
 
     for slot, seat in enumerate(decisions.seats.tolist()):
@@ -123,7 +127,7 @@ def test_hand_plus_library_never_exceeds_the_deck_during_random_play() -> None:
     pool = _engine_pool()
     matchup = _matchup(pool)
     deck_counts = np.stack([np.bincount(deck, minlength=len(pool)) for deck in matchup])
-    batch = start_batch(lambda: matchup, pool=pool, games=2, seed=3)
+    batch = start_batch([matchup] * 2, pool=pool, games=2, seed=3, boards=BOARD_ARRAYS)
     rng = random.Random(2)
     cards_out_of_library = 0
 
@@ -141,7 +145,7 @@ def test_hand_plus_library_never_exceeds_the_deck_during_random_play() -> None:
 def test_boards_show_the_acting_seats_decklist_and_never_the_opponents() -> None:
     pool = _engine_pool()
     matchup = _matchup(pool)
-    batch = start_batch(lambda: matchup, pool=pool, games=2, seed=7)
+    batch = start_batch([matchup] * 2, pool=pool, games=2, seed=7, boards=("decklists",))
     rng = random.Random(3)
 
     for _ in range(60):
@@ -159,4 +163,4 @@ def test_a_deck_with_a_card_the_engine_lacks_is_rejected_by_name() -> None:
     unknown: Deck = (pool.card_id("Black Lotus"),) * _DECK_SIZE
 
     with pytest.raises(DeckRejectedError, match="Black Lotus"):
-        start_batch(lambda: (unknown, unknown), pool=pool, games=1, seed=0)
+        start_batch([(unknown, unknown)], pool=pool, games=1, seed=0, boards=BOARD_ARRAYS)
