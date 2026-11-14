@@ -37,8 +37,9 @@ Three ideas hold the design together:
   card has before anyone plays it. A card from a new set can be drafted and
   played without retraining an output layer.
 - **A guess of hidden cards.** A separate model predicts the opponent's deck
-  and hand, and the player reads its guess. It starts from the decks the
-  opponent may hold, less the cards it has shown, and learns corrections
+  and hand, and the player reads its guess. It starts from a matrix of
+  which cards decks of the format hold together, fitted only from decks it
+  could know, less the cards the opponent has shown, and learns corrections
   from what has happened. Self-play knows the true cards, so the guess is
   trained on real answers, and the win chance that credits the player's
   actions reads them instead of guessing.

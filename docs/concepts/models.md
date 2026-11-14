@@ -78,42 +78,72 @@ hands of the current player".
 
 **Guess model**, `GuessModel.guess(boards, earlier)`. It returns two vectors
 over cards: each card's share of the opponent's unseen cards, and the chance
-the opponent holds at least one copy. It starts from a table of what the
-acting seat can know, and its network learns only corrections to that
-table.
+the opponent holds at least one copy. It reads only what a player can know:
+the meta, the board with its own deck, the opponent's hand and library
+sizes, every card the opponent has shown or revealed, the recent events and
+its own earlier guesses. It starts from the meta guess, and its network
+learns only corrections to it.
 
 ```python
-guess_model.set_field(decks)  # the decks the opponent's deck is drawn from
-table = guess_model.table(boards)  # the guess with no network
-guess = guess_model.guess(boards, earlier)  # the table plus the network's corrections
+meta = fit_meta(human_decks, fallback=day_zero_meta(booster_copies, deck_size=40))
+guess_model.set_meta(meta)  # what decks of the format look like
+start = guess_model.meta_guess(boards)  # the guess with no network
+guess = guess_model.guess(boards, earlier)  # the meta guess plus the network's corrections
+meta = blend_meta(meta, played_decks, decay=0.9)  # after a round, with older decks weighted down
 ```
 
-The field is the set of decks the opponent may hold. In self-play it is the
-decks of the games being played, and in scoring it is the decks the harness
-deals. For each card, the table counts the copies the opponent has shown on
-the battlefield, in the graveyard, in exile or on the stack, and the copies
-the engine reports were revealed from its hand. Only the field's decks that
-hold at least that many copies could be the opponent's, card by card, and
-the table averages over those:
+The meta is a matrix of card co-occurrence. For each card it holds the mean
+copies per deck, and for each ordered pair of cards i and j the mean copies
+of j in the decks that hold at least one i. It also holds the effective
+number of decks behind it and which cards the format's boosters hold.
+Nothing in it names an archetype or a colour: whatever decks share shows
+only in which cards they hold together.
 
-| Guess | The table's value for a card                                         |
-| ----- | -------------------------------------------------------------------- |
-| Deck  | Its copies known to be in hand, plus the mean of the copies those decks hold beyond the ones counted, as a share of all cards |
-| Hand  | 1 when a copy is known to be in hand, and otherwise the mean over those decks of 1 - (1 - p)^u |
+| Meta | Fitted from | Used by |
+| ---- | ----------- | ------- |
+| Day 0 | How often the boosters hold each card, with cards independent: a card whose share of a booster is s has deck size × s copies per deck | A format with no decklists, and any card no deck behind a meta holds |
+| Human | The 17Lands decks of the training split, the drafts the drafter trains on | The start of every self-play run |
+| Blended | The meta before, each deck weighted by `--meta-decay`, plus an iteration's played decks | Each self-play iteration after the first, and the checkpoint scoring reads |
+
+A self-play iteration blends in its decks only after its games are over,
+so no game is guessed with its own decks. Scoring reads the meta saved with
+the guess model's checkpoint and never the decks the harness deals.
+
+For the meta guess, a card is known to be in the opponent's deck once it
+has shown a copy on the battlefield, in the graveyard, in exile or on the
+stack, or the engine reports a copy revealed in its hand. Each known card i
+gives every card j a lift, the ratio of j's copies in decks that hold i to
+j's mean copies. The meta guess works out, card by card:
+
+| Step | The meta guess's value for a card |
+| ---- | --------------------------------- |
+| Expected copies | Its mean copies, times the exponential of the known cards' log lifts for it summed and divided by the square root of their number; a known card has at least its mean copies in the decks that hold it |
+| Unseen copies | Its expected copies less the copies known, at least a thousandth of a copy for a legal card and none for another, scaled so that all cards' unseen copies fill the opponent's hidden cards that are not known |
+| Deck | Its copies known to be in hand plus its unseen copies, as a share of the hidden cards |
+| Hand | 1 when a copy is known to be in hand, and otherwise 1 - exp(-p u) |
 
 Here p is the share of the opponent's unknown hidden cards that are in its
-hand, and u is the number of copies a deck holds beyond those counted.
-Taking the field's mean copies less the copies seen would be simpler, but it
-gives a card no chance once the opponent shows more copies than the mean,
-which basic lands do within a few turns.
+hand, and u is the card's unseen copies. The unseen copies are a mean, so
+the hand chance takes them as a Poisson number with that mean: the chance
+of whole copies, 1 - (1 - p)^u, would put every legal card in hand once the
+opponent's library is empty. Summing the log lifts would count
+the known cards as independent evidence, which cards of one deck are not,
+and averaging them would say no more after twenty cards than after two.
+Dividing the sum by the square root of their number sits between. On
+held-out human decks with some of their cards shown, it predicted the
+hidden cards better than both.
 
-The network adds a correction to the log of each card's share and to the
-logit of each hand chance. The corrections start at zero, so an untrained
-model's guess is the table. A card the table gives no share keeps none,
-and a chance of 0 or 1 stays where it is. `guess_loss` sums both guesses
-over cards, so a decision's hand guess weighs as much as its deck guess.
-The field is a buffer in the model's state dict, so the worker processes
-that receive the weights guess from the same field.
+The meta cannot know that the opponent's deck holds no more copies of a
+card, so every legal card keeps some share and some chance, and only a card
+outside the format gets none. The network reads each card on the board
+with that card's row of the meta, as the mean card vector of the decks
+that hold it. It adds a correction to the log of each card's share and to
+the logit of each hand chance. The corrections start at zero, so an
+untrained model's guess is the meta guess, and a chance of 0 or 1 stays
+where it is. `guess_loss` sums both guesses over cards, so a decision's
+hand guess weighs as much as its deck guess. The meta is held in buffers of
+the model's state dict, so the worker processes that receive the weights
+guess from the same meta, and the checkpoint holds it.
 
 **Player**, `PlayerModel.policy(boards, guess)`. It reads the players, cards
 and permanents on the board as tokens. A permanent's token also holds the
@@ -137,7 +167,7 @@ The guess model, the player and the win chance read manabot's encoded
 boards directly. That knowledge sits in
 [`jace/play/tokens.py`](../../src/jace/play/tokens.py): in `board_tokens`,
 whose comment lists every array it assumes, and in `opponent_cards`, which
-counts the opponent's cards for the guess model's table.
+counts the opponent's cards for the guess model's meta guess.
 
 Most columns of a board are numbers, such as a creature's power. Some name
 something instead: a card definition, another object on the board, or a

@@ -11,11 +11,12 @@ always start untrained. The deck score `--decks-run` holds stays frozen as
 the human-trained score, and a copy of it learns from the games. A model's weights fit only the card
 vectors they were trained with, so `--embedding-run` should be the run its
 checkpoint came from or one that read the same vectors. The table is not
-trained here, so a model whose rate is zero does not change. Every few
-iterations the player is scored with the scoring harness on paired deals of
-human decks it never trains on, against random play, scripted greedy and
-the heuristic player. Run it with
-`uv run python -m jace.loops.train_limited --help`.
+trained here, so a model whose rate is zero does not change. The guess
+model's meta starts from the human decks of the training split, and each
+iteration's decks join it once their games are over. Every few iterations
+the player is scored with the scoring harness on paired deals of human
+decks it never trains on, against random play, scripted greedy and the
+heuristic player. Run it with `uv run python -m jace.loops.train_limited --help`.
 """
 
 import argparse
@@ -33,7 +34,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from jace.cards import CardPool, CardTable, Rarity, own_parameters
+from jace.cards import CardPool, CardTable, own_parameters
 from jace.data import read_set
 from jace.decks import DeckBuilder, DeckScore
 from jace.draft import DrafterModel
@@ -54,12 +55,13 @@ from jace.loops.entry_points import (
     scoring_harness,
     set_cards,
     start_run,
+    starting_meta,
 )
-from jace.loops.formats import deck_rules, limited_format
+from jace.loops.formats import booster_cards, deck_rules, limited_format
 from jace.loops.limited import Learners, LimitedSetup, limited_iteration
 from jace.loops.matches import Harness
 from jace.loops.schedules import phased_schedule
-from jace.play import GuessModel, PlayerModel, WinChanceModel, guesser_on, policy_on, win_chance_on
+from jace.play import GuessModel, PlayerModel, WinChanceModel, blend_meta, guesser_on, policy_on, win_chance_on
 from jace.tracking import (
     CheckpointRef,
     ModelName,
@@ -376,7 +378,6 @@ def main(argv: Sequence[str]) -> None:
     data = read_set(arguments.set_code)
     cards = set_cards(data)
     pool = cards.pool
-    playable = {rarity: [card for card in pool.of_rarity(rarity) if pool[card].program] for rarity in Rarity}
     limited = limited_format(arguments.set_code)
     embedding, embedding_ref = load_card_table(
         arguments.embedding_run, inputs=card_inputs(data, cards, data_dir=arguments.data_dir)
@@ -402,7 +403,7 @@ def main(argv: Sequence[str]) -> None:
     setup = LimitedSetup(
         pool=pool,
         limited_format=limited,
-        booster_cards=playable,
+        booster_cards=booster_cards(pool),
         rules=deck_rules(limited, cards),
         pods=arguments.pods,
         deck_samples=arguments.deck_samples,
@@ -449,10 +450,7 @@ def main(argv: Sequence[str]) -> None:
 
     def play(matchups: Sequence[Matchup]) -> Collected:
         # The workers of one round are the ones the round before left, with any stalled one replaced.
-        # Every opponent of the round holds one of its decks, so they are the guess model's field
-        # while the workers play the games and while it learns from them afterwards.
         nonlocal workers
-        play_models.guess.set_field([deck for matchup in matchups for deck in matchup])
         collected, workers = play_on_workers(
             workers, matchups, weights=play_weights(play_models), stall_seconds=arguments.stall_seconds
         )
@@ -467,6 +465,9 @@ def main(argv: Sequence[str]) -> None:
         metrics, after = limited_iteration(
             setup, learners, check=check, dials=dials, other_seats=(), play=play, rng=rng
         )
+        # The iteration's decks, the newest of the check's recent ones, join the meta only now that their games
+        # are over, so no game of the iteration was guessed with them.
+        models.guess.set_meta(blend_meta(models.guess.meta, after.recent[-1].decks, decay=arguments.meta_decay))
         _note_switch(iteration, before=check, after=after)
         check = after
         return dict(metrics)
@@ -475,7 +476,9 @@ def main(argv: Sequence[str]) -> None:
     if arguments.resume is None:
         folder, curve_file = start_run(arguments, device=device, inputs=inputs, clock=clock)
         check = FIRST_CHECK
+        models.guess.set_meta(starting_meta(arguments, cards))
     else:
+        # The resumed guess model holds the meta of the decks the run had played.
         folder, curve_file = arguments.resume, arguments.resume.with_name(f"{arguments.resume.name}.curve.json")
         check = _resumed_check(curve_file, done=done, rule=setup.score_rule)
     try:

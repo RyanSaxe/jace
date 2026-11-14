@@ -4,13 +4,12 @@ The boards in `tests/data/manabot_v10_boards.npz` are three decisions from
 real games, encoded by the engine adapter at input version 10, each with
 permanents, events and the acting seat's decklist on the board. No
 permanent on them blocks or is attached to anything, so the test of those
-links adds one. On board 0 the opponent, with 6 cards in hand and 28 in
-its library, shows five copies of card 267 and one of card 302 on the
-battlefield, and the guess model's field is one 40-card deck that holds
-exactly those five and two of card 302. The models are built from the
-layout the adapter reports, and the tests call them only through
-`jace.play`, so the token layout and the network can change without
-touching them.
+links adds one. On every board the opponent has cards in hand that it has
+not revealed. The guess model's meta is fitted from two 40-card decks onto
+a format whose boosters hold the first 400 cards, so the cards from 400 on
+are not legal. The models are built from the layout the adapter reports,
+and the tests call them only through `jace.play`, so the token layout and
+the network can change without touching them.
 """
 
 from pathlib import Path
@@ -22,7 +21,18 @@ from torch import Tensor
 
 from jace.cards import CardTable
 from jace.engine.manabot import board_layout
-from jace.play import Boards, Earlier, Guess, GuessModel, PlayerModel, WinChanceModel, random_policy
+from jace.play import (
+    Boards,
+    Earlier,
+    Guess,
+    GuessModel,
+    Meta,
+    PlayerModel,
+    WinChanceModel,
+    day_zero_meta,
+    fit_meta,
+    random_policy,
+)
 
 __all__ = ()
 
@@ -30,9 +40,16 @@ ENGINE_DEFINITIONS = 480
 CARDS = 480
 MORE_CARDS = 520
 CARD_WIDTH = 16
-SHOWN_CARD = 267
-CARD_LEFT_ONCE = 302
-FIELD_DECK = (*([SHOWN_CARD] * 5), *([CARD_LEFT_ONCE] * 2), *range(33))
+LEGAL_CARDS = 400
+DECK_SIZE = 40
+# Board 0's opponent shows five copies of card 267 and one of card 302, and board 1's four of card 213.
+META_DECKS = (
+    ((267, 5), (302, 2), *((card, 1) for card in range(33))),
+    ((213, 6), *((card, 1) for card in range(100, 134))),
+)
+NO_EARLIER_GUESSES = Earlier(
+    guesses=Guess(deck=torch.zeros(3, 0, CARDS), hand=torch.zeros(3, 0, CARDS)), mask=torch.ones(3, 0, dtype=torch.bool)
+)
 
 
 def _real_boards() -> dict[str, Tensor]:
@@ -44,6 +61,16 @@ def _card_table(cards: int) -> CardTable:
     # The first `cards` rows of one fixed table, so a larger pool keeps the smaller pool's vectors.
     starting = torch.randn(MORE_CARDS, CARD_WIDTH, generator=torch.Generator().manual_seed(0))
     return CardTable(starting[:cards])
+
+
+def _meta(cards: int) -> Meta:
+    booster_copies = torch.zeros(cards)
+    booster_copies[:LEGAL_CARDS] = 1.0
+    copies = torch.zeros(len(META_DECKS), cards)
+    for deck, held in enumerate(META_DECKS):
+        for card, count in held:
+            copies[deck, card] += count
+    return fit_meta(copies, fallback=day_zero_meta(booster_copies, deck_size=DECK_SIZE))
 
 
 def _models(cards: int) -> tuple[PlayerModel, GuessModel]:
@@ -61,7 +88,7 @@ def _models(cards: int) -> tuple[PlayerModel, GuessModel]:
         deck_guess_cards=8,
     )
     guesser = GuessModel(embedding, engine_to_card=engine_to_card, layout=board_layout(), width=64, layers=2, heads=4)
-    guesser.set_field([FIELD_DECK])
+    guesser.set_meta(_meta(cards))
     return player.eval(), guesser.eval()
 
 
@@ -83,9 +110,8 @@ def _hidden_cards(*, in_hand: range) -> Guess:
 
 
 def _move_weights(guesser: GuessModel, *, seed: int) -> None:
-    # Moves each weight a little at random, as training would, so the corrections are not zero. An
-    # untrained model gives every card of the field with one copy left the same chance. The card table
-    # has no weights, so only the model's own move.
+    # Moves each weight a little at random, as training would, so the corrections are not zero. The card
+    # table has no weights, so only the model's own move.
     generator = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         for parameter in guesser.parameters():
@@ -254,7 +280,7 @@ def test_models_score_a_larger_pool_and_old_cards_keep_their_scores() -> None:
         deck=torch.cat((truth.deck, torch.zeros(3, MORE_CARDS - CARDS)), dim=-1),
         hand=torch.cat((truth.hand, torch.zeros(3, MORE_CARDS - CARDS)), dim=-1),
     )
-    larger_guesser.set_field([FIELD_DECK])
+    larger_guesser.set_meta(_meta(MORE_CARDS))
     _move_weights(guesser, seed=3)
     _move_weights(larger_guesser, seed=3)
     no_mask = torch.ones(3, 0, dtype=torch.bool)
@@ -280,34 +306,46 @@ def test_models_score_a_larger_pool_and_old_cards_keep_their_scores() -> None:
     assert torch.allclose(larger_win_chance, win_chance, atol=1e-5)
 
 
-def test_the_untrained_guess_is_the_table_of_the_field_less_the_cards_seen() -> None:
-    boards = _real_boards()
-    _, guesser = _models(CARDS)
-    earlier = Earlier(guesses=_some_guess((3, 2, CARDS), seed=2), mask=torch.ones(3, 2, dtype=torch.bool))
-
-    with torch.no_grad():
-        guess = guesser.guess(boards, earlier)
-        table = guesser.table(boards)
-
-    assert torch.allclose(guess.deck, table.deck, atol=1e-6)
-    assert torch.allclose(guess.hand, table.hand, atol=1e-6)
-    # Of the deck's 40 cards the opponent has shown 6, so 34 are hidden, 6 of them in its hand.
-    assert table.deck[0, CARD_LEFT_ONCE].item() == pytest.approx(1 / 34)
-    assert table.hand[0, CARD_LEFT_ONCE].item() == pytest.approx(6 / 34)
-
-
-def test_a_card_whose_copies_have_all_been_seen_gets_no_share_and_no_chance_whatever_the_weights() -> None:
+def test_the_guess_never_reads_the_opponents_decklist_whatever_the_weights() -> None:
+    # An engine that opens the decklists reports the opponent's deck in the decklist rows of seat 1. Two
+    # different decks there, with the same board and the same meta, give the same guess.
     boards = _real_boards()
     _, guesser = _models(CARDS)
     _move_weights(guesser, seed=3)
-    earlier = Earlier(guesses=_some_guess((3, 2, CARDS), seed=2), mask=torch.ones(3, 2, dtype=torch.bool))
+    layout = board_layout()
+    with_decks = []
+    for first_card in (0, 200):
+        opened = {name: rows.clone() for name, rows in boards.items()}
+        opened["decklists"][:, 1, :20, layout.decklist_definition] = torch.arange(first_card, first_card + 20) + 1.0
+        opened["decklists"][:, 1, :20, list(layout.decklist_copies)] = 2.0
+        with_decks.append(opened)
 
     with torch.no_grad():
-        guess = guesser.guess(boards, earlier)
-        table = guesser.table(boards)
+        guesses = [guesser.guess(opened, NO_EARLIER_GUESSES) for opened in with_decks]
 
-    assert guess.deck[0, SHOWN_CARD].item() == guess.hand[0, SHOWN_CARD].item() == 0.0
-    assert guess.deck[0, CARD_LEFT_ONCE].item() > 0.0
-    assert guess.hand[0, CARD_LEFT_ONCE].item() > 0.0
-    assert not torch.allclose(guess.hand, table.hand, atol=1e-3)
-    assert torch.allclose(guess.deck.sum(dim=-1), torch.ones(3), atol=1e-5)
+    assert torch.equal(guesses[0].deck, guesses[1].deck)
+    assert torch.equal(guesses[0].hand, guesses[1].hand)
+
+
+@pytest.mark.parametrize("empty_library", [False, True], ids=["library as dealt", "library empty"])
+def test_every_legal_card_keeps_a_chance_and_the_chances_add_up_to_at_most_the_hand(*, empty_library: bool) -> None:
+    # No deck behind the meta holds most legal cards, and the opponent shows all five copies of card 267
+    # that the decks hold, yet the meta cannot know the opponent's deck holds no more. With its library
+    # empty, every card the opponent has not shown is in its hand, which still holds only 6, 5 and 5 cards.
+    boards = {name: rows.clone() for name, rows in _real_boards().items()}
+    if empty_library:
+        boards["opponent_player"][:, 0, board_layout().library_count] = 0.0
+    _, guesser = _models(CARDS)
+    _move_weights(guesser, seed=3)
+
+    with torch.no_grad():
+        untrained = _models(CARDS)[1].guess(boards, NO_EARLIER_GUESSES)
+        trained = guesser.guess(boards, NO_EARLIER_GUESSES)
+
+    for guess in (untrained, trained):
+        assert bool((guess.deck[:, :LEGAL_CARDS] > 0).all())
+        assert bool((guess.hand[:, :LEGAL_CARDS] > 0).all())
+        assert bool((guess.deck[:, LEGAL_CARDS:] == 0).all())
+        assert bool((guess.hand[:, LEGAL_CARDS:] == 0).all())
+    assert bool((untrained.hand.sum(dim=-1) <= torch.tensor([6.0, 5.0, 5.0]) + 1e-4).all())
+    assert not torch.allclose(trained.hand, untrained.hand, atol=1e-3)
