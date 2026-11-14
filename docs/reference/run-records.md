@@ -17,7 +17,9 @@ is a contract: a frontend can rely on it.
 ```
 
 A run id is the creation time and eight characters of a hash, such as
-`20261111T153045Z-1a2b3c4d`, so ids sort by time.
+`20261111T153045Z-1a2b3c4d`, so ids sort by time. A `<model>` is one of
+`embedding`, `drafter`, `deck_builder`, `deck_score`, `guess`, `player` and
+`win_chance`, the model that judges positions for the player's update.
 
 ## Fields
 

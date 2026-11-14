@@ -5,7 +5,7 @@ games against itself, and the results of those games are the only reward.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../../assets/approach-dark.svg">
-  <img alt="How jace trains, as a loop of four steps. Draft: the drafter picks a card from each pack. Build: the builder proposes decks and the deck score ranks them. Play: the player acts, with a guess of the opponent's cards. Learn: the game results update all five models, and the next draft uses the better models. Below the loop, one card embedding: every model reads cards through it, so a new set needs no new weights." src="../../assets/approach-light.svg">
+  <img alt="How jace trains, as a loop of four steps. Draft: the drafter picks a card from each pack. Build: the builder proposes decks and the deck score ranks them. Play: the player acts, with a guess of the opponent's cards. Learn: the game results update all six models, and the next draft uses the better models. Below the loop, one card embedding: every model reads cards through it, so a new set needs no new weights." src="../../assets/approach-light.svg">
 </picture>
 
 ## Why one loop
@@ -26,9 +26,12 @@ results to improve every model at once.
 | Deck score   | Which decks won and lost                                      | Supervised       |
 | Deck builder | The best deck a search found for the pool                     | Supervised       |
 | Guess model  | The opponent's true deck and hand, which self-play knows      | Supervised       |
+| Win chance   | Whether the acting seat won, seen with the opponent's true cards | Supervised    |
 
-Only the player and the drafter learn from reward. The other three have
-exact answers to learn from, which makes them cheaper to train.
+Only the player and the drafter learn from reward. The deck models and the
+guess model have exact answers to learn from, which makes them cheaper to
+train. The win chance learns to predict the result, and the player's
+actions are credited by how much they raised it.
 
 ## One card embedding
 
@@ -60,6 +63,11 @@ game, so what it worked out on turn 2 is still there on turn 8.
 During self-play the true cards are known, so every decision is a labelled
 example. A confident wrong guess costs more than an unsure one, which
 teaches the model to say how sure it is.
+
+Training also needs the chance to win at every decision, to credit the
+player's actions. A separate win-chance model estimates it from the board
+and the opponent's true cards, so it does not have to guess them. Only
+training reads it; the player never sees the hidden cards.
 
 ## Exploring on a schedule
 

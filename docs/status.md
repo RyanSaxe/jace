@@ -18,16 +18,16 @@ says what it was measured on.
 | Drafting    | Pods draft by the rules, many at once, with one model call per pick |
 | Deck build  | Every deck is legal, and the search escapes a local best            |
 | Real games  | The adapter on managym 0.2.3 replays a seed exactly and hides the opponent's decklist |
-| Models      | All five run on a larger card pool than they were built with        |
+| Models      | All six run on a larger card pool than they were built with         |
 | Training    | A player learns the toy game, a round plays exactly its list of games, and a model whose rate is zero does not change |
 | End to end  | One limited round on the toy game updates every model               |
-| Real engine | The player and guess model take one training step on real games     |
+| Real engine | The player, its win chance and the guess model take one training step on real games |
 | Records     | A run survives a killed writer and rejects a tampered checkpoint    |
 | Human data  | Drafts and decks load from 17Lands tables, and a drafter learns a pick rule from them |
 | Human decks | A deck score learns which card wins, and a deck builder learns a deck rule, on held-out decks |
 
 On the toy game, the share of decisions where the player picks its best
-card rises from 0.36 to 0.78 in 40 iterations.
+card rises from 0.34 to 0.81 in 40 iterations.
 
 ## Pretraining on human picks
 

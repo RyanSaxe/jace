@@ -12,7 +12,7 @@ each module owns and how games reach the code that learns from them.
 | --------------- | --------------------------------------------------------- |
 | `jace.cards`    | Card records, card ids, the card encoder and the table frozen from it |
 | `jace.engine`   | `GameBatch`, the interface games are played through, and the games that score two players |
-| `jace.play`     | The guess model and the player                            |
+| `jace.play`     | The guess model, the player and the win chance            |
 | `jace.draft`    | Boosters, the draft pod and the drafter                   |
 | `jace.decks`    | The deck score and the deck builder                       |
 | `jace.train`    | Game collection, the losses and the update step           |
@@ -41,7 +41,7 @@ class GameBatch(Protocol):
 | -------------- | ------------------------------------------------------------------- |
 | `decisions`    | The pending decision of every game in play: which game, who acts, the board they see |
 | `act`          | The games that ended on this step, with their decks and outcome     |
-| `hidden_cards` | Both seats' true hands and libraries, for training the guess model  |
+| `hidden_cards` | Both seats' true hands and libraries, for training the guess model and the win chance |
 
 When a game ends, the next matchup of the list takes its place. Once none
 is left, `decisions` has no rows. A game is known by its position in the

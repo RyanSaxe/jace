@@ -1,6 +1,6 @@
 # Models
 
-jace trains five models. Each reads cards through one shared embedding, and
+jace trains six models. Each reads cards through one shared embedding, and
 each is a small transformer.
 
 | Model        | Reads                                         | Returns                                        |
@@ -9,7 +9,8 @@ each is a small transformer.
 | Deck builder | A pool, and the deck written so far           | A score for each card it could add next        |
 | Deck score   | A deck                                        | One number: how likely the deck is to win      |
 | Guess model  | The board, recent events, its earlier guesses | The opponent's deck and hand, as probabilities |
-| Player       | The board and the guess                       | A score for each legal action, and a win chance|
+| Player       | The board and the guess                       | A score for each legal action                  |
+| Win chance   | The board and the opponent's true hidden cards | The acting seat's chance to win               |
 
 ## The card embedding
 
@@ -50,7 +51,7 @@ This keeps every weight independent of the card pool. A test builds each
 model on a small pool, grows the pool, and checks that the model still runs
 and gives old cards the same scores.
 
-## The five models
+## The six models
 
 **Drafter**, `DrafterModel.forward(seen, picks, pack=pack)`. One token for
 each earlier pick, made from the card taken and the pack it came from, plus
@@ -77,12 +78,21 @@ and permanents on the board as tokens. A permanent's token also holds the
 object it is attached to and the attacker it blocks. The player adds one
 token for each card of its own deck that has copies it has not yet seen,
 and tokens for the likeliest cards from the guess. Illegal actions get no
-probability.
+probability. It has no win chance of its own.
+
+**Win chance**, `WinChanceModel.win_chance(boards, truth)`. It reads the
+board and the acting seat's own deck as the player does, and in place of
+the guess one token for each card the opponent truly holds unseen, with
+the card's share of those cards and whether it is in hand. It returns the
+acting seat's chance to win. Self-play knows the hidden cards, so the
+estimate need not guess them, as in an asymmetric critic (Pinto et al.,
+[arXiv 1710.06542](https://arxiv.org/abs/1710.06542)). Only training calls
+it, so the hidden cards never reach the player.
 
 ## The engine's boards
 
-The guess model and the player read manabot's encoded boards directly. That
-knowledge sits in one function, `board_tokens` in
+The guess model, the player and the win chance read manabot's encoded
+boards directly. That knowledge sits in one function, `board_tokens` in
 [`jace/play/tokens.py`](../../src/jace/play/tokens.py), whose comment lists
 every array it assumes.
 

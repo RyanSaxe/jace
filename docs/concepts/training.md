@@ -8,10 +8,11 @@ the other models.
 | --------------- | -------------------------------- | ----------------------------------------- |
 | Play games      | `play_games`                     | A rollout: every decision of a list of games |
 | Assign credit   | `advantages`                     | How much better each action was than expected |
-| Score the model | `player_loss`, `guess_loss`      | A loss                                    |
+| Score the model | `player_loss`, `win_chance_loss`, `guess_loss` | A loss                      |
 | Learn           | `apply`                          | One gradient step                         |
 
-`update_player` and `update_guess` run the last three steps over a rollout.
+`update_player` and `update_guess` run the last three steps over a rollout,
+and `update_player` also trains the win chance.
 
 ## Playing games
 
@@ -40,11 +41,11 @@ as much as short ones. A game the engine abandons is counted in
 `collected.abandoned` and its decisions are left out.
 
 A **rollout** is the decisions of those games, one row each: the board, the
-guess, the action taken, the chance the player gave it, the predicted win
-chance, and how the game ended. A row's game is its position in the list of
-matchups. It also holds the opponent's true deck and hand at each decision,
-which is what the guess model is scored against. When the opponent is the
-learner's own policy, both seats' decisions are the learner's.
+guess, the action taken, the chance the player gave it, and how the game
+ended. A row's game is its position in the list of matchups. It also holds
+the opponent's true deck and hand at each decision, which is what the guess
+model is scored against and what the win chance reads. When the opponent is
+the learner's own policy, both seats' decisions are the learner's.
 
 A rollout keeps only the board arrays the models read, which
 `jace.play.BOARD_ARRAYS` lists. They are 113,808 of the 235,152 bytes the
@@ -88,6 +89,13 @@ The only reward is the game's result. `advantages` spreads it back over the
 decisions of each seat: an action gets credit when the predicted win chance
 rose after it.
 
+The win chance comes from its own model, which reads the board and the
+opponent's true hand and library; the player has no win chance of its own.
+At the start of an update, `update_player` computes the win chance of every
+row, without gradients. The advantages come from those, and so do the win
+chance's targets: the lambda-returns with `lam_value`, which mix the later
+predictions and the result as `advantages` mixes them.
+
 ## The player's rule
 
 `player_loss` is the clipped policy loss of PPO, with two pulls added:
@@ -108,8 +116,11 @@ once. Both take the rows in a new random order on every pass. A rollout
 lists its games one worker after another, so a slice of 512 rows cut in
 play order holds about eight games of a round's 48, and its gradient
 follows those games. Shuffled, every slice holds all of them. The
-advantages are computed once, before the first pass. The win-chance error
-trains only on the learner's own rows.
+advantages are computed once, before the first pass. Each slice steps the
+policy on `player_loss` and then the win chance on `win_chance_loss`, its
+squared error to the targets, each with its own optimizer. The win chance
+trains only on the learner's own rows, because it estimates the chance to
+win when the learner's policy plays the seat.
 
 The entry points default to four passes and normalized advantages. One run
 of each reached 46% against scripted greedy at 30 iterations with them and

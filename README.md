@@ -13,7 +13,7 @@ against itself. It plays its games on managym, the engine of
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/approach-dark.svg">
-  <img alt="How jace trains, as a loop of four steps. Draft: the drafter picks a card from each pack. Build: the builder proposes decks and the deck score ranks them. Play: the player acts, with a guess of the opponent's cards. Learn: the game results update all five models, and the next draft uses the better models. Below the loop, one card embedding: every model reads cards through it, so a new set needs no new weights." src="assets/approach-light.svg">
+  <img alt="How jace trains, as a loop of four steps. Draft: the drafter picks a card from each pack. Build: the builder proposes decks and the deck score ranks them. Play: the player acts, with a guess of the opponent's cards. Learn: the game results update all six models, and the next draft uses the better models. Below the loop, one card embedding: every model reads cards through it, so a new set needs no new weights." src="assets/approach-light.svg">
 </picture>
 
 Limited Magic is three decisions that depend on each other: which card to
@@ -27,6 +27,7 @@ for each, and lets the result of every game teach all of them.
 | Deck score   | How good a deck is                      | Which decks won and lost            |
 | Guess model  | What the opponent's deck and hand hold  | The opponent's true cards           |
 | Player       | Each action in a game                   | Whether it won                      |
+| Win chance   | How likely a seat is to win, in training only | Whether the seat won          |
 
 Three ideas hold the design together:
 
@@ -37,7 +38,8 @@ Three ideas hold the design together:
   played without retraining an output layer.
 - **A guess of hidden cards.** A separate model predicts the opponent's deck
   and hand from what has happened, and the player reads its guess. Self-play
-  knows the true cards, so the guess is trained on real answers.
+  knows the true cards, so the guess is trained on real answers, and the win
+  chance that credits the player's actions reads them instead of guessing.
 - **Exploring on a schedule.** How much each model explores, and how fast it
   learns, are values a schedule sets for every round of training.
 

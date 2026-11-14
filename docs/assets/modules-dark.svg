@@ -20,7 +20,7 @@ text{fill:#e6edf3}.s{fill:#9198a1}.line{stroke:#e6edf3}.head{fill:#e6edf3}.box{f
 <text x="514" y="126" class="m">jace.eval</text>
 <rect class="box" x="18" y="166" width="560" height="58" rx="10"/>
 <text x="298" y="192" class="m">jace.play</text>
-<text x="298" y="212" class="s">the guess model and the player</text>
+<text x="298" y="212" class="s">the guess model, the player and the win chance</text>
 <rect class="round" x="18" y="240" width="560" height="58" rx="10"/>
 <text x="298" y="266" class="m">jace.engine</text>
 <text x="298" y="286" class="s">GameBatch, and the manabot adapter</text>
