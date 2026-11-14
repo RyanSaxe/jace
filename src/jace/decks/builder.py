@@ -17,6 +17,7 @@ a policy-gradient step train the model. Each copy of a card carries its
 card's score within a round, so drawing a card is weighed by its copies left.
 """
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, fields
 from typing import override
@@ -45,6 +46,10 @@ __all__ = (
 _AMOUNTS_PER_CARD = 2
 # The floor for a uniform draw before its log is taken, so a draw of exactly 0 does not become infinite.
 _SMALLEST_UNIFORM = 1e-20
+# The land head reads a land total's share of the deck with a sine and a cosine at each of these frequencies, in cycles
+# over the whole deck. Totals one apart then differ in more than one small input, which lets the head prefer a total in
+# the middle of the legal range; read through the share alone it learned odds that only rise with the total.
+_LAND_FREQUENCIES = (1.0, 2.0, 4.0, 8.0, 16.0)
 
 
 class InvalidBuildRulesError(ValueError):
@@ -132,11 +137,12 @@ class DeckBuilder(nn.Module):
     already in the deck, and a card's score comes from its own token's
     encoding. The mean of the encodings summarises the pool and the deck so
     far. The land head scores each land total from that summary and the
-    total's share of the deck. The basics head scores each basic by the dot
-    product of a query from the summary with a projection of the basic's
-    embedding. No parameter has a slot per card, and the deck size and the
-    basics arrive with `rules` at every call, so nothing here fixes the size
-    of a pool or a deck.
+    total's share of the deck, read with sines and cosines of that share.
+    The basics head scores each basic by the dot product of a query from
+    the summary with a projection of the basic's embedding. No parameter
+    has a slot per card, and the deck size and the basics arrive with
+    `rules` at every call, so nothing here fixes the size of a pool or a
+    deck.
     """
 
     def __init__(self, embedding: CardVectors, *, width: int, layers: int, heads: int) -> None:
@@ -145,7 +151,8 @@ class DeckBuilder(nn.Module):
             embedding, amounts=_AMOUNTS_PER_CARD, width=width, layers=layers, heads=heads
         )
         self.card_head: nn.Linear = nn.Linear(width, 1)
-        self.land_head: nn.Sequential = nn.Sequential(nn.Linear(width + 1, width), nn.GELU(), nn.Linear(width, 1))
+        land_inputs = width + 1 + 2 * len(_LAND_FREQUENCIES)
+        self.land_head: nn.Sequential = nn.Sequential(nn.Linear(land_inputs, width), nn.GELU(), nn.Linear(width, 1))
         self.basic_query: nn.Linear = nn.Linear(width, width)
         self.basic_key: nn.Linear = nn.Linear(embedding.width, width)
 
@@ -161,10 +168,12 @@ class DeckBuilder(nn.Module):
         token_scores = self.card_head(encoded).squeeze(-1).masked_fill(~real, float("-inf"))  # [n, longest]
         card_scores = torch.full_like(pools, float("-inf")).scatter(1, cards, token_scores)
         shares = torch.arange(rules.size + 1, device=pools.device).to(summary.dtype) / rules.size  # [size + 1]
+        angles = 2 * math.pi * shares[:, None] * torch.tensor(_LAND_FREQUENCIES, device=pools.device)
+        share_features = torch.cat((shares[:, None], angles.sin(), angles.cos()), dim=-1)  # [size + 1, 1 + 2 * freqs]
         land_inputs = torch.cat(
             (
                 summary.unsqueeze(1).expand(-1, len(shares), -1),
-                shares.view(1, -1, 1).expand(len(summary), -1, 1),
+                share_features.expand(len(summary), -1, -1),
             ),
             dim=-1,
         )
