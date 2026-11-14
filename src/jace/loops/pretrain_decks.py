@@ -291,8 +291,18 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser = argparse.ArgumentParser(description="Train the deck score and the deck builder on human decks.")
     add_run_flags(parser)
     parser.add_argument("--device", default="auto", help="cpu, mps or cuda; auto takes mps when it is available")
-    parser.add_argument("--score-steps", type=int, required=True, help="training steps of the deck score")
-    parser.add_argument("--builder-steps", type=int, required=True, help="training steps of the deck builder")
+    parser.add_argument(
+        "--score-steps",
+        type=int,
+        default=2000,
+        help="training steps of the deck score; its held-out log loss is lowest near 2,000 and rises after",
+    )
+    parser.add_argument(
+        "--builder-steps",
+        type=int,
+        default=9000,
+        help="training steps of the deck builder; every run of 3,000 steps still lowered its held-out loss at the end",
+    )
     parser.add_argument(
         "--embedding-run",
         type=Path,
@@ -302,8 +312,13 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument("--score-decks-per-step", type=int, default=256)
     parser.add_argument("--builder-decks-per-step", type=int, default=128)
     parser.add_argument("--score-evaluate-every", type=int, default=250)
-    parser.add_argument("--builder-evaluate-every", type=int, default=500)
-    parser.add_argument("--builder-evaluate-decks", type=int, default=300, help="held-out pools built per measurement")
+    parser.add_argument("--builder-evaluate-every", type=int, default=1000)
+    parser.add_argument(
+        "--builder-evaluate-decks",
+        type=int,
+        default=2000,
+        help="held-out pools built per measurement; with 300 the overlap's noise hides its trend",
+    )
     parser.add_argument(
         "--spells-per-round", type=int, default=6, help="spells or nonbasic lands the builder draws between two calls"
     )
