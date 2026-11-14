@@ -57,8 +57,12 @@ round is known.
 `build_decks` samples `--deck-samples` decks for a pool in one batch,
 default 256, and scores each distinct deck once with the deck score. It
 returns the best `--blocks` distinct decks, best first. In the limited
-loop, block `b` plays build `b` of every pool, so a pool's builds are
-measured on games against the same field. The pool's best build is the
+loop, each block plays one build of every pool: pool `p` plays its build
+`(p + b) % blocks` in block `b` (`block_builds`). Every block then mixes
+builds of every rank, so a pool's builds meet the same mix of opponents and
+their win rates can be compared. Were block `b` to play every pool's build
+`b`, each block's win rates would average one half whatever the builds'
+ranks. The pool's best build is the
 one the deck score ranked first, and its win rate is the drafter's reward.
 
 ## Two deck scores

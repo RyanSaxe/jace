@@ -31,6 +31,7 @@ from jace.loops import (
     LimitedSetup,
     ScoreRule,
     balanced_matchups,
+    block_builds,
     limited_iteration,
     phased_schedule,
 )
@@ -208,6 +209,17 @@ def test_before_the_switch_the_builder_and_a_drafter_whose_rate_is_zero_stay_as_
         assert torch.equal(drafter.forward(seen, picks, pack=pack), picked_before)
     assert _moved(toy.trained, before, embedding=toy.embedding) == {"player", "win_chance", "guess", "deck_score"}
     assert not check.reads_learning
+
+
+def test_each_pool_plays_each_build_once_and_every_block_mixes_every_rank() -> None:
+    pools, blocks = 16, 4
+    builds = block_builds(pools, blocks=blocks)
+
+    assert builds.shape == (blocks, pools)
+    for pool in range(pools):
+        assert sorted(builds[:, pool].tolist()) == list(range(blocks))
+    for block in range(blocks):
+        assert collections.Counter(builds[block].tolist()) == dict.fromkeys(range(blocks), pools // blocks)
 
 
 def test_every_deck_plays_the_same_number_of_games_against_other_pods_and_never_itself() -> None:

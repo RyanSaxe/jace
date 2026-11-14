@@ -3,8 +3,10 @@
 This is an example loop, not a framework: it drafts pods, searches decks
 for every pool, plays them against each other in blocks and updates every
 model, in that order, as plain calls. The search keeps each pool's best
-few decks by the deck score, and block `b` plays every pool's `b`-th, so a
-pool's builds are compared on games against the same field. The player and
+few decks by the deck score, and each block plays one build of every
+pool, chosen by `block_builds` so every block mixes builds of every rank.
+A pool's builds then meet the same mix of opponents, and their win rates
+can be compared. The player and
 the guess model update after every block, because a policy-gradient step
 learns only from games its current weights played. The deck models and the
 drafter update once per iteration, from every block's games. The builder
@@ -63,7 +65,7 @@ from jace.train import (
     update_player,
 )
 
-__all__ = ("Learners", "LimitedSetup", "UnevenDecksError", "balanced_matchups", "limited_iteration")
+__all__ = ("Learners", "LimitedSetup", "UnevenDecksError", "balanced_matchups", "block_builds", "limited_iteration")
 
 # PyTorch seeds a generator with a signed 64-bit integer, so a seed drawn from `random` uses 63 bits.
 _SEED_BITS = 63
@@ -81,8 +83,8 @@ class LimitedSetup:
     drafts are run per iteration, and the search samples `deck_samples`
     decks for each pool, `spells_per_round` cards in each round of the
     builder at `deck_temperature`, and keeps the `blocks` distinct decks
-    the deck score ranks best. Block `b` plays build `b` of every pool,
-    `games_per_block` games each, and the player and the guess model update
+    the deck score ranks best. Each block plays the build of every pool
+    that `block_builds` names, `games_per_block` games each, and the player and the guess model update
     after each block. `score_rule` says how the learning deck score trains
     and when the search switches to it. `history` is how many earlier guesses the
     guess model is shown. `player_rule` is the player's update rule; its
@@ -381,11 +383,28 @@ def _update_builder(
     return {"deck_builder/loss": float(loss.detach()), "deck_builder/entropy": float(entropies.mean().detach())}
 
 
-def _block_decks(decks: Tensor, *, blocks: int) -> list[list[Deck]]:
-    # decks: float [pools * blocks, cards], as `_build` lays them out. Returns each block's list of every pool's deck.
+def block_builds(pools: int, *, blocks: int) -> Tensor:
+    """Say which build of each pool plays in each block, as int64 `[blocks, pools]`.
+
+    A pool's builds are numbered best first. Pool `p` plays its build
+    `(p + b) % blocks` in block `b`, so each pool plays each build once.
+    When the pools outnumber the blocks, every block holds builds of every
+    rank, so a pool's best build does not meet only other pools' best
+    builds, and a pool's builds meet the same mix of opponents. Were block
+    `b` to play every pool's build `b`, each block's win rates would
+    average one half whatever the builds' ranks, and no rank could be told
+    better than another.
+    """
+    return (torch.arange(pools)[None] + torch.arange(blocks)[:, None]) % blocks
+
+
+def _block_decks(decks: Tensor, *, builds: Tensor) -> list[list[Deck]]:
+    # decks: float [pools * blocks, cards], as `_build` lays them out. builds: `block_builds`'s [blocks, pools].
+    # Returns each block's list of every pool's deck.
+    blocks = builds.shape[0]
     every_card = torch.arange(decks.shape[1])
     as_ids = [tuple(every_card.repeat_interleave(row).tolist()) for row in decks.long().cpu()]
-    return [as_ids[block::blocks] for block in range(blocks)]
+    return [[as_ids[pool * blocks + int(build)] for pool, build in enumerate(row)] for row in builds]
 
 
 def limited_iteration(
@@ -425,10 +444,11 @@ def limited_iteration(
     drafted = time.perf_counter()
     played = _build(setup, learners, records=records, check=check, generator=generator)
     built = time.perf_counter()
+    builds = block_builds(len(played.decks) // setup.blocks, blocks=setup.blocks)
     blocks = _play_blocks(
         setup,
         learners,
-        decks=_block_decks(played.decks, blocks=setup.blocks),
+        decks=_block_decks(played.decks, builds=builds),
         play=play,
         dials=dials,
         rng=rng,
@@ -437,7 +457,10 @@ def limited_iteration(
     deck_updates_began = time.perf_counter()
 
     device = played.decks.device
-    wins, games = blocks.wins.T.flatten().to(device), blocks.games_played.T.flatten().to(device)
+    # Each build's record, laid out as `_build` lays out the decks: each pool's builds, best first.
+    by_build = torch.zeros(builds.shape[1], setup.blocks)
+    wins = by_build.scatter(1, builds.T, blocks.wins.T).flatten().to(device)
+    games = by_build.scatter(1, builds.T, blocks.games_played.T).flatten().to(device)
     has_games = games > 0
     tested = PlayedDecks(decks=played.decks[has_games], wins=wins[has_games], games=games[has_games])
     after, checked = check_scores(
@@ -456,14 +479,15 @@ def limited_iteration(
     if check.reads_learning and dials.builder_rate > 0:
         metrics |= _update_builder(setup, learners, played=played, wins=wins, games=games, dials=dials)
     if dials.drafter_rate > 0:
-        # A pool's deck is its best build, the one the deck score ranked first, which block 0 played.
+        # A pool's deck is its best build, the one the deck score ranked first.
+        best_wins, best_games = wins.view(-1, setup.blocks)[:, 0].cpu(), games.view(-1, setup.blocks)[:, 0].cpu()
         metrics |= _update_drafter(
             setup,
             learners,
             records=records,
             learner_seats=setup.limited_format.draft.seats - len(other_seats),
-            win_rates=blocks.wins[0] / blocks.games_played[0].clamp_min(1.0),
-            games_played=blocks.games_played[0],
+            win_rates=best_wins / best_games.clamp_min(1.0),
+            games_played=best_games,
             dials=dials,
         )
     playing, updating = blocks.seconds

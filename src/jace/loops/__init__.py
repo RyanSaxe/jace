@@ -19,7 +19,14 @@ from jace.loops.checked_score import (
     train_learning_score,
 )
 from jace.loops.formats import TLA_LIMITED, LimitedFormat, UnknownFormatError, deck_rules, limited_format
-from jace.loops.limited import Learners, LimitedSetup, UnevenDecksError, balanced_matchups, limited_iteration
+from jace.loops.limited import (
+    Learners,
+    LimitedSetup,
+    UnevenDecksError,
+    balanced_matchups,
+    block_builds,
+    limited_iteration,
+)
 from jace.loops.schedules import (
     Dials,
     RateScale,
@@ -47,6 +54,7 @@ __all__ = (
     "UnevenDecksError",
     "UnknownFormatError",
     "balanced_matchups",
+    "block_builds",
     "check_scores",
     "current_rates",
     "deck_rules",

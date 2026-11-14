@@ -138,7 +138,7 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
         "--blocks",
         type=int,
         default=4,
-        help="blocks of games per iteration; block b plays each pool's b-th best deck, then the player updates",
+        help="blocks of games per iteration; each plays one of every pool's best decks, then the player updates",
     )
     parser.add_argument("--games-per-block", type=int, default=25, help="games every drafted deck plays in each block")
     parser.add_argument("--deck-samples", type=int, default=256, help="decks the search samples for each pool")

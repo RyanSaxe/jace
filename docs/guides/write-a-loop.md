@@ -24,8 +24,9 @@ records = _draft(setup, drafter=drafter, other_seats=other_seats, rng=rng)
 # Each pool's best `setup.blocks` decks, one row per pool and block.
 played = _build(setup, learners, records=records, check=check, generator=generator)
 
-# Block b plays every pool's b-th deck, then updates the player, its win chance and the guess model on its games.
-blocks = _play_blocks(setup, learners, decks=_block_decks(played.decks, blocks=setup.blocks), ...)
+# Each block plays one build of every pool, mixing ranks, then updates the player, its win chance and the guess model.
+builds = block_builds(len(played.decks) // setup.blocks, blocks=setup.blocks)
+blocks = _play_blocks(setup, learners, decks=_block_decks(played.decks, builds=builds), ...)
 
 after, checked = check_scores(check, played=tested, human=learners.human_score, learning=learners.score, ...)
 metrics |= train_learning_score(learners.score, learners.human_score, recent=after.recent, ...)
@@ -40,7 +41,7 @@ return metrics, after
 | ----- | ------------------------------------------------------------------------- |
 | Draft | Every pod drafts at once. The learner fills the seats `other_seats` does not |
 | Build | The search samples many decks for each pool and keeps the best few by the deck score |
-| Play  | Block `b` plays every pool's `b`-th deck. In each block, every deck plays the same number of games, against decks of other pods, each game to its end |
+| Play  | Each block plays one build of every pool, mixing ranks across pools. In each block, every deck plays the same number of games, against decks of other pods, each game to its end |
 | Learn | The player, its win chance and the guess model take a step after every block. After the last, both deck scores are tested on the iteration's decks, the learning one trains, the builder learns once the search reads the learning score, and the drafter learns |
 
 [Deck building](../concepts/deck-building.md) explains the search, the two
