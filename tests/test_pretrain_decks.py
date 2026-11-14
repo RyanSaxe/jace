@@ -16,14 +16,9 @@ from torch import Tensor
 
 from jace.cards import CardTable
 from jace.data import HumanDecks
-from jace.decks import BuildRules, DeckBuilder, DeckScore, sample_builds
-from jace.loops.pretrain_decks import (
-    DeckSettings,
-    deck_overlap,
-    pretrain_deck_builder,
-    pretrain_deck_score,
-    score_fit,
-)
+from jace.decks import BuildRules, DeckBuilder, DeckScore, builds_from_decks, sample_builds
+from jace.loops.deck_measures import build_log_loss, deck_overlap, score_fit
+from jace.loops.pretrain_decks import DeckSettings, pretrain_deck_builder, pretrain_deck_score
 from jace.tracking import Identity, create_run, writing
 
 __all__ = ()
@@ -100,7 +95,10 @@ def test_pretraining_the_builder_on_decks_that_follow_a_rule_rebuilds_held_out_d
         )
         return builds.decks
 
-    untrained = deck_overlap(likeliest, decks, rows=held_out, rules=_RULES, device=_CPU)
+    human = decks.decks[held_out].float()
+    builds = builds_from_decks(human, pools=decks.pools[held_out].float(), rules=_RULES, generator=generator)
+    untrained_overlap = deck_overlap(likeliest(builds.pools), human, rules=_RULES)
+    untrained_loss = build_log_loss(model, builds, rules=_RULES, spells_per_round=2)
     with writing(folder, clock=clock) as run:
         curve = pretrain_deck_builder(
             model,
@@ -115,5 +113,6 @@ def test_pretraining_the_builder_on_decks_that_follow_a_rule_rebuilds_held_out_d
         )
 
     assert [point.step for point in curve] == [100, 200]
-    assert untrained < 0.8
+    assert untrained_overlap < 0.8
     assert curve[-1].overlap > 0.95
+    assert curve[-1].log_loss < untrained_loss - 1.0

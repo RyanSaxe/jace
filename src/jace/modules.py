@@ -14,18 +14,19 @@ __all__ = ("DROPOUT", "FEEDFORWARD_EXPANSION", "encode_real", "transformer")
 # A transformer layer's feed-forward block is this many times the model width,
 # the ratio the original transformer used.
 FEEDFORWARD_EXPANSION = 4
-# Dropout is off, so a model gives the same output whether or not it is in training mode.
+# Dropout is off unless a model is built with its own, so a model gives the same output whether or not it is
+# in training mode. The drafter's pretraining on human picks builds it with dropout and measures it in eval mode.
 DROPOUT = 0.0
 # `encode_real` encodes a batch's rows in groups of at least this many, each padded only to its own longest row.
 _GROUP_ROWS = 64
 
 
-def transformer(width: int, *, layers: int, heads: int) -> nn.TransformerEncoder:
+def transformer(width: int, *, layers: int, heads: int, dropout: float = DROPOUT) -> nn.TransformerEncoder:
     layer = nn.TransformerEncoderLayer(
         width,
         heads,
         dim_feedforward=FEEDFORWARD_EXPANSION * width,
-        dropout=DROPOUT,
+        dropout=dropout,
         batch_first=True,
         norm_first=True,
     )

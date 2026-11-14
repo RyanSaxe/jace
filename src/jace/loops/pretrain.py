@@ -4,10 +4,13 @@ Each step scores every pick of a batch of whole human drafts in one pass
 and lowers the weighted cross-entropy of the card the human took, over the
 cards in the pack. How well it copies is measured on held-out drafts as the
 share of picks where the human's card is the model's first choice, or among
-its first two or three. That measure counts every recorded pick equally and
-ignores the sample weights. The two penalties of an earlier human-trained
-drafter, against taking rares and against costly cards, are hand-added
-priors: they are off unless `PickPriors` is passed.
+its first two or three, and as the log loss of the human's card. Those
+measures count every recorded pick equally and ignore the sample weights.
+The same measures on as many training drafts show when the model starts to
+fit its training drafts better than drafts it has not seen. The two
+penalties of an earlier human-trained drafter, against taking rares and
+against costly cards, are hand-added priors: they are off unless
+`PickPriors` is passed.
 
 The card encoder reads each card's text, engine program and printed facts,
 and the pick loss trains it with the drafter, each with its own optimizer.
@@ -109,21 +112,33 @@ class PickPriors:
 
 @dataclass(frozen=True, slots=True)
 class PickAccuracy:
-    # The share of `picks` recorded picks where the human's card was among the scorer's best 1, 2 and 3.
+    # The share of `picks` recorded picks where the human's card was among the scorer's best 1, 2 and 3, and the
+    # mean negative log-probability of the human's card under the softmax of the scores over the pack, in nats.
     top1: float
     top2: float
     top3: float
+    log_loss: float
     picks: int
 
 
 @dataclass(frozen=True, slots=True)
 class CurvePoint:
-    # `loss` is the mean training loss since the previous point; the rest is held-out accuracy at `step`.
+    """One measurement of a drafter pretraining run, after `step` steps.
+
+    `loss` is the mean training loss since the previous point, weighted as
+    training weighs picks. `top1` to `log_loss` are measured on the
+    held-out drafts, and `training_top1` and `training_log_loss` the same
+    way on as many training drafts, so the two log losses compare directly.
+    """
+
     step: int
     loss: float
     top1: float
     top2: float
     top3: float
+    log_loss: float
+    training_top1: float
+    training_log_loss: float
 
 
 class NonFiniteScoreError(ValueError):
@@ -148,13 +163,17 @@ def pretrain_drafter(
     every step moves both. Each one's learning rate is its rate at the call
     times `rate_scale(step)`. `generator` draws the training batches and
     lives on the CPU. Every point of the curve is also logged to `run` under
-    "drafter". The last point holds the final held-out accuracy.
+    "drafter". The last point holds the final held-out accuracy. The
+    training drafts measured are the first ones, as many as are held out.
+    The model is measured in eval mode, so without its dropout, and is left
+    in training mode.
     """
     device = model.embedding.device
     cards = model.embedding.cards
     packs, picks, weights = drafts.packs.to(device), drafts.picks.to(device).long(), drafts.weights.to(device)
     training = (~drafts.held_out).nonzero().squeeze(1)
     held_out = drafts.held_out.nonzero().squeeze(1)
+    measured_training = training[: len(held_out)]
     starting_rates = current_rates(optimizers)
     curve: list[CurvePoint] = []
     loss_sum = 0.0
@@ -171,13 +190,32 @@ def pretrain_drafter(
         apply(loss, optimizers, max_grad_norm=settings.max_grad_norm)
         loss_sum += float(loss.detach())
         if step % settings.evaluate_every == 0 or step == settings.steps:
-            accuracy = pick_accuracy(
-                model.whole_draft, drafts, rows=held_out, cards=cards, device=device, settings=settings
+            model.eval()  # turns dropout off while measuring
+            accuracy, on_training = (
+                pick_accuracy(model.whole_draft, drafts, rows=rows, cards=cards, device=device, settings=settings)
+                for rows in (held_out, measured_training)
             )
-            steps_since_point = step - (curve[-1].step if curve else 0)
-            point = CurvePoint(step, loss_sum / steps_since_point, accuracy.top1, accuracy.top2, accuracy.top3)
-            metrics = {"loss": point.loss, "held_out_top1": point.top1, "held_out_top2": point.top2}
-            log_update(run, model="drafter", update=step, metrics={**metrics, "held_out_top3": point.top3})
+            model.train()
+            point = CurvePoint(
+                step=step,
+                loss=loss_sum / (step - (curve[-1].step if curve else 0)),
+                top1=accuracy.top1,
+                top2=accuracy.top2,
+                top3=accuracy.top3,
+                log_loss=accuracy.log_loss,
+                training_top1=on_training.top1,
+                training_log_loss=on_training.log_loss,
+            )
+            metrics = {
+                "loss": point.loss,
+                "held_out_top1": point.top1,
+                "held_out_top2": point.top2,
+                "held_out_top3": point.top3,
+                "held_out_log_loss": point.log_loss,
+                "training_top1": point.training_top1,
+                "training_log_loss": point.training_log_loss,
+            }
+            log_update(run, model="drafter", update=step, metrics=metrics)
             curve.append(point)
             loss_sum = 0.0
     return tuple(curve)
@@ -198,7 +236,8 @@ def pick_accuracy(
     cards in the pool. Every recorded pick counts once, whatever its sample
     weight; a first pick rebuilt from the pool is not counted. A pack with
     fewer cards than the rank asked for always counts as a hit, so the last
-    pick of every round does. No gradients are kept.
+    pick of every round does. The log loss reads the scores as logits over
+    the pack. No gradients are kept.
 
     A card that scores the same as the human's card counts as ranked above
     it, so a scorer that cannot tell cards apart gets no credit for them.
@@ -207,6 +246,7 @@ def pick_accuracy(
     """
     hits = torch.zeros(len(_TOP_RANKS), dtype=torch.int64)
     counted = 0
+    surprise = 0.0
     with torch.no_grad():
         for start in range(0, len(rows), settings.evaluate_drafts):
             chosen = rows[start : start + settings.evaluate_drafts]
@@ -220,8 +260,10 @@ def pick_accuracy(
             ahead = (scores >= scores.gather(2, picks[:, :, None])).sum(dim=-1)[real] - 1
             hits += torch.stack([(ahead < top).sum() for top in _TOP_RANKS]).cpu()
             counted += int(real.sum())
+            # A padded step's row is -inf everywhere, so its log-softmax is NaN; `real` drops it first.
+            surprise -= float(scores.log_softmax(dim=-1).gather(2, picks[:, :, None]).squeeze(2)[real].sum())
     top1, top2, top3 = (hits / max(counted, 1)).tolist()
-    return PickAccuracy(top1=top1, top2=top2, top3=top3, picks=counted)
+    return PickAccuracy(top1=top1, top2=top2, top3=top3, log_loss=surprise / max(counted, 1), picks=counted)
 
 
 def _seen(packs: Tensor, *, cards: int) -> Tensor:
@@ -253,6 +295,8 @@ class _Arguments(RunArguments):
     card_layers: int
     card_heads: int
     rate: float
+    encoder_rate: float
+    dropout: float
     rare_penalty: float
     mana_penalty: float
     mana_margin: float
@@ -263,13 +307,31 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     add_run_flags(parser)
     add_card_flags(parser)
     parser.add_argument("--device", default="auto", help="cpu, mps or cuda; auto takes mps when it is available")
-    parser.add_argument("--steps", type=int, required=True, help="training steps")
-    parser.add_argument("--drafts-per-step", type=int, default=128)
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=4000,
+        help="training steps; with dropout 0.2 the held-out log loss still falls slowly at 4,000",
+    )
+    parser.add_argument("--drafts-per-step", type=int, default=256)
     parser.add_argument("--evaluate-every", type=int, default=500)
     parser.add_argument("--width", type=int, default=256)
-    parser.add_argument("--layers", type=int, default=4)
+    parser.add_argument("--layers", type=int, default=6, help="the drafter's layers, as train_limited builds it")
     parser.add_argument("--heads", type=int, default=8)
-    parser.add_argument("--rate", type=float, default=5e-4, help="the peak learning rate of both optimizers")
+    parser.add_argument("--rate", type=float, default=5e-4, help="the drafter's peak learning rate")
+    parser.add_argument(
+        "--encoder-rate",
+        type=float,
+        default=1.5e-3,
+        help="the card encoder's peak learning rate; at a third of the drafter's it copies picks worse, at three times "
+        "a little better",
+    )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=0.2,
+        help="dropout in the drafter's transformer; without it the drafter overfits its training drafts",
+    )
     parser.add_argument("--rare-penalty", type=float, default=0.0, help="weight of the rare-drafting prior, 0 for off")
     parser.add_argument("--mana-penalty", type=float, default=0.0, help="weight of the mana-cost prior, 0 for off")
     parser.add_argument("--mana-margin", type=float, default=1.0)
@@ -316,7 +378,7 @@ def _baselines(
     real = drafts.weights[held_out] > 0
     sizes = (drafts.packs[held_out] >= 0).sum(dim=-1)[real].float()  # [m] cards in each scored pack
     uniform = {f"top{top}": float((sizes.clamp_max(top) / sizes).mean()) for top in _TOP_RANKS}
-    return uniform, by_ata
+    return {**uniform, "log_loss": float(sizes.log().mean())}, by_ata
 
 
 def main(argv: Sequence[str]) -> None:
@@ -351,10 +413,11 @@ def main(argv: Sequence[str]) -> None:
         layers=arguments.layers,
         heads=arguments.heads,
         picks=limited_format(arguments.set_code).picks,
+        dropout=arguments.dropout,
     ).to(device)
     optimizers = [
         torch.optim.Adam(own_parameters(model, encoder), lr=arguments.rate, betas=ADAM_BETAS),
-        torch.optim.Adam(encoder.parameters(), lr=arguments.rate, betas=ADAM_BETAS),
+        torch.optim.Adam(encoder.parameters(), lr=arguments.encoder_rate, betas=ADAM_BETAS),
     ]
     settings = PretrainSettings(
         steps=arguments.steps,
