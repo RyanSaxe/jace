@@ -242,6 +242,38 @@ def test_padding_rows_do_not_change_the_policy_the_guess_or_the_win_chance() -> 
     assert torch.allclose(padded_win_chance, win_chance, atol=1e-5)
 
 
+def test_a_board_gets_the_same_outputs_alone_as_beside_a_fuller_board() -> None:
+    # The models keep as many rows of each kind as the fullest board of the batch needs, so board 1
+    # keeps fewer rows alone than beside board 0, which holds more cards and permanents. One of its
+    # permanents is attached to the opponent's permanent 1, whose row moves with what is kept.
+    boards = {name: rows.clone() for name, rows in _real_boards().items()}
+    link = board_layout().permanent_links[0]
+    first_opponent_permanent = 2 + 2 * boards["agent_cards"].shape[1] + boards["agent_permanents"].shape[1]
+    boards["agent_permanents"][1, 0, link] = first_opponent_permanent + 1 + 1
+    alone = {name: rows[1:2] for name, rows in boards.items()}
+    player, guesser = _models(CARDS)
+    win_chance_model = _win_chance_model(CARDS)
+    guess = _some_guess((3, CARDS), seed=1)
+    earlier = Earlier(guesses=_some_guess((3, 2, CARDS), seed=2), mask=torch.ones(3, 2, dtype=torch.bool))
+    truth = _hidden_cards(in_hand=range(7))
+    alone_guess = Guess(deck=guess.deck[1:2], hand=guess.hand[1:2])
+    alone_earlier_guesses = Guess(deck=earlier.guesses.deck[1:2], hand=earlier.guesses.hand[1:2])
+    alone_truth = Guess(deck=truth.deck[1:2], hand=truth.hand[1:2])
+
+    with torch.no_grad():
+        logits = player.policy(boards, guess)[1:2]
+        alone_logits = player.policy(alone, alone_guess)
+        guessed = guesser.guess(boards, earlier)
+        alone_guessed = guesser.guess(alone, Earlier(guesses=alone_earlier_guesses, mask=earlier.mask[1:2]))
+        chance = win_chance_model.win_chance(boards, truth)[1:2]
+        alone_chance = win_chance_model.win_chance(alone, alone_truth)
+
+    assert torch.allclose(alone_logits, logits, atol=1e-5)
+    assert torch.allclose(alone_guessed.deck, guessed.deck[1:2], atol=1e-6)
+    assert torch.allclose(alone_guessed.hand, guessed.hand[1:2], atol=1e-6)
+    assert torch.allclose(alone_chance, chance, atol=1e-6)
+
+
 def test_models_score_a_larger_pool_and_old_cards_keep_their_scores() -> None:
     boards = _real_boards()
     player, guesser = _models(CARDS)

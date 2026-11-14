@@ -12,6 +12,7 @@ evaluation.
 
 import torch
 from torch import Tensor, nn
+from torch.nn import functional
 
 from jace.cards import CardVectors
 from jace.engine import BoardLayout, Decisions
@@ -110,15 +111,13 @@ class PlayerModel(nn.Module):
         real = mask[..., None]  # bool [b, entities + own deck + guessed, 1]
         summary = (encoded * real).sum(dim=1) / real.sum(dim=1)  # [b, width]
 
-        # The engine fills action slots from the front, so the slots past the longest list are all empty.
-        offered = int(tokens.action_mask.sum(dim=1).max())
-        focused = gather_entities(encoded[:, : entities.shape[1]], tokens.action_focus[:, :offered])
-        actions = self.actions(tokens.actions[:, :offered])
-        actions = actions + self.action_categories(tokens.action_categories[:, :offered])
+        focused = gather_entities(encoded[:, : entities.shape[1]], tokens.action_focus)
+        actions = self.actions(tokens.actions) + self.action_categories(tokens.action_categories)
+        offered = actions.shape[1]
         scored = torch.cat(
             (actions, focused, summary[:, None].expand(-1, offered, -1)),
             dim=-1,
         )  # [b, offered, scored vectors * width]
-        logits = torch.full_like(tokens.action_mask, -torch.inf, dtype=scored.dtype)
-        logits[:, :offered] = self.action_head(scored).squeeze(-1)
-        return logits.masked_fill(~tokens.action_mask, -torch.inf)
+        logits = self.action_head(scored).squeeze(-1).masked_fill(~tokens.action_mask, -torch.inf)
+        # The tokens keep only the leading action slots, and the slots past them hold no legal action.
+        return functional.pad(logits, (0, tokens.action_slots - offered), value=-torch.inf)
