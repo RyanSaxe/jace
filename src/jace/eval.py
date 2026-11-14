@@ -11,6 +11,8 @@ stated chances to sums that add across games, and `guess_report` turns the
 sums into a loss and a table of stated against observed chances.
 `model_seat` is a jace player as one seat of one game, with its own guess
 model and its own earlier guesses, so that two different players can meet.
+It either samples its action from its odds, as in training, or takes its
+top action, and a score usually reports both.
 Nothing here plays a game: the caller plays the games `legs` lists and
 hands back their outcomes.
 """
@@ -19,7 +21,7 @@ import math
 import random
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy.typing as npt
 import torch
@@ -32,6 +34,7 @@ from jace.play import Earlier, Guess, Guesser, Policy
 __all__ = (
     "CHANCE_RANGES",
     "LEGS",
+    "ActionChoice",
     "Deal",
     "Game",
     "GuessReport",
@@ -190,12 +193,19 @@ def legs(deals: Sequence[Deal]) -> tuple[Game, ...]:
     return tuple(games)
 
 
-def model_seat(seed: int, *, policy: Policy, guesser: Guesser, cards: int, history: int) -> ModelSeat:
+# How a jace player picks its action from its odds: by sampling, as in training, or the top one.
+type ActionChoice = Literal["sampled", "top"]
+
+
+def model_seat(
+    seed: int, *, policy: Policy, guesser: Guesser, cards: int, history: int, action: ActionChoice
+) -> ModelSeat:
     """Seat a jace player for one game: its policy, its guess model and its own earlier guesses.
 
-    At each decision the seat guesses the opponent's hand, shows the guess
-    to the policy and samples an action from the policy's scores with a
-    generator made from `seed`. It keeps its last `history` guesses of this
+    At each decision the seat guesses the opponent's hand and shows the
+    guess to the policy. With `action` "sampled" it samples an action from
+    the policy's odds with a generator made from `seed`, as the training
+    games do, and with "top" it takes the highest-scored action. It keeps its last `history` guesses of this
     game, newest first, and shows them to the guess model as
     `jace.train.play_games` does. `cards` is the number of cards in the pool.
     """
@@ -214,8 +224,9 @@ def model_seat(seed: int, *, policy: Policy, guesser: Guesser, cards: int, histo
             hand=torch.cat((guess.hand[:, None], earlier.hand), dim=1)[:, :history],
         )
         guesses_made += 1
-        action = torch.multinomial(logits.softmax(dim=-1), 1, generator=generator)
-        return int(action), guess.hand[0]
+        if action == "top":
+            return int(logits.argmax(dim=-1)), guess.hand[0]
+        return int(torch.multinomial(logits.softmax(dim=-1), 1, generator=generator)), guess.hand[0]
 
     return seat
 

@@ -72,7 +72,8 @@ def _toy_loop() -> _Toy:
         proposals=8,
         search_rounds=2,
         score_chunk=256,
-        games_per_deck=6,
+        blocks=2,
+        games_per_block=3,
         history=2,
         slice_rows=64,
         max_grad_norm=1.0,
@@ -125,7 +126,7 @@ def test_one_limited_iteration_updates_every_model() -> None:
         rng=random.Random(0),
     )
 
-    # Eight decks play six games each, and every game was played to its end.
+    # Eight decks play two blocks of three games each, and every game was played to its end.
     assert metrics["games"] == 24
     for name, module in toy.trained.items():
         moved = any(not torch.equal(old, new) for old, new in zip(before[name], own(module), strict=True))

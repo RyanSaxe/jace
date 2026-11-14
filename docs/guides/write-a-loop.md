@@ -24,12 +24,11 @@ records = _draft(setup, drafter=drafter, other_seats=other_seats, rng=rng)
 played_decks, best_decks = _build(setup, learners, records=records, dials=dials, rng=rng)
 decks = [candidate.deck for candidate in played_decks]
 
-schedule = balanced_matchups(setup.pods, seats=..., games_per_deck=setup.games_per_deck, rng=rng)
-collected = play([(decks[first], decks[second]) for first, second in schedule])
-wins, played = _deck_records(schedule, collected.games, decks=len(decks))
+# Each block plays its games, then updates the player and the guess model on them.
+blocks = _play_blocks(setup, learners, decks=decks, play=play, dials=dials, rng=rng, generator=generator)
+wins, games_played = blocks.wins, blocks.games_played
 
-metrics |= _update_play_models(setup, learners, rollout=collected.rollout, dials=dials, generator=generator)
-metrics |= _update_deck_score(setup, learners, decks=decks, wins=wins, played=played)
+metrics |= _update_deck_score(setup, learners, decks=decks, wins=wins, games_played=games_played)
 metrics |= _update_builder(setup, learners, records=records, best_decks=best_decks, generator=generator)
 if dials.drafter_rate > 0:
     metrics |= _update_drafter(...)
@@ -39,8 +38,8 @@ if dials.drafter_rate > 0:
 | ----- | ------------------------------------------------------------------------- |
 | Draft | Every pod drafts at once. The learner fills the seats `other_seats` does not |
 | Build | Each pool gets ranked candidate decks, and one is chosen to play          |
-| Play  | Every deck plays the same number of games, against decks of other pods, each game to its end |
-| Learn | The player, guess model, deck score, builder and drafter each take a step |
+| Play  | In each block, every deck plays the same number of games, against decks of other pods, each game to its end |
+| Learn | The player and guess model take a step after every block; the deck score, builder and drafter take one after the last |
 
 `jace.loops.train_limited` runs this loop on real games. It builds the
 models, loads checkpoints trained on human data, plays the games in worker

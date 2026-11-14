@@ -8,8 +8,9 @@ hung on, and a rating for every player on a scale that puts random play at
 1000. Each checkpoint's results, and how well its guess model predicted the
 opponent's hand in those games, are appended to the `evaluations.jsonl` of
 the run it came from. A player is named by the iteration of its checkpoint,
-or `random`, `greedy`, `heuristic` or `flat-<games per action>` for one of
-manabot's players. The model sizes, the card set and the data folder are
+or `top-<iteration>` for that checkpoint taking its top action where it
+would otherwise sample, or `random`, `greedy`, `heuristic` or
+`flat-<games per action>` for one of manabot's players. The model sizes, the card set and the data folder are
 read from the run's own record. Run it with
 `uv run python -m jace.loops.score --help`.
 """
@@ -41,6 +42,7 @@ from jace.engine.scoring import (
     flat_seat,
 )
 from jace.eval import (
+    ActionChoice,
     Game,
     GuessTally,
     MatchScore,
@@ -62,6 +64,8 @@ __all__ = ("main",)
 # The player every rating is measured from, at 1000.
 _ANCHOR = "random"
 _FLAT_PREFIX = "flat-"
+# A checkpoint named with this prefix takes its top action at every decision, where it would otherwise sample.
+_TOP_PREFIX = "top-"
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +99,8 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
         "--players",
         nargs="+",
         required=True,
-        help="each an iteration that has a checkpoint, or random, greedy, heuristic, or flat-N: a search of N games",
+        help="each an iteration that has a checkpoint, top-N for checkpoint N taking its top action, or random, "
+        "greedy, heuristic, or flat-N: a search of N games",
     )
     parser.add_argument(
         "--pairs",
@@ -123,6 +128,10 @@ def _checkpoint(run: Path, model: ModelName, *, update: int) -> CheckpointRef:
     raise ValueError(message)
 
 
+def _action(name: str) -> ActionChoice:
+    return "top" if name.startswith(_TOP_PREFIX) else "sampled"
+
+
 def _model_player(
     update: int,
     *,
@@ -131,6 +140,7 @@ def _model_player(
     cards: SetCards,
     embedding: CardTable,
     layout: BoardLayout,
+    action: ActionChoice,
 ) -> tuple[Player, CheckpointRef]:
     # Builds the player and the guess model of iteration `update` as the run built them, on the
     # run's card table, and returns the player with its player checkpoint.
@@ -152,7 +162,12 @@ def _model_player(
     for module in (embedding, player, guess):
         module.requires_grad_(requires_grad=False)
     seat = functools.partial(
-        model_seat, policy=player.policy, guesser=guess.guess, cards=len(cards.pool), history=numbers["history"]
+        model_seat,
+        policy=player.policy,
+        guesser=guess.guess,
+        cards=len(cards.pool),
+        history=numbers["history"],
+        action=action,
     )
     return seat, reference
 
@@ -176,7 +191,13 @@ def _players(
             players[name] = functools.partial(flat_seat, sims=int(name.removeprefix(_FLAT_PREFIX)))
         else:
             players[name], checkpoints[name] = _model_player(
-                int(name), run=run, config=config, cards=cards, embedding=embedding, layout=layout
+                int(name.removeprefix(_TOP_PREFIX)),
+                run=run,
+                config=config,
+                cards=cards,
+                embedding=embedding,
+                layout=layout,
+                action=_action(name),
             )
     return players, checkpoints
 
@@ -232,6 +253,7 @@ def _record_match(
                 "seed": arguments.seed,
                 "game_seconds": arguments.game_seconds,
                 "games_per_second": len(games) / match.seconds,
+                "action": _action(name),
                 **guess_details(_guesses(name, match, games=games)),
             },
         )
@@ -286,6 +308,7 @@ def _record_ratings(
                 "abandoned": score.abandoned,
                 "hung": score.hung,
                 "seed": arguments.seed,
+                "action": _action(name),
                 "opponents": sorted({player for match in faced for player in (match.a, match.b)} - {name}),
                 "anchor": _ANCHOR,
                 "rating": ratings[name].rating,

@@ -24,6 +24,7 @@ from jace.cards import Deck
 from jace.engine import SEATS
 from jace.engine.scoring import Played, Player, Seating, greedy_seat, heuristic_seat, play_games, random_seat
 from jace.eval import (
+    ActionChoice,
     Deal,
     Game,
     GuessTally,
@@ -82,20 +83,26 @@ def draw_deals(decks: Sequence[Deck], *, count: int, seed: int) -> list[Deal]:
     return deals
 
 
-def model_player(player: PlayerModel, guess: GuessModel, *, history: int) -> Player:
+def model_player(player: PlayerModel, guess: GuessModel, *, history: int, action: ActionChoice) -> Player:
     """Freeze the two models as they are now into a player for `jace.engine.scoring`.
 
     The player holds its own copies on the CPU, so a match scores the
     weights of this moment while training goes on, and the copies can be
     sent to the processes that play the games whatever device the models
     train on. `history` is how many earlier guesses the guess model is
-    shown.
+    shown, and `action` is whether the player samples its action or takes
+    its top one.
     """
     frozen_player = copy.deepcopy(player).cpu().requires_grad_(requires_grad=False)
     frozen_guess = copy.deepcopy(guess).cpu().requires_grad_(requires_grad=False)
     cards = frozen_player.embedding.cards
     return functools.partial(
-        model_seat, policy=frozen_player.policy, guesser=frozen_guess.guess, cards=cards, history=history
+        model_seat,
+        policy=frozen_player.policy,
+        guesser=frozen_guess.guess,
+        cards=cards,
+        history=history,
+        action=action,
     )
 
 
@@ -145,15 +152,22 @@ def guess_details(tally: GuessTally) -> dict[str, object]:
 
 
 def score_against_scripted(
-    run: Running, checkpoint: CheckpointRef, *, player: Player, harness: Harness, generator: torch.Generator
+    run: Running,
+    checkpoint: CheckpointRef,
+    *,
+    player: Player,
+    action: ActionChoice,
+    harness: Harness,
+    generator: torch.Generator,
 ) -> dict[str, MatchScore]:
     """Score `player` against each scripted player and record the results under `checkpoint`.
 
     Every opponent is met on all of the harness's deals, four games a deal.
     Each result is appended to the run's evaluations with the games that
-    had no result and the guess model's loss on those games, in the same
-    fields `jace.loops.score` writes. Returns the player's score against
-    each opponent, by the opponent's name.
+    had no result, the guess model's loss on those games and `action`, how
+    the player chose its actions, in the same fields `jace.loops.score`
+    writes. Returns the player's score against each opponent, by the
+    opponent's name.
     """
     games = legs(harness.deals)
     scores: dict[str, MatchScore] = {}
@@ -185,6 +199,7 @@ def score_against_scripted(
                 "abandoned": score.abandoned,
                 "hung": score.hung,
                 "game_seconds": harness.game_seconds,
+                "action": action,
                 **guess_details(guesses),
             },
         )

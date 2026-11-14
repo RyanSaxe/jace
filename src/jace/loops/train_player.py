@@ -261,8 +261,9 @@ def _train(
             rates = score_player(run, checkpoint, models=models, harness=harness, history=arguments.history)
             rates |= land_and_spell_rates(collected.rollout)
             evaluations.append({"iteration": iteration, **rates, "score_seconds": time.perf_counter() - scoring})
-            line += f"  wins: random {rates['random']:.2f}, greedy {rates['greedy']:.2f}, "
-            line += f"heuristic {rates['heuristic']:.2f}"
+            line += "  wins, sampled/top: " + ", ".join(
+                f"{name} {rates[name]:.2f}/{rates[f'{name}_top']:.2f}" for name in ("random", "greedy", "heuristic")
+            )
         elif iteration in checkpoint_at:
             _save(run, models, iteration=iteration)
         summary = {"run_id": run.folder.name, "seconds": time.perf_counter() - started}

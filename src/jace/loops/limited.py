@@ -1,9 +1,13 @@
 """One iteration of limited training, written from the package's pieces.
 
 This is an example loop, not a framework: it drafts pods, builds a deck from
-every pool, plays the decks against each other and updates every model, in
-that order, as plain calls. Constructed play would be another short function
-that skips the first two steps. A user who wants a different order, another
+every pool, plays the decks against each other in blocks and updates every
+model, in that order, as plain calls. The player and the guess model update
+after every block, because a policy-gradient step learns only from games
+its current weights played. The deck models and the drafter update once,
+from every block's games, because each needs one steady win rate per deck.
+Constructed play would be another short function that skips the first two
+steps. A user who wants a different order, another
 reward or another explore rule edits this function or writes their own; the
 pieces it calls do not change.
 
@@ -13,6 +17,7 @@ other model sees, including a model whose own rate is zero. Each model
 adapts through its own projection of the card vectors instead.
 """
 
+import collections
 import random
 import time
 from collections.abc import Mapping, Sequence
@@ -45,7 +50,7 @@ from jace.draft import (
     run_drafts,
     view_tensors,
 )
-from jace.engine import SEATS, Matchup
+from jace.engine import SEATS
 from jace.loops.schedules import Dials
 from jace.play import Guesser, Policy
 from jace.tracking import ModelName
@@ -79,7 +84,8 @@ class LimitedSetup:
     `booster_cards` lists the cards a booster may hold, by rarity. `pods`
     drafts are run per iteration, and each pool gets `proposals`
     candidate decks improved for `search_rounds` rounds. Every deck then
-    plays `games_per_deck` games. `history` is how many earlier guesses the
+    plays `blocks` blocks of `games_per_block` games each, and the player
+    and the guess model update after each block. `history` is how many earlier guesses the
     guess model is shown. `player_rule` is the player's update rule; its
     `spread` is replaced each iteration by the schedule's, and `passes` is
     how many times the player's update goes over the games. `score_chunk`
@@ -96,7 +102,8 @@ class LimitedSetup:
     proposals: int
     search_rounds: int
     score_chunk: int
-    games_per_deck: int
+    blocks: int
+    games_per_block: int
     history: int
     slice_rows: int
     max_grad_norm: float
@@ -302,6 +309,59 @@ def _update_play_models(
     return named | {f"guess/{name}": value for name, value in guess.items()}
 
 
+@dataclass(frozen=True, slots=True)
+class _Blocks:
+    # wins, games_played: float [decks], summed over every block. metrics: the counts summed over the blocks and
+    # each update's numbers averaged over them. seconds: (playing, updating), summed over the blocks.
+    wins: Tensor
+    games_played: Tensor
+    metrics: Metrics
+    seconds: tuple[float, float]
+
+
+def _play_blocks(
+    setup: LimitedSetup,
+    learners: Learners,
+    *,
+    decks: Sequence[Deck],
+    play: PlayGames,
+    dials: Dials,
+    rng: random.Random,
+    generator: torch.Generator,
+) -> _Blocks:
+    # Plays `setup.blocks` blocks of the decks' games and updates the player and the guess model after each.
+    wins = torch.zeros(len(decks))
+    games_played = torch.zeros(len(decks))
+    counts: collections.Counter[str] = collections.Counter()
+    updates: collections.defaultdict[str, list[float]] = collections.defaultdict(list)
+    playing = updating = 0.0
+    for _ in range(setup.blocks):
+        began = time.perf_counter()
+        schedule = balanced_matchups(
+            setup.pods, seats=setup.draft_format.seats, games_per_deck=setup.games_per_block, rng=rng
+        )
+        collected = play([(decks[first], decks[second]) for first, second in schedule])
+        block_wins, block_games = _deck_records(schedule, collected.games, decks=len(decks))
+        wins += block_wins
+        games_played += block_games
+        counts.update(
+            games=len(collected.games),
+            abandoned=collected.abandoned,
+            lost=collected.lost,
+            decisions=len(collected.rollout.games),
+        )
+        played = time.perf_counter()
+        for name, value in _update_play_models(
+            setup, learners, rollout=collected.rollout, dials=dials, generator=generator
+        ).items():
+            updates[name].append(value)
+        playing += played - began
+        updating += time.perf_counter() - played
+    metrics = {name: float(count) for name, count in counts.items()}
+    metrics |= {name: sum(values) / len(values) for name, values in updates.items()}
+    return _Blocks(wins=wins, games_played=games_played, metrics=metrics, seconds=(playing, updating))
+
+
 def _update_deck_score(
     setup: LimitedSetup, learners: Learners, *, decks: Sequence[Deck], wins: Tensor, games_played: Tensor
 ) -> Metrics:
@@ -351,10 +411,11 @@ def limited_iteration(
     are the drafters for the last seats of every pod, such as past
     versions; the learner drafts the rest. `play` plays a list of matchups
     to the end with the learners' player in both seats, on whatever engine
-    and in whatever processes the caller chose. The games are the
+    and in whatever processes the caller chose. Each block's games are the
     `balanced_matchups` of the decks just built, so every deck plays the
     same number of games and none is cut off. The metrics include the
-    seconds each of the four steps took.
+    seconds each of the four steps took, playing and updating summed over
+    the blocks.
     """
     generator = torch.Generator().manual_seed(rng.getrandbits(_SEED_BITS))
     _set_rate(learners.optimizers["player"], dials.player_rate)
@@ -369,21 +430,11 @@ def limited_iteration(
     played_decks, best_decks = _build(setup, learners, records=records, dials=dials, rng=rng)
     decks = [candidate.deck for candidate in played_decks]
     built = time.perf_counter()
-    schedule = balanced_matchups(
-        setup.pods, seats=setup.draft_format.seats, games_per_deck=setup.games_per_deck, rng=rng
-    )
-    matchups: list[Matchup] = [(decks[first], decks[second]) for first, second in schedule]
-    collected = play(matchups)
-    wins, games_played = _deck_records(schedule, collected.games, decks=len(decks))
-    finished = time.perf_counter()
+    blocks = _play_blocks(setup, learners, decks=decks, play=play, dials=dials, rng=rng, generator=generator)
+    wins, games_played = blocks.wins, blocks.games_played
+    deck_updates_began = time.perf_counter()
 
-    metrics: dict[str, float] = {
-        "games": float(len(collected.games)),
-        "abandoned": float(collected.abandoned),
-        "lost": float(collected.lost),
-        "decisions": float(len(collected.rollout.games)),
-    }
-    metrics |= _update_play_models(setup, learners, rollout=collected.rollout, dials=dials, generator=generator)
+    metrics = dict(blocks.metrics)
     if dials.deck_rate > 0:
         metrics |= _update_deck_score(setup, learners, decks=decks, wins=wins, games_played=games_played)
         metrics |= _update_builder(setup, learners, records=records, best_decks=best_decks, generator=generator)
@@ -397,9 +448,10 @@ def limited_iteration(
             games_played=games_played,
             dials=dials,
         )
+    playing, updating = blocks.seconds
     return metrics | {
         "draft_seconds": drafted - began,
         "build_seconds": built - drafted,
-        "play_seconds": finished - built,
-        "update_seconds": time.perf_counter() - finished,
+        "play_seconds": playing,
+        "update_seconds": updating + time.perf_counter() - deck_updates_began,
     }

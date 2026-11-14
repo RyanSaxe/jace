@@ -387,16 +387,22 @@ def scoring_harness(arguments: PlayArguments, cards: SetCards) -> Harness:
 def score_player(
     run: Running, checkpoint: CheckpointRef, *, models: PlayModels, harness: Harness, history: int
 ) -> dict[str, float]:
-    # Scores the player as it is now against random play, scripted greedy and the heuristic
-    # player, records each result under `checkpoint`, and returns the three win rates by name.
-    scores = score_against_scripted(
-        run,
-        checkpoint,
-        player=model_player(models.player, models.guess, history=history),
-        harness=harness,
-        generator=torch.Generator().manual_seed(checkpoint.update),
-    )
-    return {name: score.rate.rate for name, score in scores.items()}
+    # Scores the player as it is now against random play, scripted greedy and the heuristic player, once
+    # sampling its actions and once taking its top action, and records each result under `checkpoint`.
+    # Returns the win rates by opponent name, with "_top" after the name for the top action.
+    rates: dict[str, float] = {}
+    for action in ("sampled", "top"):
+        suffix = "_top" if action == "top" else ""
+        scores = score_against_scripted(
+            run,
+            checkpoint,
+            player=model_player(models.player, models.guess, history=history, action=action),
+            action=action,
+            harness=harness,
+            generator=torch.Generator().manual_seed(checkpoint.update),
+        )
+        rates |= {f"{name}{suffix}": score.rate.rate for name, score in scores.items()}
+    return rates
 
 
 def land_and_spell_rates(rollout: Rollout) -> dict[str, float]:

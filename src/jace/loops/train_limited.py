@@ -92,7 +92,8 @@ class _Arguments(PlayArguments):
     checkpoint_every: int
     resume: Path | None
     pods: int
-    games_per_deck: int
+    blocks: int
+    games_per_block: int
     proposals: int
     search_rounds: int
     decks_start: int
@@ -130,7 +131,10 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     )
     parser.add_argument("--resume", type=Path, help="a stopped run folder of this command to continue from")
     parser.add_argument("--pods", type=int, default=2, help="eight-seat drafts per iteration")
-    parser.add_argument("--games-per-deck", type=int, default=4, help="games every drafted deck plays per iteration")
+    parser.add_argument(
+        "--blocks", type=int, default=4, help="blocks of games per iteration; the player updates after each"
+    )
+    parser.add_argument("--games-per-block", type=int, default=25, help="games every drafted deck plays in each block")
     parser.add_argument("--proposals", type=int, default=8, help="candidate decks per pool")
     parser.add_argument("--search-rounds", type=int, default=1)
     parser.add_argument("--decks-start", type=int, default=20, help="the iteration the deck models start learning at")
@@ -278,8 +282,9 @@ def _train(
             checkpoint = _save(run, models, iteration=iteration)
             rates = score_player(run, checkpoint, models=play_models, harness=harness, history=arguments.history)
             evaluations.append({"iteration": iteration, **rates, "score_seconds": time.perf_counter() - scoring})
-            line += f"  wins: random {rates['random']:.2f}, greedy {rates['greedy']:.2f}, "
-            line += f"heuristic {rates['heuristic']:.2f}"
+            line += "  wins, sampled/top: " + ", ".join(
+                f"{name} {rates[name]:.2f}/{rates[f'{name}_top']:.2f}" for name in ("random", "greedy", "heuristic")
+            )
         elif iteration in checkpoint_at:
             _save(run, models, iteration=iteration)
         summary = {"run_id": run.folder.name, "seconds": time.perf_counter() - started}
@@ -343,7 +348,8 @@ def main(argv: Sequence[str]) -> None:
         proposals=arguments.proposals,
         search_rounds=arguments.search_rounds,
         score_chunk=_SCORE_CHUNK,
-        games_per_deck=arguments.games_per_deck,
+        blocks=arguments.blocks,
+        games_per_block=arguments.games_per_block,
         history=arguments.history,
         slice_rows=_SLICE_ROWS,
         max_grad_norm=1.0,

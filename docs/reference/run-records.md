@@ -78,12 +78,15 @@ no process is writing.
 `jace.loops.score` writes one line for each checkpoint in each pair it
 plays. `rate` is the checkpoint's win rate over `deals` paired deals. Its
 `details` hold `games`, `abandoned` and `hung`, the `seed` and
-`game_seconds` of the scoring, `games_per_second`, and `guess`: the guess
+`game_seconds` of the scoring, `games_per_second`, `action`, which is
+`sampled` when the checkpoint sampled its actions and `top` when it took
+its top action, and `guess`: the guess
 model's `loss` and `base_rate_loss` on those games with its `stated` and
 `observed` chances, where a range with no guess is null. A line whose
 `opponent` is `population` holds the checkpoint's win rate over all the
 other players it met, and in `details` its `rating` with `rating_low` and
-`rating_high`, the `anchor` player rated 1000 and the `opponents`.
+`rating_high`, the `anchor` player rated 1000, the `opponents` and the
+`action`.
 
 ## Reading a checkpoint
 
