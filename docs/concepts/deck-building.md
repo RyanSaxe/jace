@@ -125,7 +125,13 @@ sets the builder's rate.
 forcing. `builds_from_decks` puts each deck's spells and nonbasic lands in
 a random order with a spell last, cut into rounds of `spells_per_round`,
 with the human's land total and basics split. The loss is the negative
-log-probability of those builds. `deck_overlap` measures the builder's
-likeliest deck on held-out pools: the share of the human deck's non-basic
-cards it also holds. The deck score pretrains on every human deck's event
-record with `score_loss`.
+log-probability of those builds. `jace.loops.deck_measures` measures the
+builder three ways on held-out decks. `build_log_loss` is that negative
+log-probability, unweighted. `deck_overlap` is the share of the human
+deck's non-basic cards that the builder's likeliest deck for the same pool
+also holds. `land_total_match` is the share of pools whose likeliest deck
+has the human deck's land total. The deck score pretrains on every human
+deck's event record with `score_loss` and is measured by `score_fit`. Both
+models' log losses are also taken on as many training decks, so a run
+shows when a model starts to fit its training decks better than decks it
+has not seen.

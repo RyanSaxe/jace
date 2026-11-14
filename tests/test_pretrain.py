@@ -87,3 +87,4 @@ def test_pretraining_on_picks_that_follow_a_rule_learns_the_rule_on_held_out_dra
     assert [point.step for point in curve] == [20, 40, 60]
     assert untrained.top1 < 0.8
     assert curve[-1].top1 > 0.95
+    assert curve[-1].log_loss < untrained.log_loss / 2

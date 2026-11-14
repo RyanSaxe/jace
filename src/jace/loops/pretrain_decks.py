@@ -12,7 +12,10 @@ neither can move what the drafter learned about the cards.
 Basic lands follow `BuildRules`: a deck may hold any number of them, so the
 builder never reads the basics counted in a human pool and splits the land
 slots left with its basics head. Only human decks that the rules allow
-teach or test the builder. The deck score reads every deck.
+teach or test the builder. The deck score reads every deck. Both models are
+measured with `jace.loops.deck_measures`, on held-out decks and on as many
+training decks, so the two curves show when a model starts to fit its
+training decks better than decks it has not seen.
 
 Run it with `uv run python -m jace.loops.pretrain_decks --help`. The card
 set must already be downloaded with `uv run spells add <set>`.
@@ -23,7 +26,7 @@ import functools
 import json
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,7 +37,15 @@ from torch.optim import Optimizer
 
 from jace.cards import own_parameters
 from jace.data import RESULT_FLOOR, HumanDecks, load_decks, read_set
-from jace.decks import BuildRules, DeckBuilder, DeckScore, Scorer, build_log_probs, builds_from_decks, sample_builds
+from jace.decks import BuildRules, Builds, DeckBuilder, DeckScore, build_log_probs, builds_from_decks, sample_builds
+from jace.loops.deck_measures import (
+    GAMES_FOR_A_RATE,
+    allowed_by,
+    build_log_loss,
+    deck_overlap,
+    land_total_match,
+    score_fit,
+)
 from jace.loops.entry_points import (
     ADAM_BETAS,
     RunArguments,
@@ -54,25 +65,11 @@ from jace.train import apply, score_loss
 __all__ = (
     "BuilderPoint",
     "DeckSettings",
-    "ScoreFit",
     "ScorePoint",
-    "allowed_by",
-    "deck_overlap",
     "main",
     "pretrain_deck_builder",
     "pretrain_deck_score",
-    "score_fit",
 )
-
-# A deck's actual win rate is compared with its predicted one only when it played this many games.
-_GAMES_FOR_A_RATE = 5
-# Held-out decks scored in one call.
-_SCORE_CHUNK = 1024
-# Keeps the correlation finite when every prediction is the same.
-_SMALLEST_CORRELATION_SCALE = 1e-12
-
-# Takes float [n, cards] pools and returns float [n, cards], one deck built from each.
-type WriteDecks = Callable[[Tensor], Tensor]
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,8 +79,9 @@ class DeckSettings:
     Each of `steps` steps trains on `decks_per_step` human decks drawn at
     random from the training decks. Every `evaluate_every` steps, and after
     the last step, the model is measured on the first `evaluate_decks`
-    held-out decks, and the result is logged with the mean training loss
-    since the previous measurement.
+    held-out decks and on as many of the first training decks, and the
+    result is logged with the mean training loss since the previous
+    measurement.
     """
 
     steps: int
@@ -94,43 +92,34 @@ class DeckSettings:
 
 
 @dataclass(frozen=True, slots=True)
-class ScoreFit:
-    """How well a scorer predicts the results of `decks` decks.
-
-    `log_loss` is the binomial log loss for each game the decks played, in
-    nats, so a scorer that says 0.5 for every deck gets 0.693. `correlation`
-    is Pearson's, between the predicted and the actual win rate, over the
-    decks that played at least five games. It is zero when every prediction
-    is the same.
-    """
-
-    log_loss: float
-    correlation: float
-    decks: int
-
-
-@dataclass(frozen=True, slots=True)
 class ScorePoint:
-    # `loss` is the mean training loss since the previous point; the rest is the held-out fit at `step`.
+    # `loss` is the mean training loss since the previous point. `log_loss` and `correlation` are the held-out fit at
+    # `step`, and `training_log_loss` is the log loss on as many training decks.
     step: int
     loss: float
     log_loss: float
     correlation: float
+    training_log_loss: float
 
 
 @dataclass(frozen=True, slots=True)
 class BuilderPoint:
-    # `loss` is the mean training loss since the previous point. `overlap` is `deck_overlap` on held-out pools.
+    """One measurement of a deck builder pretraining run, after `step` steps.
+
+    `loss` is the mean training loss since the previous point, weighted as
+    training weighs decks. `log_loss` is `build_log_loss` of the held-out
+    human builds, unweighted, and `training_log_loss` the same on as many
+    training builds. `overlap` and `lands` measure the builder's likeliest
+    deck for each held-out pool: its `deck_overlap` with the human deck and
+    its `land_total_match`.
+    """
+
     step: int
     loss: float
+    log_loss: float
+    training_log_loss: float
     overlap: float
-
-
-def allowed_by(rules: BuildRules, decks: HumanDecks) -> Tensor:
-    # Returns bool [drafts]: the human decks with exactly `rules.size` cards and a land count the rules allow.
-    counts = decks.decks.long()
-    lands = counts[:, [*rules.basics, *sorted(rules.nonbasic_lands)]].sum(dim=1)
-    return (counts.sum(dim=1) == rules.size) & (lands >= rules.min_lands) & (lands <= rules.max_lands)
+    lands: float
 
 
 def pretrain_deck_score(
@@ -158,6 +147,7 @@ def pretrain_deck_score(
     games = wins + decks.losses.to(device).float()
     training = (~decks.held_out).nonzero().squeeze(1)
     held_out = decks.held_out.nonzero().squeeze(1)[: settings.evaluate_decks]
+    measured_training = training[: len(held_out)]
     starting_rates = current_rates(optimizers)
     curve: list[ScorePoint] = []
     loss_sum = 0.0
@@ -169,36 +159,23 @@ def pretrain_deck_score(
         loss_sum += float(loss.detach())
         if step % settings.evaluate_every == 0 or step == settings.steps:
             fit = score_fit(model, decks, rows=held_out, device=device)
-            steps_since_point = step - (curve[-1].step if curve else 0)
-            point = ScorePoint(step, loss_sum / steps_since_point, fit.log_loss, fit.correlation)
-            metrics = {"loss": point.loss, "held_out_log_loss": point.log_loss}
-            log_update(
-                run, model="deck_score", update=step, metrics={**metrics, "held_out_correlation": fit.correlation}
+            point = ScorePoint(
+                step=step,
+                loss=loss_sum / (step - (curve[-1].step if curve else 0)),
+                log_loss=fit.log_loss,
+                correlation=fit.correlation,
+                training_log_loss=score_fit(model, decks, rows=measured_training, device=device).log_loss,
             )
+            metrics = {
+                "loss": point.loss,
+                "training_log_loss": point.training_log_loss,
+                "held_out_log_loss": point.log_loss,
+                "held_out_correlation": point.correlation,
+            }
+            log_update(run, model="deck_score", update=step, metrics=metrics)
             curve.append(point)
             loss_sum = 0.0
     return tuple(curve)
-
-
-def score_fit(score: Scorer, decks: HumanDecks, *, rows: Tensor, device: torch.device) -> ScoreFit:
-    # rows: int64 [n], the decks to score. `score` returns the logit of winning a game. No gradients are kept.
-    logits: list[Tensor] = []
-    with torch.no_grad():
-        for start in range(0, len(rows), _SCORE_CHUNK):
-            chosen = rows[start : start + _SCORE_CHUNK]
-            logits.append(score(decks.decks[chosen].to(device).float()).cpu())
-    predicted = torch.cat(logits).double()  # [n]
-    wins = decks.wins[rows].double()
-    games = wins + decks.losses[rows].double()
-    log_loss = score_loss(predicted, wins=wins, games=games)
-    enough = games >= _GAMES_FOR_A_RATE
-    predicted_centred = predicted.sigmoid()[enough] - predicted.sigmoid()[enough].mean()
-    actual_centred = (wins / games.clamp_min(1.0))[enough] - (wins / games.clamp_min(1.0))[enough].mean()
-    # Pearson's correlation: the sum of products of the centred values over this scale.
-    scale = (predicted_centred.pow(2).sum() * actual_centred.pow(2).sum()).sqrt().clamp_min(_SMALLEST_CORRELATION_SCALE)
-    return ScoreFit(
-        log_loss=float(log_loss), correlation=float((predicted_centred * actual_centred).sum() / scale), decks=len(rows)
-    )
 
 
 def pretrain_deck_builder(
@@ -222,8 +199,9 @@ def pretrain_deck_builder(
     the share of games its event won, kept at or above
     `jace.data.RESULT_FLOOR` as the pick weights are, and the weights of a
     batch average one. Only decks that `allowed_by(rules, decks)` accepts
-    are used, for training and measuring. The measure is `deck_overlap` of
-    the builder's likeliest deck for each held-out pool.
+    are used, for training and measuring. Each measured deck is laid out in
+    one random order before the first step, so every point scores the same
+    builds.
 
     `optimizers` and `rate_scale` are as in `pretrain_deck_score`.
     `generator` draws the batches and the orders and lives on the CPU. Every
@@ -235,6 +213,10 @@ def pretrain_deck_builder(
     held_out = (allowed & decks.held_out).nonzero().squeeze(1)[: settings.evaluate_decks]
     wins = decks.wins.float()
     result = (wins / (wins + decks.losses.float()).clamp_min(1.0)).clamp_min(RESULT_FLOOR)  # [drafts]
+
+    def lay_out(rows: Tensor) -> Builds:
+        human = decks.decks[rows].to(device).float()
+        return builds_from_decks(human, pools=decks.pools[rows].to(device).float(), rules=rules, generator=generator)
 
     def likeliest(pools: Tensor) -> Tensor:
         built, _ = sample_builds(
@@ -248,53 +230,43 @@ def pretrain_deck_builder(
         )
         return built.decks
 
+    held_out_builds, training_builds = lay_out(held_out), lay_out(training[: len(held_out)])
     starting_rates = current_rates(optimizers)
     curve: list[BuilderPoint] = []
     loss_sum = 0.0
     for step in range(1, settings.steps + 1):
         chosen = training[torch.randint(len(training), (settings.decks_per_step,), generator=generator)]
-        builds = builds_from_decks(
-            decks.decks[chosen].to(device).float(),
-            pools=decks.pools[chosen].to(device).float(),
-            rules=rules,
-            generator=generator,
+        log_probs, _ = build_log_probs(
+            model, lay_out(chosen), rules=rules, spells_per_round=spells_per_round, temperature=1.0
         )
-        log_probs, _ = build_log_probs(model, builds, rules=rules, spells_per_round=spells_per_round, temperature=1.0)
         weights = result[chosen].to(device)
         loss = -(weights / weights.mean() * log_probs).mean()
         scale_rates(optimizers, starting_rates, factor=rate_scale(step))
         apply(loss, optimizers, max_grad_norm=settings.max_grad_norm)
         loss_sum += float(loss.detach())
         if step % settings.evaluate_every == 0 or step == settings.steps:
-            overlap = deck_overlap(likeliest, decks, rows=held_out, rules=rules, device=device)
-            steps_since_point = step - (curve[-1].step if curve else 0)
-            point = BuilderPoint(step, loss_sum / steps_since_point, overlap)
-            log_update(
-                run, model="deck_builder", update=step, metrics={"loss": point.loss, "held_out_overlap": overlap}
+            built = likeliest(held_out_builds.pools)
+            point = BuilderPoint(
+                step=step,
+                loss=loss_sum / (step - (curve[-1].step if curve else 0)),
+                log_loss=build_log_loss(model, held_out_builds, rules=rules, spells_per_round=spells_per_round),
+                training_log_loss=build_log_loss(
+                    model, training_builds, rules=rules, spells_per_round=spells_per_round
+                ),
+                overlap=deck_overlap(built, held_out_builds.decks, rules=rules),
+                lands=land_total_match(built, held_out_builds.decks, rules=rules),
             )
+            metrics = {
+                "loss": point.loss,
+                "training_log_loss": point.training_log_loss,
+                "held_out_log_loss": point.log_loss,
+                "held_out_overlap": point.overlap,
+                "held_out_lands": point.lands,
+            }
+            log_update(run, model="deck_builder", update=step, metrics=metrics)
             curve.append(point)
             loss_sum = 0.0
     return tuple(curve)
-
-
-def deck_overlap(
-    write: WriteDecks, decks: HumanDecks, *, rows: Tensor, rules: BuildRules, device: torch.device
-) -> float:
-    """Measure how much of each human deck `write` rebuilds from the same pool.
-
-    `rows` is int64 `[n]`, the decks to rebuild. `write` builds one deck
-    from each of their human pools, all in one call. A deck's share is the
-    number of the human deck's non-basic cards that the written deck also
-    holds, counting copies, over the human deck's non-basic cards. Returns
-    the mean share. Basics are left out because they are free to add, so
-    matching them says little.
-    """
-    not_basic = torch.ones(decks.decks.shape[1], dtype=torch.bool, device=device)
-    not_basic[list(rules.basics)] = False
-    with torch.no_grad():
-        built = write(decks.pools[rows].to(device).float())[:, not_basic]
-    human = decks.decks[rows].to(device).float()[:, not_basic]
-    return float((torch.minimum(built, human).sum(dim=1) / human.sum(dim=1)).mean())
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,7 +324,9 @@ def main(argv: Sequence[str]) -> None:
     loss of predicting the training decks' overall win rate for every
     held-out deck as the score's baseline. The builder's curve measures its
     likeliest deck, and the summary adds the overlap of one deck sampled at
-    temperature 1 from each of the same held-out pools.
+    temperature 1 from each of the same held-out pools. The land head's
+    baseline is the land total the training decks hold most often, and how
+    often the held-out decks hold it.
     """
     arguments = _arguments(argv)
     device = device_named(arguments.device)
@@ -427,18 +401,18 @@ def main(argv: Sequence[str]) -> None:
     overall = score_fit(lambda counts: mean_rate.logit().expand(len(counts)), decks, rows=held_out, device=cpu)
     allowed = allowed_by(rules, decks)
     built = (allowed & decks.held_out).nonzero().squeeze(1)[: arguments.builder_evaluate_decks]
-
-    def sampled(pools: Tensor) -> Tensor:
-        builds, _ = sample_builds(
-            builder,
-            pools,
-            rules=rules,
-            spells_per_round=arguments.spells_per_round,
-            temperature=1.0,
-            generator=generator,
-        )
-        return builds.decks
-
+    human = decks.decks[built].to(device).float()
+    sampled, _ = sample_builds(
+        builder,
+        decks.pools[built].to(device).float(),
+        rules=rules,
+        spells_per_round=arguments.spells_per_round,
+        temperature=1.0,
+        generator=generator,
+    )
+    land_columns = [*rules.basics, *sorted(rules.nonbasic_lands)]
+    commonest = int(decks.decks[allowed & training][:, land_columns].sum(dim=1).mode().values)
+    commonest_match = float((human[:, land_columns].sum(dim=1) == commonest).float().mean())
     summary = {
         "run_id": folder.name,
         "device": device.type,
@@ -447,7 +421,7 @@ def main(argv: Sequence[str]) -> None:
             "seconds": score_seconds,
             "training_decks": int(training.sum()),
             "held_out_decks": len(held_out),
-            "held_out_decks_with_a_rate": int((games[held_out] >= _GAMES_FOR_A_RATE).sum()),
+            "held_out_decks_with_a_rate": int((games[held_out] >= GAMES_FOR_A_RATE).sum()),
             "baselines": {"overall_win_rate": {"rate": float(mean_rate), "log_loss": overall.log_loss}},
             "curve": [asdict(point) for point in score_curve],
         },
@@ -456,7 +430,8 @@ def main(argv: Sequence[str]) -> None:
             "seconds": builder_seconds,
             "training_decks": int((allowed & training).sum()),
             "held_out_pools_built": len(built),
-            "sampled_overlap": deck_overlap(sampled, decks, rows=built, rules=rules, device=device),
+            "sampled_overlap": deck_overlap(sampled.decks, human, rules=rules),
+            "baselines": {"most_common_land_total": {"lands": commonest, "lands_match": commonest_match}},
             "curve": [asdict(point) for point in builder_curve],
         },
     }
