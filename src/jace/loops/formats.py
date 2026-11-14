@@ -8,18 +8,30 @@ up here by set code and passes the numbers in. A new format is one more
 record in `_FORMATS`. The record lives in `jace.loops` because it holds the
 draft's format and booster spec, and only the loops may import `jace.draft`.
 `deck_rules` turns a format's deck numbers into the `BuildRules` of one card
-set, whose basics and nonbasic lands are that set's card ids.
+set, whose basics and nonbasic lands are that set's card ids, and
+`booster_meta` turns its boosters and deck size into the guess model's
+day-0 meta, what a player knows of the format's decks before it has seen
+one.
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from jace.cards import Rarity
+from jace.cards import CardId, CardPool, Rarity
 from jace.data import SetCards
 from jace.decks import BuildRules
-from jace.draft import TLA_PLAY_BOOSTER, BoosterSpec, DraftFormat
+from jace.draft import TLA_PLAY_BOOSTER, BoosterSpec, DraftFormat, copies_per_booster
+from jace.play import Meta, day_zero_meta
 
-__all__ = ("TLA_LIMITED", "LimitedFormat", "UnknownFormatError", "deck_rules", "limited_format")
+__all__ = (
+    "TLA_LIMITED",
+    "LimitedFormat",
+    "UnknownFormatError",
+    "booster_cards",
+    "booster_meta",
+    "deck_rules",
+    "limited_format",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,3 +92,14 @@ def deck_rules(limited: LimitedFormat, cards: SetCards) -> BuildRules:
         min_lands=limited.min_lands,
         max_lands=limited.max_lands,
     )
+
+
+def booster_cards(pool: CardPool) -> dict[Rarity, list[CardId]]:
+    # The cards a booster of the set may hold, by rarity: every card of the pool the engine can play.
+    return {rarity: [card for card in pool.of_rarity(rarity) if pool[card].program] for rarity in Rarity}
+
+
+def booster_meta(limited: LimitedFormat, pool: CardPool) -> Meta:
+    # The day-0 meta of the format on this card pool, from how often its boosters hold each card.
+    copies = copies_per_booster(limited.booster, booster_cards(pool), pool_size=len(pool))
+    return day_zero_meta(copies, deck_size=limited.deck_size)

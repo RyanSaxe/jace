@@ -6,7 +6,14 @@ model are separate modules that talk to a pod only through its states and
 its one transition.
 """
 
-from jace.draft.boosters import TLA_PLAY_BOOSTER, BoosterSpec, BoosterSpecError, SlotOdds, open_booster
+from jace.draft.boosters import (
+    TLA_PLAY_BOOSTER,
+    BoosterSpec,
+    BoosterSpecError,
+    SlotOdds,
+    copies_per_booster,
+    open_booster,
+)
 from jace.draft.drafting import Drafter, DraftRecord, SeatView, run_drafts
 from jace.draft.model import DrafterModel, model_drafter, view_tensors
 from jace.draft.pod import (
@@ -38,6 +45,7 @@ __all__ = (
     "SeatView",
     "SlotOdds",
     "advance",
+    "copies_per_booster",
     "model_drafter",
     "open_booster",
     "open_pod",

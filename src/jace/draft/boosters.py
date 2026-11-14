@@ -6,17 +6,22 @@ Each slot draws a rarity from its odds and then a card of that rarity that
 the booster does not hold yet, with every such card equally likely. Real
 boosters can repeat a card between a foil slot and another slot, but the
 drafter model reads a pack as one 0/1 entry per card and could not see the
-second copy.
+second copy. `copies_per_booster` gives how often each card appears in a
+booster opened this way, which is all a player knows of a format's cards
+before it has seen any deck.
 """
 
 import math
 import random
 from collections.abc import Mapping, Sequence
 
+import torch
+from torch import Tensor
+
 from jace.cards import CardId, Rarity
 from jace.draft.pod import Pack
 
-__all__ = ("TLA_PLAY_BOOSTER", "BoosterSpec", "BoosterSpecError", "SlotOdds", "open_booster")
+__all__ = ("TLA_PLAY_BOOSTER", "BoosterSpec", "BoosterSpecError", "SlotOdds", "copies_per_booster", "open_booster")
 
 # One card slot of a booster: the chance of each rarity. The chances sum to 1.
 type SlotOdds = Mapping[Rarity, float]
@@ -99,3 +104,19 @@ def _check_spec(spec: BoosterSpec, available: Mapping[Rarity, Sequence[CardId]])
         if slots > len(cards):
             message = f"{slots} slots can draw a {rarity.value} card, but there are {len(cards)}"
             raise BoosterSpecError(message)
+
+
+def copies_per_booster(spec: BoosterSpec, cards: Mapping[Rarity, Sequence[CardId]], *, pool_size: int) -> Tensor:
+    """Give each card's expected copies in one booster that `open_booster` opens, as float `[pool_size]`.
+
+    A slot that draws a rarity takes one of that rarity's cards the booster
+    does not hold yet, each equally likely, so every card of a rarity is as
+    likely as any other to fill each slot that drew it. A card of rarity r
+    therefore expects the slots' summed chance of r divided by the number
+    of cards of r that `cards` lists. A card `cards` does not list has none.
+    """
+    copies = torch.zeros(pool_size)
+    for rarity, listed in cards.items():
+        if listed:
+            copies[list(listed)] = sum(odds.get(rarity, 0.0) for odds in spec) / len(listed)
+    return copies
