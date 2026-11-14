@@ -14,5 +14,6 @@ trying to do, and the other pages build on it.
 | [Write a loop](guides/write-a-loop.md)     | How to assemble and change a training loop   |
 | [Run records](reference/run-records.md)    | The files a training run writes              |
 | [Data](reference/data.md)                  | The human data jace reads and its source     |
+| [Sources](reference/sources.md)            | The papers, code and data behind the design  |
 | [Status](status.md)                        | What works today and what is not built       |
 | [Contributing](contributing/README.md)     | Set-up, checks and the design rules          |
