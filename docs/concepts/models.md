@@ -172,6 +172,17 @@ each kind of row to a fixed capacity, such as 80 cards and 512 actions,
 and a real board fills few of them, so `board_tokens` keeps each kind only
 up to its last real row in the batch.
 
+The boards of a batch still hold different numbers of real tokens. Each
+model's transformer runs through `encode_real` in
+[`jace/modules.py`](../../src/jace/modules.py), which packs the real tokens
+of every board into one matrix, so the projections, feed-forward blocks and
+norms work on real tokens alone. Only attention reads the boards one by
+one: on an Apple GPU it runs as Metal kernels over the packed tokens, in
+[`jace/metal_attention.py`](../../src/jace/metal_attention.py), and on other
+devices as `scaled_dot_product_attention` on each board's tokens padded to
+the longest. The transformers keep the parameters of
+`nn.TransformerEncoder`, so checkpoints load as before.
+
 Most columns of a board are numbers, such as a creature's power. Some name
 something instead: a card definition, another object on the board, or a
 choice such as an ability's number. `board_layout` reads which columns those
