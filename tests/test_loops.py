@@ -18,7 +18,7 @@ import torch
 from torch import Tensor, nn
 
 from jace.cards import CardPool, CardRecord, CardTable, Rarity, own_parameters
-from jace.decks import BuildRules, DeckBuilderModel, DeckScore
+from jace.decks import BuildRules, DeckBuilder, DeckScore
 from jace.draft import DrafterModel, DraftFormat
 from jace.engine.toy import HAND_SIZE, TOY_CARDS, ToyBatch
 from jace.loops import Learners, LimitedFormat, LimitedSetup, balanced_matchups, limited_iteration, phased_schedule
@@ -50,7 +50,7 @@ def _toy_loop() -> _Toy:
     player = nn.Sequential(nn.Linear(HAND_SIZE + 1, 16), nn.Tanh(), nn.Linear(16, HAND_SIZE + 1))
     guess = nn.Sequential(nn.Linear(HAND_SIZE + 1, 16), nn.Tanh(), nn.Linear(16, 2 * TOY_CARDS))
     drafter = DrafterModel(embedding, width=16, layers=1, heads=2, picks=3)
-    builder = DeckBuilderModel(embedding, width=16, layers=1, heads=2)
+    builder = DeckBuilder(embedding, width=16, layers=1, heads=2)
     score = DeckScore(embedding, width=16, layers=1, heads=2)
 
     def policy(boards: Boards, _guess: Guess) -> tuple[Tensor, Tensor]:
@@ -74,9 +74,9 @@ def _toy_loop() -> _Toy:
         booster_cards={Rarity.COMMON: pool.of_rarity(Rarity.COMMON)},
         rules=BuildRules(size=5, basics=(0,), nonbasic_lands=frozenset(), min_lands=2, max_lands=3),
         pods=4,
-        proposals=8,
-        search_rounds=2,
-        score_chunk=256,
+        deck_samples=16,
+        spells_per_round=2,
+        deck_temperature=1.0,
         blocks=2,
         games_per_block=3,
         history=2,

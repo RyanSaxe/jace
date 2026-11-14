@@ -12,10 +12,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import torch
+from torch import Tensor
 
 from jace.cards import CardTable
 from jace.data import HumanDecks
-from jace.decks import BuildRules, DeckBuilderModel, DeckScore, random_proposer
+from jace.decks import BuildRules, DeckBuilder, DeckScore, sample_builds
 from jace.loops.pretrain_decks import (
     DeckSettings,
     deck_overlap,
@@ -86,21 +87,26 @@ def test_pretraining_the_builder_on_decks_that_follow_a_rule_rebuilds_held_out_d
     generator = torch.Generator().manual_seed(0)
     decks = _lowest_spell_decks(256, generator=generator)
     # The vectors are wider than there are cards, so a linear map of them can put the cards in any order.
-    model = DeckBuilderModel(CardTable(torch.randn(_CARDS, 16)), width=16, layers=1, heads=2)
+    model = DeckBuilder(CardTable(torch.randn(_CARDS, 16)), width=16, layers=1, heads=2)
     settings = DeckSettings(steps=200, decks_per_step=16, evaluate_every=100, evaluate_decks=64, max_grad_norm=1.0)
     clock = functools.partial(datetime, 2026, 1, 1, tzinfo=UTC)
     identity = Identity(config={}, seed=0, jace_commit="test", manabot_commit="test", inputs=())
     folder = create_run(tmp_path, identity, clock=clock)
     held_out = decks.held_out.nonzero().squeeze(1)
-    at_random = deck_overlap(
-        random_proposer(rules=_RULES, generator=generator), decks, rows=held_out, rules=_RULES, device=_CPU
-    )
 
+    def likeliest(pools: Tensor) -> Tensor:
+        builds, _ = sample_builds(
+            model, pools, rules=_RULES, spells_per_round=2, temperature=1.0, generator=generator, greedy=True
+        )
+        return builds.decks
+
+    untrained = deck_overlap(likeliest, decks, rows=held_out, rules=_RULES, device=_CPU)
     with writing(folder, clock=clock) as run:
         curve = pretrain_deck_builder(
             model,
             decks,
             rules=_RULES,
+            spells_per_round=2,
             optimizers=[torch.optim.Adam(model.parameters(), lr=1e-2)],
             rate_scale=lambda _: 1.0,
             settings=settings,
@@ -109,5 +115,5 @@ def test_pretraining_the_builder_on_decks_that_follow_a_rule_rebuilds_held_out_d
         )
 
     assert [point.step for point in curve] == [100, 200]
-    assert at_random < 0.8
+    assert untrained < 0.8
     assert curve[-1].overlap > 0.95

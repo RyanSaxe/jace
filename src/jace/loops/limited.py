@@ -28,16 +28,7 @@ from torch import Tensor
 from torch.optim import Optimizer
 
 from jace.cards import CardId, CardPool, Deck, Rarity
-from jace.decks import (
-    BuildRules,
-    Candidate,
-    DeckBuilderModel,
-    DeckScore,
-    build_decks,
-    model_proposer,
-    rules_for_pool,
-    writing_steps,
-)
+from jace.decks import BuildRules, Builds, DeckBuilder, DeckScore, build_decks, build_log_probs, join_builds
 from jace.draft import (
     Drafter,
     DrafterModel,
@@ -83,15 +74,14 @@ class LimitedSetup:
     `limited_format` sizes the drafts, and `rules` are the deck rules
     `deck_rules` derives from it for the card pool. `booster_cards` lists
     the cards a booster may hold, by rarity. `pods`
-    drafts are run per iteration, and each pool gets `proposals`
-    candidate decks improved for `search_rounds` rounds. Every deck then
+    drafts are run per iteration, and the search samples `deck_samples`
+    decks for each pool, `spells_per_round` cards in each round of the
+    builder at `deck_temperature`. Every deck then
     plays `blocks` blocks of `games_per_block` games each, and the player
     and the guess model update after each block. `history` is how many earlier guesses the
     guess model is shown. `player_rule` is the player's update rule; its
     `spread` is replaced each iteration by the schedule's, and `passes` is
-    how many times the player's update goes over the games. `score_chunk`
-    bounds how many decks the deck score rates in one call during the
-    search.
+    how many times the player's update goes over the games.
     """
 
     pool: CardPool
@@ -99,9 +89,9 @@ class LimitedSetup:
     booster_cards: Mapping[Rarity, Sequence[CardId]]
     rules: BuildRules
     pods: int
-    proposals: int
-    search_rounds: int
-    score_chunk: int
+    deck_samples: int
+    spells_per_round: int
+    deck_temperature: float
     blocks: int
     games_per_block: int
     history: int
@@ -135,7 +125,7 @@ class Learners:
     guesser: Guesser
     drafter: DrafterModel
     human_drafter: DrafterModel | None
-    builder: DeckBuilderModel
+    builder: DeckBuilder
     score: DeckScore
     optimizers: Mapping[ModelName, Optimizer]
 
@@ -163,34 +153,31 @@ def _draft(
 
 def _build(
     setup: LimitedSetup, learners: Learners, *, records: Sequence[DraftRecord], dials: Dials, rng: random.Random
-) -> tuple[list[Candidate], list[Candidate]]:
-    # Returns (the deck played for each pool, the top-scored deck for each pool), pools in pod then seat order.
+) -> tuple[list[Deck], list[Builds]]:
+    # Returns (the deck played for each pool, the build of its top-scored deck), pools in pod then seat order.
     generator = torch.Generator().manual_seed(rng.getrandbits(_SEED_BITS))
-
-    def score(decks: Tensor) -> Tensor:
-        parts = [learners.score(part) for part in decks.split(setup.score_chunk)]
-        return torch.cat(parts)
-
-    played_decks: list[Candidate] = []
-    best_decks: list[Candidate] = []
+    every_card = torch.arange(len(setup.pool))
+    played_decks: list[Deck] = []
+    best_builds: list[Builds] = []
     for record in records:
         for pool in record.pools:
-            # A drafter that took too many lands still gets a deck, with as many lands as it must play.
-            rules = rules_for_pool(setup.rules, pool)
-            candidates = build_decks(
+            candidates, _ = build_decks(
                 pool,
+                builder=learners.builder,
+                score=learners.score,
+                rules=setup.rules,
                 cards=len(setup.pool),
-                device=learners.drafter.embedding.device,
-                propose=model_proposer(learners.builder, rules=rules, generator=generator),
-                score=score,
-                rules=rules,
-                proposals=setup.proposals,
-                rounds=setup.search_rounds,
+                samples=setup.deck_samples,
+                keep=setup.deck_samples,
+                spells_per_round=setup.spells_per_round,
+                temperature=setup.deck_temperature,
+                generator=generator,
             )
-            explore = len(candidates) > 1 and rng.random() < dials.explore_share
-            played_decks.append(rng.choice(candidates[1:]) if explore else candidates[0])
-            best_decks.append(candidates[0])
-    return played_decks, best_decks
+            explore = len(candidates.decks) > 1 and rng.random() < dials.explore_share
+            played = rng.randrange(1, len(candidates.decks)) if explore else 0
+            played_decks.append(tuple(every_card.repeat_interleave(candidates.decks[played].long().cpu()).tolist()))
+            best_builds.append(candidates.rows(torch.tensor([0])))
+    return played_decks, best_builds
 
 
 def _counts(decks: Sequence[Deck], *, cards: int, device: torch.device) -> Tensor:
@@ -377,21 +364,16 @@ def _update_deck_score(
     return {"deck_score/loss": float(loss.detach())}
 
 
-def _update_builder(
-    setup: LimitedSetup,
-    learners: Learners,
-    *,
-    records: Sequence[DraftRecord],
-    best_decks: Sequence[Candidate],
-    generator: torch.Generator,
-) -> Metrics:
+def _update_builder(setup: LimitedSetup, learners: Learners, *, best_builds: Sequence[Builds]) -> Metrics:
     # Teaches the builder to write the top-scored deck the search found for each pool.
-    cards = len(setup.pool)
-    device = learners.drafter.embedding.device
-    pools = _counts([pool for record in records for pool in record.pools], cards=cards, device=device)
-    best = _counts([candidate.deck for candidate in best_decks], cards=cards, device=device)
-    available, partial, chosen = writing_steps(best, pool_counts=pools, rules=setup.rules, generator=generator)
-    loss = choice_loss(learners.builder(available, partial), chosen, weights=torch.ones(len(chosen), device=device))
+    log_probs, _ = build_log_probs(
+        learners.builder,
+        join_builds(best_builds),
+        rules=setup.rules,
+        spells_per_round=setup.spells_per_round,
+        temperature=setup.deck_temperature,
+    )
+    loss = -log_probs.mean()
     apply(loss, [learners.optimizers["deck_builder"]], max_grad_norm=setup.max_grad_norm)
     return {"deck_builder/loss": float(loss.detach())}
 
@@ -427,8 +409,7 @@ def limited_iteration(
     drafter = model_drafter(learners.drafter, generator=generator)
     records = _draft(setup, drafter=drafter, other_seats=other_seats, rng=rng)
     drafted = time.perf_counter()
-    played_decks, best_decks = _build(setup, learners, records=records, dials=dials, rng=rng)
-    decks = [candidate.deck for candidate in played_decks]
+    decks, best_builds = _build(setup, learners, records=records, dials=dials, rng=rng)
     built = time.perf_counter()
     blocks = _play_blocks(setup, learners, decks=decks, play=play, dials=dials, rng=rng, generator=generator)
     wins, games_played = blocks.wins, blocks.games_played
@@ -437,7 +418,7 @@ def limited_iteration(
     metrics = dict(blocks.metrics)
     if dials.deck_rate > 0:
         metrics |= _update_deck_score(setup, learners, decks=decks, wins=wins, games_played=games_played)
-        metrics |= _update_builder(setup, learners, records=records, best_decks=best_decks, generator=generator)
+        metrics |= _update_builder(setup, learners, best_builds=best_builds)
     if dials.drafter_rate > 0:
         metrics |= _update_drafter(
             setup,

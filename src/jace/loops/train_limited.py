@@ -33,7 +33,7 @@ from torch import nn
 
 from jace.cards import CardPool, CardTable, Rarity, own_parameters
 from jace.data import read_set
-from jace.decks import DeckBuilderModel, DeckScore
+from jace.decks import DeckBuilder, DeckScore
 from jace.draft import DrafterModel
 from jace.engine import Matchup
 from jace.loops.entry_points import (
@@ -76,7 +76,6 @@ __all__ = ("main",)
 _PLAYER_RULE = PlayerRule(
     clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.75, keep_floor=0.0, value_weight=0.5, normalize=True
 )
-_SCORE_CHUNK = 1024
 _SLICE_ROWS = 512
 
 
@@ -92,8 +91,9 @@ class _Arguments(PlayArguments):
     pods: int
     blocks: int
     games_per_block: int
-    proposals: int
-    search_rounds: int
+    deck_samples: int
+    spells_per_round: int
+    deck_temperature: float
     decks_start: int
     drafter_starts: int
     pull_ends: int
@@ -133,8 +133,11 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
         "--blocks", type=int, default=4, help="blocks of games per iteration; the player updates after each"
     )
     parser.add_argument("--games-per-block", type=int, default=25, help="games every drafted deck plays in each block")
-    parser.add_argument("--proposals", type=int, default=8, help="candidate decks per pool")
-    parser.add_argument("--search-rounds", type=int, default=1)
+    parser.add_argument("--deck-samples", type=int, default=256, help="decks the search samples for each pool")
+    parser.add_argument(
+        "--spells-per-round", type=int, default=6, help="spells or nonbasic lands the builder draws between two calls"
+    )
+    parser.add_argument("--deck-temperature", type=float, default=1.0, help="divides every logit of the builder")
     parser.add_argument("--decks-start", type=int, default=20, help="the iteration the deck models start learning at")
     parser.add_argument("--drafter-starts", type=int, default=20, help="the iteration the drafter starts learning at")
     parser.add_argument("--pull-ends", type=int, default=200, help="the iteration the human pull reaches zero at")
@@ -164,7 +167,7 @@ class _Models:
     player: PlayerModel
     guess: GuessModel
     drafter: DrafterModel
-    builder: DeckBuilderModel
+    builder: DeckBuilder
     score: DeckScore
     embedding: CardTable
 
@@ -193,7 +196,7 @@ def _build_models(arguments: _Arguments, embedding: CardTable, *, pool: CardPool
             heads=arguments.drafter_heads,
             picks=picks,
         ),
-        builder=DeckBuilderModel(embedding, **deck_shape),
+        builder=DeckBuilder(embedding, **deck_shape),
         score=DeckScore(embedding, **deck_shape),
         embedding=embedding,
     )
@@ -342,9 +345,9 @@ def main(argv: Sequence[str]) -> None:
         booster_cards=playable,
         rules=deck_rules(limited, cards),
         pods=arguments.pods,
-        proposals=arguments.proposals,
-        search_rounds=arguments.search_rounds,
-        score_chunk=_SCORE_CHUNK,
+        deck_samples=arguments.deck_samples,
+        spells_per_round=arguments.spells_per_round,
+        deck_temperature=arguments.deck_temperature,
         blocks=arguments.blocks,
         games_per_block=arguments.games_per_block,
         history=arguments.history,
