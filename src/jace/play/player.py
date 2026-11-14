@@ -1,11 +1,11 @@
 """The model that chooses actions, and a random baseline to play against.
 
-The player reads the board and a guess of the opponent's hand, and scores
-each legal action from the action's own features, the board objects it names
-and a summary of the whole board. One head scores every kind of decision, so
-nothing depends on how many actions a decision offers. `random_policy` has
-the same call shape and no weights, which makes it the opponent for a first
-evaluation.
+The player reads the board, its own deck and a guess of the opponent's
+cards, and scores each legal action from the action's own features, the
+board objects it names and a summary of the whole board. One head scores
+every kind of decision, so nothing depends on how many actions a decision
+offers. `random_policy` has the same call shape and no weights, which makes
+it the opponent for a first evaluation.
 """
 
 import torch
@@ -14,7 +14,7 @@ from torch import Tensor, nn
 from jace.cards import CardVectors
 from jace.engine import BoardLayout, Decisions
 from jace.modules import encode_real, transformer
-from jace.play.tokens import CategoryEncoder, EntityEncoder, board_tokens, gather_entities, legal_actions
+from jace.play.tokens import CategoryEncoder, EntityEncoder, board_tokens, card_vectors, gather_entities, legal_actions
 from jace.play.types import Boards, Guess
 
 __all__ = ("PlayerModel", "as_boards", "random_policy")
@@ -43,7 +43,9 @@ class PlayerModel(nn.Module):
     `policy` satisfies the `Policy` type. The guess enters as tokens:
     `guess_cards` for the cards the opponent is likeliest to hold, and
     `deck_guess_cards` for the cards guessed to make up the largest shares
-    of the opponent's unseen cards. No
+    of the opponent's unseen cards. The player's own deck enters as one
+    token for each card with copies it has not yet seen, made from the card
+    and its counts of unseen copies and copies in the deck. No
     weight is sized by the card pool, so the model plays with a larger pool
     once `embedding` and `engine_to_card` are replaced by ones that cover it.
     The card vectors are shared with the other models and are not this
@@ -76,6 +78,8 @@ class PlayerModel(nn.Module):
         self.guessed_chance: nn.Linear = nn.Linear(1, width)
         self.guessed_deck_card: nn.Linear = nn.Linear(card_width, width)
         self.guessed_deck_share: nn.Linear = nn.Linear(1, width)
+        self.own_deck_card: nn.Linear = nn.Linear(card_width, width)
+        self.own_deck_copies: nn.Linear = nn.Linear(len(layout.decklist_copies), width)
         self.encoder: nn.TransformerEncoder = transformer(width, layers=layers, heads=heads)
         self.actions: nn.Linear = nn.Linear(len(layout.action_features), width)
         self.action_categories: CategoryEncoder = CategoryEncoder(len(layout.action_categories), width=width)
@@ -92,6 +96,8 @@ class PlayerModel(nn.Module):
         card_table = self.embedding(pool)  # [cards, card_width]
 
         entities = self.entities.embed(tokens, card_table)
+        own_deck = self.own_deck_card(card_vectors(card_table, tokens.deck_card_ids))
+        own_deck = own_deck + self.own_deck_copies(tokens.deck_copies)
         # TODO: The player reads only the likeliest cards of each guess, so most of an early-game guess is dropped.
         # Revisit adding every card's chance as one token each for hand and deck, `guess.hand @ card_table`: it works
         # on any set, but it blurs the cards into one average vector.
@@ -99,12 +105,12 @@ class PlayerModel(nn.Module):
         guessed = self.guessed_card(card_table[likeliest]) + self.guessed_chance(chances[..., None])
         shares, largest = guess.deck.topk(min(self.deck_guess_cards, guess.deck.shape[-1]), dim=-1)
         guessed_deck = self.guessed_deck_card(card_table[largest]) + self.guessed_deck_share(shares[..., None])
-        sequence = torch.cat((entities, guessed, guessed_deck), dim=1)
+        sequence = torch.cat((entities, own_deck, guessed, guessed_deck), dim=1)
         guess_mask = torch.ones((likeliest.shape[0], likeliest.shape[1] + largest.shape[1]), dtype=torch.bool)
-        mask = torch.cat((tokens.entity_mask, guess_mask.to(likeliest.device)), dim=1)
+        mask = torch.cat((tokens.entity_mask, tokens.deck_mask, guess_mask.to(likeliest.device)), dim=1)
         encoded = encode_real(self.encoder, sequence, mask=mask)
 
-        real = mask[..., None]  # bool [b, entities + guessed, 1]
+        real = mask[..., None]  # bool [b, entities + own deck + guessed, 1]
         summary = (encoded * real).sum(dim=1) / real.sum(dim=1)  # [b, width]
 
         # The engine fills action slots from the front, so the slots past the longest list are all empty.

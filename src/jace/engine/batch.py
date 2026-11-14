@@ -71,6 +71,10 @@ class BoardLayout:
     # ability, and the seat that controlled an event.
     action_categories: tuple[int, ...]
     event_categories: tuple[int, ...]
+    # The columns of a decklist row: the card definition id plus one, zero for none, then the
+    # copies of that card not yet seen and the copies in the deck.
+    decklist_definition: int
+    decklist_copies: tuple[int, int]
 
 
 class Outcome(enum.Enum):

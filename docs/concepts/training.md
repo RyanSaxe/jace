@@ -47,7 +47,7 @@ which is what the guess model is scored against. When the opponent is the
 learner's own policy, both seats' decisions are the learner's.
 
 A rollout keeps only the board arrays the models read, which
-`jace.play.BOARD_ARRAYS` lists. They are 110,608 of the 235,152 bytes the
+`jace.play.BOARD_ARRAYS` lists. They are 113,808 of the 235,152 bytes the
 engine encodes for one decision.
 
 A loop depends on one thing for its games: a `PlayGames`, a function from a

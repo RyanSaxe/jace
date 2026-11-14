@@ -74,8 +74,9 @@ the opponent holds at least one copy.
 
 **Player**, `PlayerModel.policy(boards, guess)`. It reads the players, cards
 and permanents on the board as tokens. A permanent's token also holds the
-object it is attached to and the attacker it blocks. The player adds
-tokens for the likeliest cards from the guess. Illegal actions get no
+object it is attached to and the attacker it blocks. The player adds one
+token for each card of its own deck that has copies it has not yet seen,
+and tokens for the likeliest cards from the guess. Illegal actions get no
 probability.
 
 ## The engine's boards

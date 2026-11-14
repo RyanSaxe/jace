@@ -50,6 +50,7 @@ BOARD_ARRAYS = (
     "player_turn_state",
     "card_turn_state",
     "semantic_cards",
+    "decklists",
     "actions",
     "actions_valid",
     "action_focus",
@@ -93,6 +94,13 @@ class BoardTokens:
     event_categories: Tensor
     # event_mask: bool [b, events].
     event_mask: Tensor
+    # deck_card_ids: int64 [b, decklist rows], the `CardId` of each card in the acting seat's
+    # deck, or -1 for none.
+    deck_card_ids: Tensor
+    # deck_copies: float [b, decklist rows, 2], each card's copies not yet seen, then its copies in the deck.
+    deck_copies: Tensor
+    # deck_mask: bool [b, decklist rows], true for a card with copies not yet seen.
+    deck_mask: Tensor
 
 
 def legal_actions(boards: Boards) -> Tensor:
@@ -129,9 +137,9 @@ def board_tokens(boards: Boards, *, layout: BoardLayout, engine_to_card: Tensor)
     #     capacity, so concatenating the arrays in that order makes a focus index the
     #     position of its token. A permanent's link columns hold the same index plus one;
     #   - `semantic_cards` holds the definition id + 1 of each card row, acting seat first,
-    #     and a permanent's row holds the same in the column `layout` names;
+    #     and a permanent's row and a decklist's row hold the same in the columns `layout` names;
     #   - `player_turn_state` has one row for each seat and `card_turn_state` one value for
-    #     each card row, acting seat first.
+    #     each card row, acting seat first, and `decklists` has the acting seat's rows first.
     # A column that names something, such as a definition or a link, is read only as what it
     # names, never as a number.
     #
@@ -145,6 +153,8 @@ def board_tokens(boards: Boards, *, layout: BoardLayout, engine_to_card: Tensor)
     definitions = torch.cat((boards["semantic_cards"].flatten(1), permanents[..., layout.permanent_definition]), dim=1)
     entity_valid = torch.cat([boards[f"{name}_valid"] for name in _ENTITY_ARRAYS], dim=1)
     actions, events = boards["actions"], boards["events"]
+    decklist = boards["decklists"][:, 0]  # the acting seat's: [b, decklist rows, decklist columns]
+    unseen, _ = layout.decklist_copies
     return BoardTokens(
         players=_squash(players),
         cards=_squash(cards),
@@ -161,6 +171,9 @@ def board_tokens(boards: Boards, *, layout: BoardLayout, engine_to_card: Tensor)
         events=_squash(events[..., list(layout.event_features)]),
         event_categories=_categories(events[..., list(layout.event_categories)]),
         event_mask=boards["events_valid"] > 0,
+        deck_card_ids=_card_ids(decklist[..., layout.decklist_definition], engine_to_card),
+        deck_copies=_squash(decklist[..., list(layout.decklist_copies)]),
+        deck_mask=decklist[..., unseen] > 0,
     )
 
 

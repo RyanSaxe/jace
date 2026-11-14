@@ -2,11 +2,11 @@
 
 The boards in `tests/data/manabot_v10_boards.npz` are three decisions from
 real games, encoded by the engine adapter at input version 10, each with
-permanents and events on the board. No permanent on them blocks or is
-attached to anything, so the test of those links adds one. The models are
-built from the layout the adapter reports, and the tests call them only
-through `jace.play`, so the token layout and the network can change without
-touching them.
+permanents, events and the acting seat's decklist on the board. No
+permanent on them blocks or is attached to anything, so the test of those
+links adds one. The models are built from the layout the adapter reports,
+and the tests call them only through `jace.play`, so the token layout and
+the network can change without touching them.
 """
 
 from pathlib import Path
@@ -120,6 +120,18 @@ def test_player_reads_which_object_a_permanent_blocks_or_is_attached_to() -> Non
             linked["opponent_permanents"][0, 0, link] = first_permanent + linked_permanent + 1
             odds.append(_action_odds(player, linked)[0])
         assert not torch.allclose(odds[0], odds[1])
+
+
+@pytest.mark.parametrize(("row", "unseen_after"), [(1, 0), (11, 8)], ids=["last copy", "one of nine"])
+def test_player_reads_the_copies_left_unseen_in_its_own_deck(row: int, unseen_after: int) -> None:
+    # Board 0's decklist row 1 is a card with one unseen copy, and row 11 a land with nine.
+    boards = _real_boards()
+    player, _ = _models(CARDS)
+    unseen, _ = board_layout().decklist_copies
+    drawn = {name: rows.clone() for name, rows in boards.items()}
+    drawn["decklists"][0, 0, row, unseen] = unseen_after
+
+    assert not torch.allclose(_action_odds(player, boards)[0], _action_odds(player, drawn)[0])
 
 
 def test_random_policy_spreads_probability_evenly_over_legal_actions() -> None:

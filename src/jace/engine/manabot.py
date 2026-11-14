@@ -198,6 +198,7 @@ def board_layout() -> BoardLayout:
     permanent_names, action_names, event_names = (
         _naming_columns(name) for name in ("agent_permanents", "actions", "events")
     )
+    decklist = _naming_columns("decklists")
     holds = {
         "the columns of the two seats' players": columns["agent_player"] == columns["opponent_player"],
         "the columns of the two seats' cards": columns["agent_cards"] == columns["opponent_cards"],
@@ -214,10 +215,14 @@ def board_layout() -> BoardLayout:
         and len(permanent_names[_DEFINITION_ENCODING]) == 1,
         "the columns that name something in actions": set(action_names) == {_SELECTOR_ENCODING},
         "the columns that name something in events": set(event_names) == {_SEAT_ENCODING, _EVENT_OBJECT_ENCODING},
+        "the axes of decklists": _ARRAYS["decklists"]["axes"] == ["viewer_relative_seat", "definition", "feature"],
+        "the columns of decklists": set(decklist) == {_DEFINITION_ENCODING}
+        and {"definition", "unseen", "main"} <= set(columns["decklists"]),
     }
     changed = [name for name, held in holds.items() if not held]
     if changed:
         raise BoardLayoutError(changed)
+    decklist_columns = _ARRAYS["decklists"]["columns"]
     return BoardLayout(
         player_features=len(columns["agent_player"]) + len(columns["player_turn_state"]),
         card_features=len(columns["agent_cards"]) + 1,
@@ -230,6 +235,8 @@ def board_layout() -> BoardLayout:
             column for column in action_names[_SELECTOR_ENCODING] if column != _ACTION_FRAME_COLUMN
         ),
         event_categories=event_names[_SEAT_ENCODING],
+        decklist_definition=decklist[_DEFINITION_ENCODING][0],
+        decklist_copies=(int(decklist_columns["unseen"]["index"]), int(decklist_columns["main"]["index"])),
     )
 
 
