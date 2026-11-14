@@ -54,6 +54,8 @@ def test_real_games_train_the_player_its_win_chance_and_the_guess_model_for_one_
     )
     guess = GuessModel(embedding, engine_to_card=engine_to_card, layout=layout, width=32, layers=1, heads=2)
     win_chance = WinChanceModel(embedding, engine_to_card=engine_to_card, layout=layout, width=32, layers=1, heads=2)
+    matchups = [matchup(), matchup()]
+    guess.set_field([deck for pair in matchups for deck in pair])
 
     own = functools.partial(own_parameters, embedding=embedding)
 
@@ -61,7 +63,7 @@ def test_real_games_train_the_player_its_win_chance_and_the_guess_model_for_one_
     generator = torch.Generator().manual_seed(0)
     collected = play_games(
         lambda games: start_batch(games, pool=pool, games=2, seed=0, boards=BOARD_ARRAYS),
-        [matchup(), matchup()],
+        matchups,
         learner=player.policy,
         opponent=player.policy,
         guesser=guess.guess,
@@ -91,6 +93,7 @@ def test_real_games_train_the_player_its_win_chance_and_the_guess_model_for_one_
         slice_rows=64,
         max_grad_norm=1.0,
         optimizers=[torch.optim.Adam(own(guess), lr=1e-3)],
+        passes=1,
         generator=generator,
     )
 

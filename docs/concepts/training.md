@@ -48,7 +48,7 @@ model is scored against and what the win chance reads. When the opponent is
 the learner's own policy, both seats' decisions are the learner's.
 
 A rollout keeps only the board arrays the models read, which
-`jace.play.BOARD_ARRAYS` lists. They are 113,808 of the 235,152 bytes the
+`jace.play.BOARD_ARRAYS` lists. They are 115,088 of the 235,152 bytes the
 engine encodes for one decision.
 
 A loop depends on one thing for its games: a `PlayGames`, a function from a
@@ -111,8 +111,8 @@ predictions and the result as `advantages` mixes them.
 This is the rule manabot adapted from Ataraxos. With `stay`, `spread` and
 `keep_quantile` at zero it is plain PPO.
 
-`update_player` goes over the rollout `passes` times, and `update_guess`
-once. Both take the rows in a new random order on every pass. A rollout
+`update_player` and `update_guess` each go over the rollout `passes` times,
+and both take the rows in a new random order on every pass. A rollout
 lists its games one worker after another, so a slice of 512 rows cut in
 play order holds about eight games of a round's 48, and its gradient
 follows those games. Shuffled, every slice holds all of them. The

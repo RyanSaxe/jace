@@ -88,9 +88,9 @@ class LimitedSetup:
     and the guess model update after each block. `history` is how many earlier guesses the
     guess model is shown. `player_rule` is the player's update rule; its
     `spread` is replaced each iteration by the schedule's, and `passes` is
-    how many times the player's update goes over the games. `score_chunk`
-    bounds how many decks the deck score rates in one call during the
-    search.
+    how many times the player's and the guess model's updates go over a
+    block's games. `score_chunk` bounds how many decks the deck score rates
+    in one call during the search.
     """
 
     pool: CardPool
@@ -308,6 +308,7 @@ def _update_play_models(
         slice_rows=setup.slice_rows,
         max_grad_norm=setup.max_grad_norm,
         optimizers=[learners.optimizers["guess"]],
+        passes=setup.passes,
         generator=generator,
     )
     named = {f"player/{name}": value for name, value in player.items()}

@@ -9,7 +9,7 @@ the `Policy` and `Guesser` function types, and training also on the
 """
 
 from jace.play.device import guesser_on, policy_on, win_chance_on
-from jace.play.guess import GuessModel
+from jace.play.guess import FieldNotSetError, GuessModel, TooManyCopiesError
 from jace.play.player import PlayerModel, as_boards, random_policy
 from jace.play.tokens import BOARD_ARRAYS
 from jace.play.types import Boards, Earlier, Guess, Guesser, Policy, WinChance
@@ -19,11 +19,13 @@ __all__ = (
     "BOARD_ARRAYS",
     "Boards",
     "Earlier",
+    "FieldNotSetError",
     "Guess",
     "GuessModel",
     "Guesser",
     "PlayerModel",
     "Policy",
+    "TooManyCopiesError",
     "WinChance",
     "WinChanceModel",
     "as_boards",

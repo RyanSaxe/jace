@@ -67,6 +67,16 @@ The player, its win chance and the guess model arrive as functions, and
 the games through `play`, so the same loop runs on manabot in worker
 processes and on the toy game in one.
 
+`GuessModel` guesses from a field, the decks its opponents may hold, and
+the loop does not set it. The `play` of `train_limited` sets the decks of
+the matchups it is given before it sends the weights to the workers, so the
+field holds while the games are played and while the guess model learns
+from them:
+
+```python
+models.guess.set_field([deck for matchup in matchups for deck in matchup])
+```
+
 Build each model's optimizer from `own_parameters(model, embedding)`. No
 optimizer of this loop holds the shared embedding, so a model whose rate is
 zero does not change. [Training](../concepts/training.md) has the reason.

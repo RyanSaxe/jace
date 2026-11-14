@@ -144,9 +144,12 @@ def win_chance_loss(win_chance: Tensor, *, targets: Tensor, learner: Tensor) -> 
 
 def guess_loss(guess: Guess, *, deck_truth: Tensor, hand_truth: Tensor) -> Tensor:
     # guess.deck, guess.hand, deck_truth, hand_truth: [m, cards]. A confident wrong guess costs most.
-    deck = -(deck_truth * guess.deck.clamp_min(_SMALLEST_SHARE).log()).sum(dim=-1).mean()
-    hand = guess.hand.clamp(_CHANCE_MARGIN, 1.0 - _CHANCE_MARGIN)
-    return deck + functional.binary_cross_entropy(hand, hand_truth)
+    # Both terms are summed over cards and averaged over decisions, so each decision weighs its hand
+    # guess as much as its deck guess.
+    deck = -(deck_truth * guess.deck.clamp_min(_SMALLEST_SHARE).log()).sum(dim=-1)
+    hand_chance = guess.hand.clamp(_CHANCE_MARGIN, 1.0 - _CHANCE_MARGIN)
+    hand = functional.binary_cross_entropy(hand_chance, hand_truth, reduction="none").sum(dim=-1)
+    return (deck + hand).mean()
 
 
 def score_loss(logits: Tensor, *, wins: Tensor, games: Tensor) -> Tensor:

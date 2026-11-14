@@ -37,9 +37,11 @@ Three ideas hold the design together:
   card has before anyone plays it. A card from a new set can be drafted and
   played without retraining an output layer.
 - **A guess of hidden cards.** A separate model predicts the opponent's deck
-  and hand from what has happened, and the player reads its guess. Self-play
-  knows the true cards, so the guess is trained on real answers, and the win
-  chance that credits the player's actions reads them instead of guessing.
+  and hand, and the player reads its guess. It starts from the decks the
+  opponent may hold, less the cards it has shown, and learns corrections
+  from what has happened. Self-play knows the true cards, so the guess is
+  trained on real answers, and the win chance that credits the player's
+  actions reads them instead of guessing.
 - **Exploring on a schedule.** How much each model explores, and how fast it
   learns, are values a schedule sets for every round of training.
 

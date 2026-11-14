@@ -127,10 +127,11 @@ class PlayArguments(RunArguments):
 
     `add_play_flags` adds them to a parser. They say how games are played
     (`workers` processes of `games_per_worker` games at once, a stalled one
-    replaced after `stall_seconds`), how the player learns from them, the
-    shapes of the player, the guess model and the win chance, and how often
-    and on how many held-out deals the player is scored. `jace.loops.score`
-    reads the model shapes from a run's config under these names.
+    replaced after `stall_seconds`), how the player and the guess model
+    learn from them, the shapes of the player, the guess model and the win
+    chance, and how often and on how many held-out deals the player is
+    scored. `jace.loops.score` reads the model shapes from a run's config
+    under these names.
     """
 
     workers: int
@@ -175,7 +176,9 @@ def add_play_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--evaluate-every", type=int, default=10, help="score the player each N iterations")
     parser.add_argument("--evaluate-deals", type=int, default=25, help="deals per opponent; each is four games")
     parser.add_argument("--evaluate-decks", type=int, default=64, help="held-out human decks the deals are drawn from")
-    parser.add_argument("--passes", type=int, default=4, help="passes of the player's update over each round")
+    parser.add_argument(
+        "--passes", type=int, default=4, help="passes of the player's and the guess model's updates over each round"
+    )
     parser.add_argument(
         "--normalize",
         action=argparse.BooleanOptionalAction,
@@ -392,14 +395,16 @@ def score_player(
 ) -> dict[str, float]:
     # Scores the player as it is now against random play, scripted greedy and the heuristic player, once
     # sampling its actions and once taking its top action, and records each result under `checkpoint`.
-    # Returns the win rates by opponent name, with "_top" after the name for the top action.
+    # Returns the win rates by opponent name, with "_top" after the name for the top action. The guess
+    # model's field is the decks of the harness's deals, which its opponents hold.
+    dealt = [deck for deal in harness.deals for deck in deal.decks]
     rates: dict[str, float] = {}
     for action in ("sampled", "top"):
         suffix = "_top" if action == "top" else ""
         scores = score_against_scripted(
             run,
             checkpoint,
-            player=model_player(models.player, models.guess, history=history, action=action),
+            player=model_player(models.player, models.guess, decks=dealt, history=history, action=action),
             action=action,
             harness=harness,
             generator=torch.Generator().manual_seed(checkpoint.update),

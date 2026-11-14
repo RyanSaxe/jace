@@ -29,7 +29,7 @@ from pathlib import Path
 
 import torch
 
-from jace.cards import CardTable
+from jace.cards import CardTable, Deck
 from jace.data import SetCards, card_table, load_decks, read_set
 from jace.engine import BoardLayout
 from jace.engine.manabot import board_layout, engine_card_ids, engine_cards
@@ -140,10 +140,12 @@ def _model_player(
     cards: SetCards,
     embedding: CardTable,
     layout: BoardLayout,
+    decks: Sequence[Deck],
     action: ActionChoice,
 ) -> tuple[Player, CheckpointRef]:
     # Builds the player and the guess model of iteration `update` as the run built them, on the
-    # run's card table, and returns the player with its player checkpoint.
+    # run's card table, and returns the player with its player checkpoint. The guess model's field
+    # is `decks`, the decks the opponents are dealt, in place of the training decks it was saved with.
     numbers = {name: value for name, value in config.items() if isinstance(value, int)}
     engine_to_card = engine_card_ids(cards.pool)
     shape = {"width": numbers["play_width"], "layers": numbers["play_layers"], "heads": numbers["play_heads"]}
@@ -159,6 +161,7 @@ def _model_player(
     reference = _checkpoint(run, "player", update=update)
     load_checkpoint(run.parent, reference, into=player, keeping=embedding)
     load_checkpoint(run.parent, _checkpoint(run, "guess", update=update), into=guess, keeping=embedding)
+    guess.set_field(decks)
     for module in (embedding, player, guess):
         module.requires_grad_(requires_grad=False)
     seat = functools.partial(
@@ -180,6 +183,7 @@ def _players(
     cards: SetCards,
     embedding: CardTable,
     layout: BoardLayout,
+    decks: Sequence[Deck],
 ) -> tuple[dict[str, Player], dict[str, CheckpointRef]]:
     # Returns every named player, and the player checkpoint of each one that is a checkpoint.
     players: dict[str, Player] = {}
@@ -197,6 +201,7 @@ def _players(
                 cards=cards,
                 embedding=embedding,
                 layout=layout,
+                decks=decks,
                 action=_action(name),
             )
     return players, checkpoints
@@ -361,7 +366,13 @@ def main(argv: Sequence[str]) -> None:
     deals = draw_deals(decks, count=arguments.deals, seed=arguments.seed)
     games = legs(deals)
     players, checkpoints = _players(
-        arguments.players, run=arguments.run, config=config, cards=cards, embedding=embedding, layout=board_layout()
+        arguments.players,
+        run=arguments.run,
+        config=config,
+        cards=cards,
+        embedding=embedding,
+        layout=board_layout(),
+        decks=[deck for deal in deals for deck in deal.decks],
     )
     pairs = [tuple(pair.split(":")) for pair in arguments.pairs] or list(itertools.combinations(arguments.players, 2))
     names = tuple(cards.pool[card].name for card in range(len(cards.pool)))

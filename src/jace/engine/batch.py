@@ -50,9 +50,12 @@ class BoardLayout:
     the columns of their turn state when the engine reports one. A
     permanent's, an action's and an event's row also hold columns that name
     something, and each of those is listed by what it names. A column in no
-    list is not read. An engine adapter builds this from what its engine
-    reports, and `jace.play` takes it as plain data, so the models never
-    import an engine.
+    list is not read. The guess model also counts the opponent's cards, so
+    the layout names the few columns that counting reads: a card's zone
+    flags, a player's hand and library sizes and the known-hand rows. An
+    engine adapter builds this from what its engine reports, and
+    `jace.play` takes it as plain data, so the models never import an
+    engine.
     """
 
     player_features: int
@@ -75,6 +78,19 @@ class BoardLayout:
     # copies of that card not yet seen and the copies in the deck.
     decklist_definition: int
     decklist_copies: tuple[int, int]
+    # The flag columns of a card's row that mark it as in its owner's library or hand, or as a
+    # token. A card with none of them set is one of its owner's deck that both seats see: on the
+    # battlefield, in the graveyard, in exile or on the stack.
+    card_unshown_flags: tuple[int, ...]
+    # The columns of a player's row that count the cards in its hand and in its library, each
+    # divided by `zone_count_scale`.
+    hand_count: int
+    library_count: int
+    zone_count_scale: float
+    # The columns of a known-hand row: the card definition id plus one, zero for none, then how
+    # many copies of that card the player is known to hold because they were revealed.
+    known_hand_definition: int
+    known_hand_copies: int
 
 
 class Outcome(enum.Enum):

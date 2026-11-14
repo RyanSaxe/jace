@@ -71,7 +71,42 @@ hands of the current player".
 
 **Guess model**, `GuessModel.guess(boards, earlier)`. It returns two vectors
 over cards: each card's share of the opponent's unseen cards, and the chance
-the opponent holds at least one copy.
+the opponent holds at least one copy. It starts from a table of what the
+acting seat can know, and its network learns only corrections to that
+table.
+
+```python
+guess_model.set_field(decks)  # the decks the opponent's deck is drawn from
+table = guess_model.table(boards)  # the guess with no network
+guess = guess_model.guess(boards, earlier)  # the table plus the network's corrections
+```
+
+The field is the set of decks the opponent may hold. In self-play it is the
+decks of the games being played, and in scoring it is the decks the harness
+deals. For each card, the table counts the copies the opponent has shown on
+the battlefield, in the graveyard, in exile or on the stack, and the copies
+the engine reports were revealed from its hand. Only the field's decks that
+hold at least that many copies could be the opponent's, card by card, and
+the table averages over those:
+
+| Guess | The table's value for a card                                         |
+| ----- | -------------------------------------------------------------------- |
+| Deck  | Its copies known to be in hand, plus the mean of the copies those decks hold beyond the ones counted, as a share of all cards |
+| Hand  | 1 when a copy is known to be in hand, and otherwise the mean over those decks of 1 - (1 - p)^u |
+
+Here p is the share of the opponent's unknown hidden cards that are in its
+hand, and u is the number of copies a deck holds beyond those counted.
+Taking the field's mean copies less the copies seen would be simpler, but it
+gives a card no chance once the opponent shows more copies than the mean,
+which basic lands do within a few turns.
+
+The network adds a correction to the log of each card's share and to the
+logit of each hand chance. The corrections start at zero, so an untrained
+model's guess is the table. A card the table gives no share keeps none,
+and a chance of 0 or 1 stays where it is. `guess_loss` sums both guesses
+over cards, so a decision's hand guess weighs as much as its deck guess.
+The field is a buffer in the model's state dict, so the worker processes
+that receive the weights guess from the same field.
 
 **Player**, `PlayerModel.policy(boards, guess)`. It reads the players, cards
 and permanents on the board as tokens. A permanent's token also holds the
@@ -92,9 +127,10 @@ it, so the hidden cards never reach the player.
 ## The engine's boards
 
 The guess model, the player and the win chance read manabot's encoded
-boards directly. That knowledge sits in one function, `board_tokens` in
-[`jace/play/tokens.py`](../../src/jace/play/tokens.py), whose comment lists
-every array it assumes.
+boards directly. That knowledge sits in
+[`jace/play/tokens.py`](../../src/jace/play/tokens.py): in `board_tokens`,
+whose comment lists every array it assumes, and in `opponent_cards`, which
+counts the opponent's cards for the guess model's table.
 
 Most columns of a board are numbers, such as a creature's power. Some name
 something instead: a card definition, another object on the board, or a
