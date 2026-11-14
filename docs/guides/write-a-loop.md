@@ -75,14 +75,15 @@ the games through `play`, so the same loop runs on manabot in worker
 processes and on the toy game in one. The iteration returns its metrics and
 the check to hand the next one.
 
-`GuessModel` guesses from a field, the decks its opponents may hold, and
-the loop does not set it. The `play` of `train_limited` sets the decks of
-the matchups it is given before it sends the weights to the workers, so the
-field holds while the games are played and while the guess model learns
-from them:
+`GuessModel` guesses from a meta, what decks of the format look like, and
+the loop does not set it. `train_limited` sets the human decks' meta before
+the first iteration and blends each iteration's played decks into it after
+`limited_iteration` returns, so no game is guessed with its own decks. The
+check the iteration returns ends with those decks:
 
 ```python
-models.guess.set_field([deck for matchup in matchups for deck in matchup])
+meta = blend_meta(models.guess.meta, after.recent[-1].decks, decay=arguments.meta_decay)
+models.guess.set_meta(meta)
 ```
 
 Build each model's optimizer from `own_parameters(model, embedding)`. No

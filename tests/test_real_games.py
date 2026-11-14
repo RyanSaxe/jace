@@ -13,7 +13,7 @@ import torch
 
 from jace.cards import CardPool, CardRecord, CardTable, Deck, Rarity, own_parameters
 from jace.engine.manabot import board_layout, engine_card_ids, engine_cards, start_batch
-from jace.play import BOARD_ARRAYS, GuessModel, PlayerModel, WinChanceModel
+from jace.play import BOARD_ARRAYS, GuessModel, PlayerModel, WinChanceModel, day_zero_meta
 from jace.train import PlayerRule, play_games, update_guess, update_player
 
 __all__ = ()
@@ -55,7 +55,8 @@ def test_real_games_train_the_player_its_win_chance_and_the_guess_model_for_one_
     guess = GuessModel(embedding, engine_to_card=engine_to_card, layout=layout, width=32, layers=1, heads=2)
     win_chance = WinChanceModel(embedding, engine_to_card=engine_to_card, layout=layout, width=32, layers=1, heads=2)
     matchups = [matchup(), matchup()]
-    guess.set_field([deck for pair in matchups for deck in pair])
+    # A format whose boosters hold every card of the pool equally often, before any of its decks is known.
+    guess.set_meta(day_zero_meta(torch.ones(len(pool)), deck_size=40))
 
     own = functools.partial(own_parameters, embedding=embedding)
 

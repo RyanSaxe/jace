@@ -5,7 +5,9 @@ decks are human decks from the training share of the 17Lands data, so what
 is measured is how well the player learns to play, and nothing else moves.
 Each iteration plays a fixed number of games to the end in worker
 processes, all with that iteration's weights, and then updates the player,
-its win chance and the guess model. All three read cards through the card
+its win chance and the guess model. The guess model's meta starts from the
+human decks of the training split, and each iteration's decks join it
+once their games are over. All three read cards through the card
 vectors of `--embedding-run`, frozen into a `CardTable`, which is not
 trained here: a step taken for one model would change the others' input.
 Every few iterations the player is scored with the scoring harness on
@@ -49,9 +51,10 @@ from jace.loops.entry_points import (
     scoring_harness,
     set_cards,
     start_run,
+    starting_meta,
 )
 from jace.loops.matches import Harness
-from jace.play import Guess, guesser_on, policy_on, win_chance_on
+from jace.play import Guess, blend_meta, guesser_on, policy_on, win_chance_on
 from jace.tracking import (
     CheckpointRef,
     ModelName,
@@ -248,6 +251,12 @@ def _train(
         collected = play(matchups)
         play_ended = time.perf_counter()
         updates = _update(arguments, models, rollout=collected.rollout, optimizers=optimizers, generator=generator)
+        # The iteration's decks join the meta only now that their games are over, each once, so no game of
+        # the iteration was guessed with them.
+        played = sorted({deck for matchup in matchups for deck in matchup})
+        copies = torch.stack([torch.bincount(torch.tensor(deck), minlength=models.embedding.cards) for deck in played])
+        meta = blend_meta(models.guess.meta, copies.float().to(models.embedding.device), decay=arguments.meta_decay)
+        models.guess.set_meta(meta)
         decisions = len(collected.rollout.games)
         metrics = {
             "games": float(len(collected.games)),
@@ -310,7 +319,9 @@ def main(argv: Sequence[str]) -> None:
     clock = functools.partial(datetime.now, UTC)
     if arguments.resume is None:
         folder, curve_file = start_run(arguments, device=device, inputs=(embedding_ref,), clock=clock)
+        models.guess.set_meta(starting_meta(arguments, cards))
     else:
+        # The resumed guess model holds the meta of the decks the run had played.
         folder, curve_file = arguments.resume, arguments.resume.with_name(f"{arguments.resume.name}.curve.json")
     workers = start_workers(
         functools.partial(play_actor, arguments=arguments, card_width=embedding.width),
@@ -320,10 +331,7 @@ def main(argv: Sequence[str]) -> None:
 
     def play(matchups: Sequence[Matchup]) -> Collected:
         # The workers of one round are the ones the round before left, with any stalled one replaced.
-        # Every opponent of the round holds one of its decks, so they are the guess model's field
-        # while the workers play the games and while it learns from them afterwards.
         nonlocal workers
-        models.guess.set_field([deck for matchup in matchups for deck in matchup])
         collected, workers = play_on_workers(
             workers, matchups, weights=play_weights(models), stall_seconds=arguments.stall_seconds
         )

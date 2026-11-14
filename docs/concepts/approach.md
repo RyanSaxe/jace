@@ -60,10 +60,13 @@ Magic hides the opponent's hand and deck. A separate guess model predicts
 both at every decision, and the player reads the guess as part of its
 input.
 
-The guess starts from a table of what the player can know: the decks the
-opponent may hold, less the cards it has shown or revealed. The model
-learns only corrections to that table, so before any training its guess is
-already the table's.
+The guess reads only what a player can know. Its starting point is the
+meta, a matrix of which cards decks of the format hold together, fitted
+from public decklists and then from the decks of earlier rounds of
+self-play, never from the decks being played. From the meta and the cards
+the opponent has shown or revealed, it works out each card's expected
+copies less the copies seen. The model learns only corrections to that,
+so before any training its guess is already the meta's.
 
 The guess model also reads its own earlier guesses from the same
 game, so what it worked out on turn 2 is still there on turn 8.

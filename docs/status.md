@@ -122,6 +122,30 @@ Both runs came before a bug was fixed. The optimizers of the deck score
 and the deck builder also held the card embedding, so each of their
 updates stepped the embedding twice.
 
+## The guess model
+
+One run of `train_limited` for four iterations, each of 2 pods and 4
+blocks of 25 games per deck with one pass per block, then two checks that
+score every guess on the same decisions. The first is the scoring
+harness's 25 deals of held-out human decks against the three scripted
+players: 300 games, with a player from 150 iterations of an earlier run
+choosing actions. The second is 48 self-play games of freshly drafted and
+built decks. Hand loss is the log loss per decision and card. The base
+rate gives each card its frequency in hand over the same decisions, so it
+knows which cards the scored decks hold.
+
+| Guess                                   | Harness hand loss | Self-play hand loss |
+| --------------------------------------- | ----------------- | ------------------- |
+| Day-0 meta from booster odds, no network | 0.0520           | 0.0519              |
+| Meta of the human decks, no network     | 0.0412            | 0.0450              |
+| The guess model after four iterations   | 0.0411            | 0.0437              |
+| Base rate fitted on the scored decisions | 0.0436           | 0.0424              |
+
+The guess model's training loss, in its one pass over each iteration's
+games, fell from 19.85 to 18.71 over the four iterations. The earlier guess
+model, which read the decks being played, went from 18.68 to 16.08 in the
+same four.
+
 ## Measured speed
 
 On an Apple M3 Max CPU:

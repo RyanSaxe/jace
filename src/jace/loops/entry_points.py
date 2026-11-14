@@ -9,9 +9,10 @@ shape flags and `load_card_table`, which every entry point after the
 drafter's pretraining reads its card vectors with. The two entry points
 that train a player on real games also share how games reach them:
 `PlayArguments` are their common flags, `play_actor` builds what a worker
-process plays with, and `score_player` scores the player on held-out decks
-with the scoring harness. This is not a framework: an entry point calls
-what it needs and does the rest itself.
+process plays with, `starting_meta` is the meta their guess model starts
+from, and `score_player` scores the player on held-out decks with the
+scoring harness. This is not a framework: an entry point calls what it
+needs and does the rest itself.
 """
 
 import argparse
@@ -47,8 +48,9 @@ from jace.engine.manabot import (
     start_batch,
     turn_numbers,
 )
+from jace.loops.formats import booster_meta, limited_format
 from jace.loops.matches import Harness, draw_deals, model_player, score_against_scripted
-from jace.play import BOARD_ARRAYS, GuessModel, PlayerModel, WinChanceModel
+from jace.play import BOARD_ARRAYS, GuessModel, Meta, PlayerModel, WinChanceModel, fit_meta
 from jace.tracking import (
     CheckpointRef,
     Clock,
@@ -83,6 +85,7 @@ __all__ = (
     "scoring_harness",
     "set_cards",
     "start_run",
+    "starting_meta",
 )
 
 # Adam's decay rates for pretraining on human data, as an earlier human-trained drafter set them.
@@ -121,10 +124,11 @@ class PlayArguments(RunArguments):
     `add_play_flags` adds them to a parser. They say how games are played
     (`workers` processes of `games_per_worker` games at once, a stalled one
     replaced after `stall_seconds`), how the player and the guess model
-    learn from them, the shapes of the player, the guess model and the win
-    chance, and how often and on how many held-out deals the player is
-    scored. `jace.loops.score` reads the model shapes from a run's config
-    under these names.
+    learn from them, how fast the guess model's meta forgets older decks,
+    the shapes of the player, the guess model and the win chance, and how
+    often and on how many held-out deals the player is scored.
+    `jace.loops.score` reads the model shapes from a run's config under
+    these names.
     """
 
     workers: int
@@ -136,6 +140,7 @@ class PlayArguments(RunArguments):
     passes: int
     normalize: bool
     history: int
+    meta_decay: float
     play_width: int
     play_layers: int
     play_heads: int
@@ -182,6 +187,12 @@ def add_play_flags(parser: argparse.ArgumentParser) -> None:
         help="scale advantages to mean zero and unit spread",
     )
     parser.add_argument("--history", type=int, default=4, help="earlier guesses the guess model is shown")
+    parser.add_argument(
+        "--meta-decay",
+        type=float,
+        default=0.9,
+        help="what a deck behind the guess model's meta counts after each iteration, as a share of what it counted",
+    )
     parser.add_argument("--play-width", type=int, default=128)
     parser.add_argument("--play-layers", type=int, default=2)
     parser.add_argument("--play-heads", type=int, default=4)
@@ -243,6 +254,25 @@ def playable_decks(decks: Tensor, *, pool: CardPool, count: int) -> list[Deck]:
     playable = torch.tensor([bool(pool[card].program) for card in range(len(pool))])
     usable = decks[(decks[:, ~playable] == 0).all(dim=1)][:count]
     return [tuple(torch.repeat_interleave(torch.arange(len(pool)), row.long()).tolist()) for row in usable]
+
+
+def starting_meta(arguments: RunArguments, cards: SetCards) -> Meta:
+    """Fit the meta a run's guess model starts from, from the public human decks of the training split.
+
+    These are the 17Lands decks of the drafts that are not held out, the
+    split the drafter trains on, so no deck the scoring harness deals is
+    among them. A card no human deck holds, and every card when the split
+    holds no deck, keeps what the day-0 meta of the set's limited format
+    says of it: its copies from how often the format's boosters hold it.
+    """
+    human = load_decks(
+        read_set(arguments.set_code).games,
+        pool=cards.pool,
+        cache_dir=arguments.data_dir,
+        held_out_share=arguments.held_out_share,
+    )
+    day_zero = booster_meta(limited_format(arguments.set_code), cards.pool)
+    return fit_meta(human.decks[~human.held_out].float(), fallback=day_zero)
 
 
 def set_cards(data: SetData) -> SetCards:
@@ -379,16 +409,14 @@ def score_player(
 ) -> dict[str, float]:
     # Scores the player as it is now against random play, scripted greedy and the heuristic player, once
     # sampling its actions and once taking its top action, and records each result under `checkpoint`.
-    # Returns the win rates by opponent name, with "_top" after the name for the top action. The guess
-    # model's field is the decks of the harness's deals, which its opponents hold.
-    dealt = [deck for deal in harness.deals for deck in deal.decks]
+    # Returns the win rates by opponent name, with "_top" after the name for the top action.
     rates: dict[str, float] = {}
     for action in ("sampled", "top"):
         suffix = "_top" if action == "top" else ""
         scores = score_against_scripted(
             run,
             checkpoint,
-            player=model_player(models.player, models.guess, decks=dealt, history=history, action=action),
+            player=model_player(models.player, models.guess, history=history, action=action),
             action=action,
             harness=harness,
             generator=torch.Generator().manual_seed(checkpoint.update),
