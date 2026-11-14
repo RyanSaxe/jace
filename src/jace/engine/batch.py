@@ -137,14 +137,15 @@ class HiddenCards:
 class GameBatch(Protocol):
     """A fixed list of games, stepped a few at a time until all are over.
 
-    `decisions` returns the pending decision of every game in play. `act`
-    applies one action to each of those games, in the same order, and
-    returns the games that ended on that step. A game that ends makes room
-    for the next one of the list, so the rows of the next `decisions` may
-    belong to other games. `hidden_cards` returns both seats' true hands
-    and libraries in every game in play as card counts; it exists to label
-    training data for the guess model and to show the win chance what the
-    opponent holds, and must never reach a player.
+    `decisions` returns the pending decision of every game in play, in
+    arrays of its own that no later step changes, so a caller may keep them
+    without a copy. `act` applies one action to each of those games, in the
+    same order, and returns the games that ended on that step. A game that
+    ends makes room for the next one of the list, so the rows of the next
+    `decisions` may belong to other games. `hidden_cards` returns both
+    seats' true hands and libraries in every game in play as card counts;
+    it exists to label training data for the guess model and to show the
+    win chance what the opponent holds, and must never reach a player.
     """
 
     def decisions(self) -> Decisions: ...

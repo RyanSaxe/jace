@@ -74,6 +74,24 @@ def test_two_batches_with_one_seed_and_the_same_actions_play_identically() -> No
     assert finished_games > 0
 
 
+def test_the_arrays_of_a_decision_keep_their_values_after_later_steps() -> None:
+    # Play keeps every step's arrays without copying them, so no later step may write into them.
+    pool = _engine_pool()
+    batch = start_batch([_matchup(pool)] * 2, pool=pool, games=2, seed=3, boards=BOARD_ARRAYS)
+    rng = random.Random(2)
+    kept = batch.decisions()
+    arrays = {"games": kept.games, "seats": kept.seats, **kept.boards}
+    copies = {name: array.copy() for name, array in arrays.items()}
+
+    decisions = kept
+    for _ in range(50):
+        batch.act(_random_actions(decisions, rng))
+        decisions = batch.decisions()
+
+    for name, array in arrays.items():
+        assert np.array_equal(array, copies[name]), name
+
+
 def test_a_batch_plays_exactly_its_matchups_each_with_its_own_decks_and_then_holds_no_game() -> None:
     pool = _engine_pool()
     red = _deck(pool, land="Mountain", creatures=_RED_CREATURES)

@@ -72,7 +72,7 @@ from jace.tracking import (
     save_checkpoint,
     writing,
 )
-from jace.train import Collected, PlayerRule, to_device
+from jace.train import Collected, PlayerRule
 from jace.train.workers import play_on_workers, start_workers, stop_workers
 
 __all__ = ("main",)
@@ -449,12 +449,12 @@ def main(argv: Sequence[str]) -> None:
     )
 
     def play(matchups: Sequence[Matchup]) -> Collected:
-        # Reuses the last round's workers, a stalled one replaced, and moves the decisions to the models' device.
+        # Reuses the last round's workers, a stalled one replaced, and returns the decisions on the models' device.
         nonlocal workers
         collected, workers = play_on_workers(
-            workers, matchups, weights=play_weights(play_models), stall_seconds=arguments.stall_seconds
+            workers, matchups, weights=play_weights(play_models), stall_seconds=arguments.stall_seconds, device=device
         )
-        return replace(collected, rollout=to_device(collected.rollout, device))
+        return collected
 
     def iterate(iteration: int) -> dict[str, float]:
         # Each iteration hands the deck-score check it ends with to the next.

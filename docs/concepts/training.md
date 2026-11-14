@@ -62,14 +62,28 @@ interrupt it. Played in the training process, that step freezes the run.
 `jace.train.workers` plays the games in worker processes instead:
 
 ```python
-workers = start_workers(build_actor, count=6, seed=0)
-collected, workers = play_on_workers(workers, matchups, weights=weights, stall_seconds=60.0)
+workers = start_workers(build_actor, count=24, seed=0)
+collected, workers = play_on_workers(
+    workers, matchups, weights=weights, stall_seconds=60.0, device=torch.device("mps")
+)
 ```
 
 `build_actor` runs inside each worker and returns its models and how it
 starts a batch. `play_on_workers` deals the matchups out to the workers
 and sends each one the weights. Every worker plays its share to the end
-with `play_games`, in self-play.
+with `play_games`, in self-play. The decisions come back on `device`, the
+one the models train on: each worker's are moved there as soon as they
+arrive, while the other workers still play.
+
+Each worker runs on one thread. On a 16-core M3 Max, the play models'
+matrix products do not scale with cores: one process alone ran about
+10,000 of a typical size a second, and 4 to 16 processes together about
+22,000. The most decisions a second came from more workers than cores,
+each playing its whole share at once: 24 workers of 9 games played a
+block of 200 games in about 7.4 s, where 8 workers of 8 games took about
+9.6 s. Two threads a worker, or fewer games at once on more workers, were
+slower. The defaults of `--workers` and `--games-per-worker` are those
+24 and 9. Each worker holds about 1 GiB, so 24 take about 25 GiB.
 
 A worker that completes no step for `stall_seconds` is killed. The games of
 its share are lost and `collected.lost` counts them. The round returns what

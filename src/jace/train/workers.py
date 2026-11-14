@@ -19,7 +19,6 @@ over plain values.
 """
 
 import ctypes
-import io
 import multiprocessing
 import multiprocessing.connection
 import random
@@ -34,7 +33,7 @@ from torch import Tensor, nn
 
 from jace.engine import Matchup
 from jace.play import Boards, Guess, Guesser, Policy
-from jace.train.collect import Collected, StartBatch, join, play_games
+from jace.train.collect import Collected, StartBatch, join, play_games, to_device
 
 __all__ = (
     "Actor",
@@ -135,14 +134,21 @@ def stop_workers(workers: Sequence[Worker]) -> None:
 
 
 def play_on_workers(
-    workers: Sequence[Worker], matchups: Sequence[Matchup], *, weights: Weights, stall_seconds: float
+    workers: Sequence[Worker],
+    matchups: Sequence[Matchup],
+    *,
+    weights: Weights,
+    stall_seconds: float,
+    device: torch.device,
 ) -> tuple[Collected, tuple[Worker, ...]]:
     """Play every game of `matchups` on the workers and return the decisions and the workers.
 
     The matchups are dealt out to the workers in turn. Each worker loads
     `weights` and plays its share to the end in self-play. A game in the
-    result is known by its position in `matchups`. The workers that come
-    back are the ones to pass to the next round.
+    result is known by its position in `matchups`, and the decisions are on
+    `device`: each worker's are moved there as soon as they arrive, while
+    the other workers still play. The workers that come back are the ones
+    to pass to the next round.
 
     A worker that completes no step of its games for `stall_seconds` is
     killed, and a new process is started in its place for the next round.
@@ -151,22 +157,25 @@ def play_on_workers(
     actor. Raises `WorkerFailedError` when a process exits by itself, does
     not finish building in time, or when every worker was killed.
     """
-    packed = io.BytesIO()
-    torch.save({name: dict(state) for name, state in weights.items()}, packed)
+    # A tensor sent through a connection travels as a handle to shared memory, which every worker
+    # maps, so the main process sends a handle to each worker and not a copy of every weight.
+    shared = {name: dict(state) for name, state in weights.items()}
     ready = [_await_ready(worker, stall_seconds=stall_seconds) for worker in workers]
     # Matchup i goes to worker i % workers.
     shares = [tuple(range(first, len(matchups), len(ready))) for first in range(len(ready))]
     states: list[Worker] = [
-        _assign(worker, weights=packed.getvalue(), matchups=matchups, share=share) if share else worker
+        _assign(worker, weights=shared, matchups=matchups, share=share) if share else worker
         for worker, share in zip(ready, shares, strict=True)
     ]
-    played: list[tuple[tuple[int, ...], Collected]] = []
+    played: list[Collected] = []
     while any(isinstance(state, Playing) for state in states):
         multiprocessing.connection.wait(
             [state.child.connection for state in states if isinstance(state, Playing)], timeout=_WATCH_SECONDS
         )
         states = [
-            _advance(state, played=played, stall_seconds=stall_seconds) if isinstance(state, Playing) else state
+            _advance(state, played=played, stall_seconds=stall_seconds, device=device)
+            if isinstance(state, Playing)
+            else state
             for state in states
         ]
     if not played:
@@ -203,22 +212,22 @@ def _await_ready(worker: Worker, *, stall_seconds: float) -> Ready:
     return Ready(child=worker.child)
 
 
-def _assign(worker: Ready, *, weights: bytes, matchups: Sequence[Matchup], share: tuple[int, ...]) -> Playing:
+def _assign(worker: Ready, *, weights: Weights, matchups: Sequence[Matchup], share: tuple[int, ...]) -> Playing:
     # Ready -> Playing.
     worker.child.connection.send((weights, [matchups[position] for position in share]))
     return Playing(child=worker.child, share=share, steps=worker.child.steps.value, since=time.monotonic())
 
 
-def _advance(worker: Playing, *, played: list[tuple[tuple[int, ...], Collected]], stall_seconds: float) -> Worker:
-    # Playing -> Ready once the worker sends its games, which are added to `played` with its
-    # share. Playing -> Playing while its step count rises. Playing -> Starting, as a new
-    # process, once the count has not risen for `stall_seconds`.
+def _advance(worker: Playing, *, played: list[Collected], stall_seconds: float, device: torch.device) -> Worker:
+    # Playing -> Ready once the worker sends its games, which are added to `played` as games of
+    # the round on `device`. Playing -> Playing while its step count rises. Playing -> Starting,
+    # as a new process, once the count has not risen for `stall_seconds`.
     if worker.child.connection.poll():
         collected = _receive(worker.child.connection)
         if collected is None:
             reason = "said it was ready in the middle of a round"
             raise WorkerFailedError(reason)
-        played.append((worker.share, collected))
+        played.append(_in_round(collected, share=worker.share, device=device))
         return Ready(child=worker.child)
     now = time.monotonic()
     steps = worker.child.steps.value
@@ -250,18 +259,26 @@ def _receive(connection: Connection) -> Collected | None:
     raise WorkerFailedError(reason)
 
 
-def _combined(played: Sequence[tuple[tuple[int, ...], Collected]], *, games: int) -> Collected:
-    # Joins the workers' games, giving each game its position in the round's list in place of
-    # its position in its worker's share. Whatever no worker returned is counted as lost.
-    rollouts = [
-        replace(collected.rollout, games=torch.tensor(share)[collected.rollout.games]) for share, collected in played
-    ]
-    results = [replace(game, game=share[game.game]) for share, collected in played for game in collected.games]
+def _in_round(collected: Collected, *, share: tuple[int, ...], device: torch.device) -> Collected:
+    # One worker's games on `device`, each game known by its position in the round's list in place
+    # of its position in the worker's share.
+    rollout = replace(collected.rollout, games=torch.tensor(share)[collected.rollout.games])
+    return replace(
+        collected,
+        rollout=to_device(rollout, device),
+        games=tuple(replace(game, game=share[game.game]) for game in collected.games),
+    )
+
+
+def _combined(played: Sequence[Collected], *, games: int) -> Collected:
+    # Joins the workers' games. A worker plays every game of its share to an end, finished or
+    # abandoned, so whatever no worker returned is counted as lost.
+    returned = sum(len(collected.games) + collected.abandoned for collected in played)
     return Collected(
-        rollout=join(rollouts),
-        games=tuple(results),
-        abandoned=sum(collected.abandoned for _, collected in played),
-        lost=games - sum(len(share) for share, _ in played),
+        rollout=join([collected.rollout for collected in played]),
+        games=tuple(game for collected in played for game in collected.games),
+        abandoned=sum(collected.abandoned for collected in played),
+        lost=games - returned,
     )
 
 
@@ -281,7 +298,7 @@ def _work(connection: Connection, steps: ctypes.c_int64, *, build: BuildActor, s
     connection.send(None)
     while True:
         weights, matchups = connection.recv()
-        for name, state in torch.load(io.BytesIO(weights), weights_only=True).items():
+        for name, state in weights.items():
             actor.modules[name].load_state_dict(state)
         connection.send(
             play_games(

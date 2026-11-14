@@ -166,8 +166,8 @@ class NotCardVectorsError(ValueError):
 
 
 def add_play_flags(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--workers", type=int, default=6, help="processes that play games")
-    parser.add_argument("--games-per-worker", type=int, default=8, help="games each worker plays at once")
+    parser.add_argument("--workers", type=int, default=24, help="processes that play games, one thread each")
+    parser.add_argument("--games-per-worker", type=int, default=9, help="games each worker plays at once")
     parser.add_argument(
         "--stall-seconds", type=float, default=60.0, help="a worker that completes no step for this long is replaced"
     )
