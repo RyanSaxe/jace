@@ -54,6 +54,11 @@ Magic hides the opponent's hand and deck. A separate guess model predicts
 both at every decision, and the player reads the guess as part of its
 input.
 
+The guess starts from a table of what the player can know: the decks the
+opponent may hold, less the cards it has shown or revealed. The model
+learns only corrections to that table, so before any training its guess is
+already the table's.
+
 The guess model also reads its own earlier guesses from the same
 game, so what it worked out on turn 2 is still there on turn 8.
 

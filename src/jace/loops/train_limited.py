@@ -380,7 +380,10 @@ def main(argv: Sequence[str]) -> None:
 
     def play(matchups: Sequence[Matchup]) -> Collected:
         # The workers of one round are the ones the round before left, with any stalled one replaced.
+        # Every opponent of the round holds one of its decks, so they are the guess model's field
+        # while the workers play the games and while it learns from them afterwards.
         nonlocal workers
+        play_models.guess.set_field([deck for matchup in matchups for deck in matchup])
         collected, workers = play_on_workers(
             workers, matchups, weights=play_weights(play_models), stall_seconds=arguments.stall_seconds
         )

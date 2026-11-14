@@ -83,18 +83,23 @@ def draw_deals(decks: Sequence[Deck], *, count: int, seed: int) -> list[Deal]:
     return deals
 
 
-def model_player(player: PlayerModel, guess: GuessModel, *, history: int, action: ActionChoice) -> Player:
+def model_player(
+    player: PlayerModel, guess: GuessModel, *, decks: Sequence[Deck], history: int, action: ActionChoice
+) -> Player:
     """Freeze the two models as they are now into a player for `jace.engine.scoring`.
 
     The player holds its own copies on the CPU, so a match scores the
     weights of this moment while training goes on, and the copies can be
     sent to the processes that play the games whatever device the models
-    train on. `history` is how many earlier guesses the guess model is
-    shown, and `action` is whether the player samples its action or takes
-    its top one.
+    train on. The copy of the guess model takes `decks`, the decks its
+    opponents are dealt from, as its field, and the model being trained
+    keeps its own. `history` is how many earlier guesses the guess model
+    is shown, and `action` is whether the player samples its action or
+    takes its top one.
     """
     frozen_player = copy.deepcopy(player).cpu().requires_grad_(requires_grad=False)
     frozen_guess = copy.deepcopy(guess).cpu().requires_grad_(requires_grad=False)
+    frozen_guess.set_field(decks)
     cards = frozen_player.embedding.cards
     return functools.partial(
         model_seat,

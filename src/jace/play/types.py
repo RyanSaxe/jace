@@ -20,7 +20,8 @@ type Boards = Mapping[str, Tensor]
 
 @dataclass(frozen=True, slots=True)
 class Guess:
-    # deck: [..., cards], each card's share of the opponent's unseen cards. Rows sum to 1.
+    # deck: [..., cards], each card's share of the opponent's unseen cards. Rows sum to 1, or are all
+    # zero when the opponent has no unseen card.
     deck: Tensor
     # hand: [..., cards], the chance the opponent holds at least one copy of each card.
     hand: Tensor

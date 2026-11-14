@@ -4,9 +4,13 @@ The boards in `tests/data/manabot_v10_boards.npz` are three decisions from
 real games, encoded by the engine adapter at input version 10, each with
 permanents, events and the acting seat's decklist on the board. No
 permanent on them blocks or is attached to anything, so the test of those
-links adds one. The models are built from the layout the adapter reports,
-and the tests call them only through `jace.play`, so the token layout and
-the network can change without touching them.
+links adds one. On board 0 the opponent, with 6 cards in hand and 28 in
+its library, shows five copies of card 267 and one of card 302 on the
+battlefield, and the guess model's field is one 40-card deck that holds
+exactly those five and two of card 302. The models are built from the
+layout the adapter reports, and the tests call them only through
+`jace.play`, so the token layout and the network can change without
+touching them.
 """
 
 from pathlib import Path
@@ -26,6 +30,9 @@ ENGINE_DEFINITIONS = 480
 CARDS = 480
 MORE_CARDS = 520
 CARD_WIDTH = 16
+SHOWN_CARD = 267
+CARD_LEFT_ONCE = 302
+FIELD_DECK = (*([SHOWN_CARD] * 5), *([CARD_LEFT_ONCE] * 2), *range(33))
 
 
 def _real_boards() -> dict[str, Tensor]:
@@ -49,7 +56,18 @@ def _models(cards: int) -> tuple[PlayerModel, GuessModel]:
         deck_guess_cards=8,
     )
     guesser = GuessModel(embedding, engine_to_card=engine_to_card, layout=board_layout(), width=64, layers=2, heads=4)
+    guesser.set_field([FIELD_DECK])
     return player.eval(), guesser.eval()
+
+
+def _move_weights(guesser: GuessModel, *, seed: int) -> None:
+    # Moves each weight a little at random, as training would, so the corrections are not zero. An
+    # untrained model gives every card of the field with one copy left the same chance. The card table
+    # has no weights, so only the model's own move.
+    generator = torch.Generator().manual_seed(seed)
+    with torch.no_grad():
+        for parameter in guesser.parameters():
+            parameter.add_(torch.randn(parameter.shape, generator=generator) * 0.1)
 
 
 def _some_guess(shape: tuple[int, ...], *, seed: int) -> Guess:
@@ -191,6 +209,9 @@ def test_models_score_a_larger_pool_and_old_cards_keep_their_scores() -> None:
     player, guesser = _models(CARDS)
     larger_player, larger_guesser = _models(CARDS)
     larger_player.embedding = larger_guesser.embedding = _models(MORE_CARDS)[0].embedding
+    larger_guesser.set_field([FIELD_DECK])
+    _move_weights(guesser, seed=3)
+    _move_weights(larger_guesser, seed=3)
     no_mask = torch.ones(3, 0, dtype=torch.bool)
 
     with torch.no_grad():
@@ -209,3 +230,36 @@ def test_models_score_a_larger_pool_and_old_cards_keep_their_scores() -> None:
     assert torch.allclose(larger_guess.hand[:, :CARDS], guess.hand, atol=1e-5)
     assert torch.allclose(larger_guess.deck.sum(dim=-1), torch.ones(3), atol=1e-5)
     assert torch.allclose(larger_logits, logits, atol=1e-4)
+
+
+def test_the_untrained_guess_is_the_table_of_the_field_less_the_cards_seen() -> None:
+    boards = _real_boards()
+    _, guesser = _models(CARDS)
+    earlier = Earlier(guesses=_some_guess((3, 2, CARDS), seed=2), mask=torch.ones(3, 2, dtype=torch.bool))
+
+    with torch.no_grad():
+        guess = guesser.guess(boards, earlier)
+        table = guesser.table(boards)
+
+    assert torch.allclose(guess.deck, table.deck, atol=1e-6)
+    assert torch.allclose(guess.hand, table.hand, atol=1e-6)
+    # Of the deck's 40 cards the opponent has shown 6, so 34 are hidden, 6 of them in its hand.
+    assert table.deck[0, CARD_LEFT_ONCE].item() == pytest.approx(1 / 34)
+    assert table.hand[0, CARD_LEFT_ONCE].item() == pytest.approx(6 / 34)
+
+
+def test_a_card_whose_copies_have_all_been_seen_gets_no_share_and_no_chance_whatever_the_weights() -> None:
+    boards = _real_boards()
+    _, guesser = _models(CARDS)
+    _move_weights(guesser, seed=3)
+    earlier = Earlier(guesses=_some_guess((3, 2, CARDS), seed=2), mask=torch.ones(3, 2, dtype=torch.bool))
+
+    with torch.no_grad():
+        guess = guesser.guess(boards, earlier)
+        table = guesser.table(boards)
+
+    assert guess.deck[0, SHOWN_CARD].item() == guess.hand[0, SHOWN_CARD].item() == 0.0
+    assert guess.deck[0, CARD_LEFT_ONCE].item() > 0.0
+    assert guess.hand[0, CARD_LEFT_ONCE].item() > 0.0
+    assert not torch.allclose(guess.hand, table.hand, atol=1e-3)
+    assert torch.allclose(guess.deck.sum(dim=-1), torch.ones(3), atol=1e-5)
