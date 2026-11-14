@@ -8,7 +8,6 @@ the `Policy` and `Guesser` function types, and training also on the
 `WinChance` type, never on a model class.
 """
 
-from jace.play.device import guesser_on, policy_on, win_chance_on
 from jace.play.guess import FieldNotSetError, GuessModel, TooManyCopiesError
 from jace.play.player import PlayerModel, as_boards, random_policy
 from jace.play.tokens import BOARD_ARRAYS
@@ -29,8 +28,5 @@ __all__ = (
     "WinChance",
     "WinChanceModel",
     "as_boards",
-    "guesser_on",
-    "policy_on",
     "random_policy",
-    "win_chance_on",
 )

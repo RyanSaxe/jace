@@ -68,7 +68,7 @@ uv run python -m jace.loops.train_limited --help
 | `check`       | The deck-score check the iteration before returned, or `FIRST_CHECK` |
 | `dials`       | This iteration's values from the schedule                     |
 | `other_seats` | Drafters for seats the learner does not draft, such as past versions |
-| `play`        | A function that plays a list of matchups to the end and returns the decisions |
+| `play`        | A function that plays a list of matchups to the end and returns the decisions, on the device the models train on |
 
 The player, its win chance and the guess model arrive as functions, and
 the games through `play`, so the same loop runs on manabot in worker
