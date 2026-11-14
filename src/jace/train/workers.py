@@ -19,7 +19,6 @@ over plain values.
 """
 
 import ctypes
-import io
 import multiprocessing
 import multiprocessing.connection
 import random
@@ -158,13 +157,14 @@ def play_on_workers(
     actor. Raises `WorkerFailedError` when a process exits by itself, does
     not finish building in time, or when every worker was killed.
     """
-    packed = io.BytesIO()
-    torch.save({name: dict(state) for name, state in weights.items()}, packed)
+    # A tensor sent through a connection travels as a handle to shared memory, which every worker
+    # maps, so the main process sends a handle to each worker and not a copy of every weight.
+    shared = {name: dict(state) for name, state in weights.items()}
     ready = [_await_ready(worker, stall_seconds=stall_seconds) for worker in workers]
     # Matchup i goes to worker i % workers.
     shares = [tuple(range(first, len(matchups), len(ready))) for first in range(len(ready))]
     states: list[Worker] = [
-        _assign(worker, weights=packed.getvalue(), matchups=matchups, share=share) if share else worker
+        _assign(worker, weights=shared, matchups=matchups, share=share) if share else worker
         for worker, share in zip(ready, shares, strict=True)
     ]
     played: list[Collected] = []
@@ -212,7 +212,7 @@ def _await_ready(worker: Worker, *, stall_seconds: float) -> Ready:
     return Ready(child=worker.child)
 
 
-def _assign(worker: Ready, *, weights: bytes, matchups: Sequence[Matchup], share: tuple[int, ...]) -> Playing:
+def _assign(worker: Ready, *, weights: Weights, matchups: Sequence[Matchup], share: tuple[int, ...]) -> Playing:
     # Ready -> Playing.
     worker.child.connection.send((weights, [matchups[position] for position in share]))
     return Playing(child=worker.child, share=share, steps=worker.child.steps.value, since=time.monotonic())
@@ -298,7 +298,7 @@ def _work(connection: Connection, steps: ctypes.c_int64, *, build: BuildActor, s
     connection.send(None)
     while True:
         weights, matchups = connection.recv()
-        for name, state in torch.load(io.BytesIO(weights), weights_only=True).items():
+        for name, state in weights.items():
             actor.modules[name].load_state_dict(state)
         connection.send(
             play_games(
