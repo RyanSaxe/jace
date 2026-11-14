@@ -50,39 +50,52 @@ def encode_real(encoder: nn.TransformerEncoder, sequence: Tensor, *, mask: Tenso
     counts = mask.sum(dim=1)
     # One read from the device gives both sizes the packed layout needs.
     longest, total = torch.stack((counts.max(), counts.sum())).tolist()
-    # Each real token's place in `sequence`, row after row, and its place among its row's real tokens.
+    # Each real token's place in `sequence`, row after row, its row, and its place among its row's real tokens.
     sources = mask.flatten().nonzero_static(size=total).squeeze(1)
+    rows = sources // length
     ranks = mask.cumsum(dim=1).flatten()[sources] - 1
-    # Attention reads a row's tokens from the first slots of a padded [b, longest] layout.
-    slots = sources // length * longest + ranks
     filled = torch.arange(longest, device=mask.device) < counts[:, None]
     packed = sequence.reshape(batch * length, width)[sources]
-    encoded = _encode_packed(encoder, packed, slots=slots, filled=filled)
+    encoded = _encode_packed(encoder, packed, rows=rows, ranks=ranks, filled=filled)
     return sequence.new_zeros(batch * length, width).index_put((sources,), encoded).view(batch, length, width)
 
 
-def _encode_packed(encoder: nn.TransformerEncoder, packed: Tensor, *, slots: Tensor, filled: Tensor) -> Tensor:
-    # packed: float [tokens, width]. slots: int64 [tokens], each token's place in the padded layout.
-    # filled: bool [b, longest], true for a slot that holds a token. Each step is the one in
-    # `nn.TransformerEncoder.forward` with pre-norm layers, which `transformer` builds.
+def _encode_packed(
+    encoder: nn.TransformerEncoder, packed: Tensor, *, rows: Tensor, ranks: Tensor, filled: Tensor
+) -> Tensor:
+    # packed: float [tokens, width]. rows, ranks: int64 [tokens], each token's row and its place among
+    # the row's real tokens. filled: bool [b, longest], true for a place that holds a token. Each step is
+    # the one in `nn.TransformerEncoder.forward` with pre-norm layers, which `transformer` builds.
     encoded = packed
     for layer in encoder.layers:
-        attended = _attention(layer.self_attn, layer.norm1(encoded), slots=slots, filled=filled)
+        attended = _attention(layer.self_attn, layer.norm1(encoded), rows=rows, ranks=ranks, filled=filled)
         encoded = encoded + layer.dropout1(attended)
         expanded = layer.dropout(layer.activation(layer.linear1(layer.norm2(encoded))))
         encoded = encoded + layer.dropout2(layer.linear2(expanded))
     return encoded if encoder.norm is None else encoder.norm(encoded)
 
 
-def _attention(attention: nn.MultiheadAttention, packed: Tensor, *, slots: Tensor, filled: Tensor) -> Tensor:
-    # What `attention` gives each packed token when it attends to the tokens of its own row.
+def _attention(
+    attention: nn.MultiheadAttention, packed: Tensor, *, rows: Tensor, ranks: Tensor, filled: Tensor
+) -> Tensor:
+    # What `attention` gives each packed token when it attends to the tokens of its own row. Its queries,
+    # keys and values are each laid out as a contiguous [b, heads, longest, depth] block, a row's tokens in
+    # its first places, because scaled_dot_product_attention on MPS is slower on permuted views of one tensor.
     batch, longest = filled.shape
-    width = packed.shape[-1]
+    tokens, width = packed.shape
     heads = attention.num_heads
-    projected = functional.linear(packed, attention.in_proj_weight, attention.in_proj_bias)  # [tokens, 3 * width]
-    padded = projected.new_zeros(batch * longest, 3 * width).index_put((slots,), projected)
-    query, key, value = padded.view(batch, longest, 3, heads, width // heads).permute(2, 0, 3, 1, 4)
+    depth = width // heads
+    block = batch * heads * longest
+    # places: int64 [tokens, heads], where each of a token's heads goes in a block.
+    places = ((rows * heads)[:, None] + torch.arange(heads, device=rows.device)) * longest + ranks[:, None]
+    # The projection holds each token's query heads, then its key heads, then its value heads.
+    blocks = torch.arange(3, device=rows.device)[:, None] * block
+    projected = functional.linear(packed, attention.in_proj_weight, attention.in_proj_bias)
+    laid_out = projected.new_zeros(3 * block, depth).index_copy(
+        0, (places[:, None] + blocks).flatten(), projected.view(tokens * 3 * heads, depth)
+    )
+    query, key, value = laid_out.view(3, batch, heads, longest, depth)
     mixed = functional.scaled_dot_product_attention(
         query, key, value, attn_mask=filled[:, None, None], dropout_p=attention.dropout if attention.training else 0.0
-    )  # [b, heads, longest, width / heads]
-    return attention.out_proj(mixed.transpose(1, 2).reshape(batch * longest, width)[slots])
+    )  # [b, heads, longest, depth]
+    return attention.out_proj(mixed.reshape(block, depth)[places.flatten()].view(tokens, width))
