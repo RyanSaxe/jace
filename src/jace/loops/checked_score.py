@@ -5,7 +5,12 @@ humans' hands. Self-play decks win in the hands of the current player, so a
 copy of the score learns from the decks the loop plays, from the first
 iteration, while the human-trained score stays frozen. Before the learning
 copy trains on an iteration's decks, both copies predict those decks'
-records, and that held-out log loss is the test. The deck search reads the
+records, and that held-out log loss is the test. Every self-play game has
+one winner, so an iteration's decks win half their games on average, while
+the human decks the frozen score was fit to won more. Each copy is tested
+with its mean logit over the decks moved to zero, so the test compares how
+the two rank decks, which is what the search asks of them, and a copy
+cannot earn the switch by learning that average alone. The deck search reads the
 human-trained score until the learning copy's mean test loss over the last
 `switch_iterations` iterations is lower by `switch_margin`, and then reads
 the learning copy for good. The switch is one-way so the search cannot
@@ -79,6 +84,11 @@ class ScoreCheck:
 FIRST_CHECK = ScoreCheck(recent=(), human_losses=(), learning_losses=(), reads_learning=False)
 
 
+def _centered(logits: Tensor, *, games: Tensor) -> Tensor:
+    # The logits less their mean over the decks, each deck weighed by its games.
+    return logits - (logits * games).sum() / games.sum()
+
+
 def check_scores(
     check: ScoreCheck, *, played: PlayedDecks, human: Scorer, learning: Scorer, rule: ScoreRule
 ) -> tuple[ScoreCheck, Metrics]:
@@ -86,7 +96,8 @@ def check_scores(
 
     Call it before the learning copy trains on `played`, so the test is on
     decks it has not seen. `human` and `learning` return the logit of
-    winning a game. The new check holds `played` in its window and the two
+    winning a game, and each is tested with its mean logit over the decks
+    moved to zero. The new check holds `played` in its window and the two
     losses in its history, and reads the learning copy if it already did or
     if the learning copy's mean loss over the last `rule.switch_iterations`
     iterations is below the human-trained one's by `rule.switch_margin`.
@@ -96,8 +107,10 @@ def check_scores(
         nothing: dict[str, float] = {}
         return check, nothing
     with torch.no_grad():
-        human_loss = float(score_loss(human(played.decks), wins=played.wins, games=played.games))
-        learning_loss = float(score_loss(learning(played.decks), wins=played.wins, games=played.games))
+        human_logits = _centered(human(played.decks), games=played.games)
+        learning_logits = _centered(learning(played.decks), games=played.games)
+        human_loss = float(score_loss(human_logits, wins=played.wins, games=played.games))
+        learning_loss = float(score_loss(learning_logits, wins=played.wins, games=played.games))
     human_losses = (*check.human_losses, human_loss)[-rule.switch_iterations :]
     learning_losses = (*check.learning_losses, learning_loss)[-rule.switch_iterations :]
     gain = (sum(human_losses) - sum(learning_losses)) / len(human_losses)

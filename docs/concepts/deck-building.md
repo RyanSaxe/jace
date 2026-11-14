@@ -67,7 +67,11 @@ The deck score trained on human decks predicts how humans' decks did in
 humans' hands. The loop keeps that score frozen and trains a learning copy
 of it from the first iteration. Before the learning copy trains on an
 iteration's decks, both predict those decks' records, and their log loss
-on them is that iteration's test.
+on them is that iteration's test. Every self-play game has one winner, so
+an iteration's decks win half their games on average, while the human
+decks the frozen score was fit to won more. Each score is tested with its
+mean logit over the decks moved to zero, so the test compares how the two
+rank decks, and learning that average alone does not earn the switch.
 
 The search reads the human-trained score until the learning copy's mean
 test loss over the last `--switch-iterations` iterations is below it by

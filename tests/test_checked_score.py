@@ -20,9 +20,11 @@ _GAMES = 200.0
 _RULE = ScoreRule(window=2, passes=1, pull=1.0, switch_iterations=3, switch_margin=0.01)
 
 
-def _iterations(chances: Tensor, *, believed: Tensor, count: int, check: ScoreCheck) -> list[ScoreCheck]:
-    # Runs `count` iterations of the check on decks that win at `chances`, scored by an even guess and by a
-    # learning score that predicts `believed`.
+def _iterations(
+    chances: Tensor, *, believed: Tensor, count: int, check: ScoreCheck, human_believes: float = 0.5
+) -> list[ScoreCheck]:
+    # Runs `count` iterations of the check on decks that win at `chances`, scored by a human-trained score that
+    # gives every deck `human_believes` and by a learning score that predicts `believed`.
     generator = torch.Generator().manual_seed(0)
     decks = torch.eye(_DECKS)
     checks: list[ScoreCheck] = []
@@ -32,7 +34,7 @@ def _iterations(chances: Tensor, *, believed: Tensor, count: int, check: ScoreCh
         check, _ = check_scores(
             check,
             played=played,
-            human=lambda decks: torch.zeros(len(decks)),
+            human=lambda decks: torch.full((len(decks),), human_believes).logit(),
             learning=lambda _decks: believed.logit(),
             rule=_RULE,
         )
@@ -50,6 +52,15 @@ def test_the_search_switches_only_once_the_learning_score_is_better_by_the_margi
     assert [check.reads_learning for check in clearly_better] == [False, False, True, True]
     assert not any(check.reads_learning for check in barely_better)
     assert len(clearly_better[-1].recent) == _RULE.window
+
+
+def test_a_learning_score_that_only_corrects_the_human_scores_average_does_not_earn_the_switch() -> None:
+    # Every deck wins half its games. The human-trained score gives every deck 0.65, which costs it about
+    # 0.05 nats a game, five times the margin, but it ranks the decks no worse than the learning score's 0.5.
+    even = torch.full((_DECKS,), 0.5)
+    checks = _iterations(even, believed=even, count=4, check=FIRST_CHECK, human_believes=0.65)
+
+    assert not any(check.reads_learning for check in checks)
 
 
 def test_the_switch_is_one_way() -> None:
