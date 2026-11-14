@@ -21,7 +21,7 @@ from jace.cards import CardPool, CardRecord, CardTable, Rarity, own_parameters
 from jace.decks import BuildRules, DeckBuilderModel, DeckScore
 from jace.draft import DrafterModel, DraftFormat
 from jace.engine.toy import HAND_SIZE, TOY_CARDS, ToyBatch
-from jace.loops import Learners, LimitedSetup, balanced_matchups, limited_iteration, phased_schedule
+from jace.loops import Learners, LimitedFormat, LimitedSetup, balanced_matchups, limited_iteration, phased_schedule
 from jace.play import Boards, Earlier, Guess
 from jace.train import PlayerRule, PlayGames, play_games
 
@@ -64,8 +64,13 @@ def _toy_loop() -> _Toy:
     trained = {"player": player, "guess": guess, "drafter": drafter, "deck_builder": builder, "deck_score": score}
     setup = LimitedSetup(
         pool=pool,
-        draft_format=DraftFormat(seats=2, rounds=1, picks_per_round=3),
-        booster=[{Rarity.COMMON: 1.0}] * 4,
+        limited_format=LimitedFormat(
+            draft=DraftFormat(seats=2, rounds=1, picks_per_round=3),
+            booster=[{Rarity.COMMON: 1.0}] * 4,
+            deck_size=5,
+            min_lands=2,
+            max_lands=3,
+        ),
         booster_cards={Rarity.COMMON: pool.of_rarity(Rarity.COMMON)},
         rules=BuildRules(size=5, basics=(0,), nonbasic_lands=frozenset(), min_lands=2, max_lands=3),
         pods=4,

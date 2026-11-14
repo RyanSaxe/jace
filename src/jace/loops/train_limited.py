@@ -34,7 +34,7 @@ from torch import nn
 from jace.cards import CardPool, CardTable, Rarity, own_parameters
 from jace.data import read_set
 from jace.decks import DeckBuilderModel, DeckScore
-from jace.draft import TLA_PLAY_BOOSTER, DrafterModel, DraftFormat
+from jace.draft import DrafterModel
 from jace.engine import Matchup
 from jace.loops.entry_points import (
     PlayArguments,
@@ -44,7 +44,6 @@ from jace.loops.entry_points import (
     build_play_models,
     card_inputs,
     device_named,
-    limited_rules,
     load_card_table,
     play_actor,
     play_weights,
@@ -53,6 +52,7 @@ from jace.loops.entry_points import (
     set_cards,
     start_run,
 )
+from jace.loops.formats import deck_rules, limited_format
 from jace.loops.limited import Learners, LimitedSetup, limited_iteration
 from jace.loops.matches import Harness
 from jace.loops.schedules import phased_schedule
@@ -72,8 +72,6 @@ from jace.train.workers import play_on_workers, start_workers, stop_workers
 
 __all__ = ("main",)
 
-_SEATS_IN_A_POD = 8
-_BOOSTERS_EACH = 3
 # Ataraxos's player rule. Its `keep_quantile`, `normalize` and `spread` are replaced by the arguments and the schedule.
 _PLAYER_RULE = PlayerRule(
     clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.75, keep_floor=0.0, value_weight=0.5, normalize=True
@@ -130,7 +128,7 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
         "--checkpoint-every", type=int, default=0, help="also save every checkpoint each N iterations; 0 for never"
     )
     parser.add_argument("--resume", type=Path, help="a stopped run folder of this command to continue from")
-    parser.add_argument("--pods", type=int, default=2, help="eight-seat drafts per iteration")
+    parser.add_argument("--pods", type=int, default=2, help="drafts per iteration, each with every seat of the format")
     parser.add_argument(
         "--blocks", type=int, default=4, help="blocks of games per iteration; the player updates after each"
     )
@@ -317,11 +315,11 @@ def main(argv: Sequence[str]) -> None:
     cards = set_cards(data)
     pool = cards.pool
     playable = {rarity: [card for card in pool.of_rarity(rarity) if pool[card].program] for rarity in Rarity}
-    draft_format = DraftFormat(seats=_SEATS_IN_A_POD, rounds=_BOOSTERS_EACH, picks_per_round=len(TLA_PLAY_BOOSTER))
+    limited = limited_format(arguments.set_code)
     embedding, embedding_ref = load_card_table(
         arguments.embedding_run, inputs=card_inputs(data, cards, data_dir=arguments.data_dir)
     )
-    models = _build_models(arguments, embedding, pool=pool, picks=draft_format.rounds * draft_format.picks_per_round)
+    models = _build_models(arguments, embedding, pool=pool, picks=limited.picks)
     inputs = (embedding_ref, *_load_inputs(arguments, models))
     # The copy is taken before a resumed run's own drafter is loaded, so the pull stays toward
     # the drafter trained on human picks. It keeps its own copy of the card table.
@@ -340,10 +338,9 @@ def main(argv: Sequence[str]) -> None:
     }
     setup = LimitedSetup(
         pool=pool,
-        draft_format=draft_format,
-        booster=TLA_PLAY_BOOSTER,
+        limited_format=limited,
         booster_cards=playable,
-        rules=limited_rules(cards),
+        rules=deck_rules(limited, cards),
         pods=arguments.pods,
         proposals=arguments.proposals,
         search_rounds=arguments.search_rounds,

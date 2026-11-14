@@ -24,7 +24,7 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
-from jace.cards import FIRST_PROGRAM_TOKEN, CardEncoder, CardInputs, CardPool, CardTable, Deck, Rarity, frozen_table
+from jace.cards import FIRST_PROGRAM_TOKEN, CardEncoder, CardInputs, CardPool, CardTable, Deck, frozen_table
 from jace.data import (
     TEXT_MODEL,
     SetCards,
@@ -37,7 +37,6 @@ from jace.data import (
     text_vectors,
 )
 from jace.data.hugging_face import hugging_face_encoder
-from jace.decks import BuildRules
 from jace.engine import GameBatch, Matchup
 from jace.engine.manabot import (
     board_layout,
@@ -76,7 +75,6 @@ __all__ = (
     "card_inputs",
     "device_named",
     "land_and_spell_rates",
-    "limited_rules",
     "load_card_table",
     "play_actor",
     "play_weights",
@@ -95,11 +93,6 @@ _ENGINE_SEED_BITS = 31
 # A scoring game that takes longer than this many seconds is recorded as hung.
 _GAME_SECONDS = 120.0
 _RANGE_RESAMPLES = 1000
-
-# A limited deck is 40 cards. 99.8% of the human Avatar decks hold 15 to 18 lands.
-_DECK_SIZE = 40
-_MIN_LANDS = 15
-_MAX_LANDS = 18
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,18 +235,6 @@ def playable_decks(decks: Tensor, *, pool: CardPool, count: int) -> list[Deck]:
     playable = torch.tensor([bool(pool[card].program) for card in range(len(pool))])
     usable = decks[(decks[:, ~playable] == 0).all(dim=1)][:count]
     return [tuple(torch.repeat_interleave(torch.arange(len(pool)), row.long()).tolist()) for row in usable]
-
-
-def limited_rules(cards: SetCards) -> BuildRules:
-    is_land = cards.printed[:, cards.printed_names.index("type_land")] > 0  # bool [cards]
-    basics = cards.pool.of_rarity(Rarity.BASIC)
-    return BuildRules(
-        size=_DECK_SIZE,
-        basics=basics,
-        nonbasic_lands=frozenset(is_land.nonzero().squeeze(1).tolist()) - frozenset(basics),
-        min_lands=_MIN_LANDS,
-        max_lands=_MAX_LANDS,
-    )
 
 
 def set_cards(data: SetData) -> SetCards:

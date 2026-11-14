@@ -49,11 +49,11 @@ from jace.loops.entry_points import (
     add_run_flags,
     card_inputs,
     device_named,
-    limited_rules,
     load_card_table,
     set_cards,
     start_run,
 )
+from jace.loops.formats import deck_rules, limited_format
 from jace.loops.schedules import RateScale, current_rates, scale_rates, warm_up_then_decay
 from jace.tracking import Running, log_update, save_checkpoint
 from jace.tracking import writing as writing_run
@@ -347,7 +347,7 @@ def main(argv: Sequence[str]) -> None:
     decks = load_decks(
         data.games, pool=cards.pool, cache_dir=arguments.data_dir, held_out_share=arguments.held_out_share
     )
-    rules = limited_rules(cards)
+    rules = deck_rules(limited_format(arguments.set_code), cards)
     embedding, embedding_ref = load_card_table(
         arguments.embedding_run, inputs=card_inputs(data, cards, data_dir=arguments.data_dir)
     )

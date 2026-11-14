@@ -39,10 +39,8 @@ from jace.decks import (
     writing_steps,
 )
 from jace.draft import (
-    BoosterSpec,
     Drafter,
     DrafterModel,
-    DraftFormat,
     DraftRecord,
     SeatView,
     model_drafter,
@@ -51,6 +49,7 @@ from jace.draft import (
     view_tensors,
 )
 from jace.engine import SEATS
+from jace.loops.formats import LimitedFormat
 from jace.loops.schedules import Dials
 from jace.play import Guesser, Policy
 from jace.tracking import ModelName
@@ -81,7 +80,9 @@ _EVEN_ODDS = 0.5
 class LimitedSetup:
     """Everything about a run that stays fixed from one iteration to the next.
 
-    `booster_cards` lists the cards a booster may hold, by rarity. `pods`
+    `limited_format` sizes the drafts, and `rules` are the deck rules
+    `deck_rules` derives from it for the card pool. `booster_cards` lists
+    the cards a booster may hold, by rarity. `pods`
     drafts are run per iteration, and each pool gets `proposals`
     candidate decks improved for `search_rounds` rounds. Every deck then
     plays `blocks` blocks of `games_per_block` games each, and the player
@@ -94,8 +95,7 @@ class LimitedSetup:
     """
 
     pool: CardPool
-    draft_format: DraftFormat
-    booster: BoosterSpec
+    limited_format: LimitedFormat
     booster_cards: Mapping[Rarity, Sequence[CardId]]
     rules: BuildRules
     pods: int
@@ -149,16 +149,16 @@ def _draft(
     setup: LimitedSetup, *, drafter: Drafter, other_seats: Sequence[Drafter], rng: random.Random
 ) -> tuple[DraftRecord, ...]:
     # The learner's drafter fills every seat that `other_seats` does not.
-    seats = setup.draft_format.seats
+    seats = setup.limited_format.draft.seats
     drafters = [*([drafter] * (seats - len(other_seats))), *other_seats]
     boosters = [
         [
-            [open_booster(setup.booster, setup.booster_cards, rng=rng) for _ in range(seats)]
-            for _ in range(setup.draft_format.rounds)
+            [open_booster(setup.limited_format.booster, setup.booster_cards, rng=rng) for _ in range(seats)]
+            for _ in range(setup.limited_format.draft.rounds)
         ]
         for _ in range(setup.pods)
     ]
-    return run_drafts(setup.draft_format, boosters, drafters=drafters)
+    return run_drafts(setup.limited_format.draft, boosters, drafters=drafters)
 
 
 def _build(
@@ -252,7 +252,7 @@ def _update_drafter(
     dials: Dials,
 ) -> Metrics:
     # win_rates, games_played: [pods * seats] in pod then seat order. Seats whose deck played no game teach nothing.
-    seats = setup.draft_format.seats
+    seats = setup.limited_format.draft.seats
     views: list[SeatView] = []
     chosen: list[int] = []
     rewards: list[float] = []
@@ -338,7 +338,7 @@ def _play_blocks(
     for _ in range(setup.blocks):
         began = time.perf_counter()
         schedule = balanced_matchups(
-            setup.pods, seats=setup.draft_format.seats, games_per_deck=setup.games_per_block, rng=rng
+            setup.pods, seats=setup.limited_format.draft.seats, games_per_deck=setup.games_per_block, rng=rng
         )
         collected = play([(decks[first], decks[second]) for first, second in schedule])
         block_wins, block_games = _deck_records(schedule, collected.games, decks=len(decks))
@@ -443,7 +443,7 @@ def limited_iteration(
             setup,
             learners,
             records=records,
-            learner_seats=setup.draft_format.seats - len(other_seats),
+            learner_seats=setup.limited_format.draft.seats - len(other_seats),
             win_rates=wins / games_played.clamp_min(1.0),
             games_played=games_played,
             dials=dials,
