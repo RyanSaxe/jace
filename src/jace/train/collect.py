@@ -17,7 +17,6 @@ Python loop over games visits the few that ended on a step.
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields, replace
 
-import numpy as np
 import torch
 from torch import Tensor
 
@@ -157,7 +156,10 @@ def join(parts: Sequence[Rollout]) -> Rollout:
 
 
 def _decide(boards: Boards, guess: Guess, *, is_learner: Tensor, learner: Policy, opponent: Policy) -> Tensor:
-    # Runs each policy once, on the rows it acts in. Returns the logits [n, k] of every row.
+    # Runs each policy once, on the rows it acts in. Returns the logits [n, k] of every row. When the
+    # learner acts in every row, as in self-play, its rows are the whole batch and no board is copied.
+    if bool(is_learner.all()):
+        return learner(boards, guess)
     logits = torch.empty(0)
     for rows, policy in ((is_learner, learner), (~is_learner, opponent)):
         if not bool(rows.any()):
@@ -256,9 +258,9 @@ def play_games(
     abandoned: set[int] = set()
     pending = batch.decisions()
     while len(pending.games):
-        games = torch.from_numpy(pending.games.copy())
-        seats = torch.from_numpy(pending.seats.copy())
-        boards = {name: torch.from_numpy(np.array(array)) for name, array in pending.boards.items()}
+        games = torch.from_numpy(pending.games)
+        seats = torch.from_numpy(pending.seats)
+        boards = {name: torch.from_numpy(array) for name, array in pending.boards.items()}
         guess = _guess(guesser, boards, games=games, seats=seats, history=guess_history, history_count=history_count)
         is_learner = torch.ones_like(seats, dtype=torch.bool) if self_play else seats == learner_seat[games]
         logits = _decide(boards, guess, is_learner=is_learner, learner=learner, opponent=opponent)
