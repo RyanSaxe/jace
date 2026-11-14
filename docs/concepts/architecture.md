@@ -18,7 +18,7 @@ each module owns and how games reach the code that learns from them.
 | `jace.train`    | Game collection, the losses and the update step           |
 | `jace.eval`     | Paired deals, win rates and the check on the guess model  |
 | `jace.data`     | Human drafts and decks from 17Lands, and the card encoder's inputs |
-| `jace.loops`    | Training loops, schedules and the command-line entry points |
+| `jace.loops`    | Training loops, limited formats, schedules and the command-line entry points |
 | `jace.tracking` | A training run's record on disk                           |
 
 The diagram leaves out `jace.data`. It imports only `jace.cards`, and only
@@ -94,11 +94,15 @@ code with the draft step left out.
 
 ## Where state lives
 
-Most of jace is functions over values. Three things have real states, and
-each is written as one type per state:
+Most of jace is functions over values. Four things have real states:
 
 | Thing           | States                                           | Moved by               |
 | --------------- | ------------------------------------------------ | ---------------------- |
 | A draft pod     | `Picking`, `Complete`                            | `advance`              |
 | A training run  | created, running, completed, failed, interrupted | `writing`              |
 | A game          | A pending decision, or finished                  | `GameBatch.act`        |
+| The deck-score check | The search reads the human-trained score, then the learning one | `check_scores` |
+
+The first three are written as one type per state. The deck-score check is
+one `ScoreCheck` record, which the limited loop hands from one iteration to
+the next. Its `reads_learning` turns true once and never back.

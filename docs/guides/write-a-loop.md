@@ -16,30 +16,35 @@ Its source is [`jace/loops/toy.py`](../../src/jace/loops/toy.py).
 
 `limited_iteration` in
 [`jace/loops/limited.py`](../../src/jace/loops/limited.py) runs one round of
-draft, build, play and learn. This is its body:
+draft, build, play and learn. This is its body, shortened:
 
 ```python
 drafter = model_drafter(learners.drafter, generator=generator)
 records = _draft(setup, drafter=drafter, other_seats=other_seats, rng=rng)
-played_decks, best_decks = _build(setup, learners, records=records, dials=dials, rng=rng)
-decks = [candidate.deck for candidate in played_decks]
+# Each pool's best `setup.blocks` decks, one row per pool and block.
+played = _build(setup, learners, records=records, check=check, generator=generator)
 
-# Each block plays its games, then updates the player and the guess model on them.
-blocks = _play_blocks(setup, learners, decks=decks, play=play, dials=dials, rng=rng, generator=generator)
-wins, games_played = blocks.wins, blocks.games_played
+# Block b plays every pool's b-th deck, then updates the player and the guess model on its games.
+blocks = _play_blocks(setup, learners, decks=_block_decks(played.decks, blocks=setup.blocks), ...)
 
-metrics |= _update_deck_score(setup, learners, decks=decks, wins=wins, games_played=games_played)
-metrics |= _update_builder(setup, learners, records=records, best_decks=best_decks, generator=generator)
+after, checked = check_scores(check, played=tested, human=learners.human_score, learning=learners.score, ...)
+metrics |= train_learning_score(learners.score, learners.human_score, recent=after.recent, ...)
+if check.reads_learning and dials.builder_rate > 0:
+    metrics |= _update_builder(setup, learners, played=played, wins=wins, games=games, dials=dials)
 if dials.drafter_rate > 0:
     metrics |= _update_drafter(...)
+return metrics, after
 ```
 
 | Step  | What happens                                                              |
 | ----- | ------------------------------------------------------------------------- |
 | Draft | Every pod drafts at once. The learner fills the seats `other_seats` does not |
-| Build | Each pool gets ranked candidate decks, and one is chosen to play          |
-| Play  | In each block, every deck plays the same number of games, against decks of other pods, each game to its end |
-| Learn | The player and guess model take a step after every block; the deck score, builder and drafter take one after the last |
+| Build | The search samples many decks for each pool and keeps the best few by the deck score |
+| Play  | Block `b` plays every pool's `b`-th deck. In each block, every deck plays the same number of games, against decks of other pods, each game to its end |
+| Learn | The player and guess model take a step after every block. After the last, both deck scores are tested on the iteration's decks, the learning one trains, the builder learns once the search reads the learning score, and the drafter learns |
+
+[Deck building](../concepts/deck-building.md) explains the search, the two
+deck scores and the switch between them.
 
 `jace.loops.train_limited` runs this loop on real games. It builds the
 models, loads checkpoints trained on human data, plays the games in worker
@@ -57,15 +62,17 @@ uv run python -m jace.loops.train_limited --help
 
 | Argument      | Holds                                                         |
 | ------------- | ------------------------------------------------------------- |
-| `setup`       | What stays fixed: the card pool, draft format, deck rules, sizes |
-| `learners`    | The models and one optimizer for each                         |
+| `setup`       | What stays fixed: the card pool, the limited format, deck rules, sizes |
+| `learners`    | The models, the frozen human-trained ones they are pulled toward, and one optimizer for each |
+| `check`       | The deck-score check the iteration before returned, or `FIRST_CHECK` |
 | `dials`       | This iteration's values from the schedule                     |
 | `other_seats` | Drafters for seats the learner does not draft, such as past versions |
 | `play`        | A function that plays a list of matchups to the end and returns the decisions |
 
 The player and the guess model arrive as functions, and the games through
 `play`, so the same loop runs on manabot in worker processes and on the toy
-game in one.
+game in one. The iteration returns its metrics and the check to hand the
+next one.
 
 Build each model's optimizer from `own_parameters(model, embedding)`. No
 optimizer of this loop holds the shared embedding, so a model whose rate is
@@ -76,8 +83,10 @@ zero does not change. [Training](../concepts/training.md) has the reason.
 | To change                        | Edit                                                    |
 | -------------------------------- | ------------------------------------------------------- |
 | How a dial moves over training   | Write another schedule function                         |
-| Which deck is played for a pool  | The two lines in `_build` that use `explore_share`      |
-| The drafter's reward             | `_update_drafter`, where the reward is the deck's win rate |
+| Which decks are played for a pool | `_build`, which keeps the search's best `setup.blocks` |
+| When the search trusts the learning deck score | `ScoreRule`, or `check_scores` in `jace.loops.checked_score` |
+| The builder's reward             | `_update_builder`, where it is a build's win rate minus its pool's mean |
+| The drafter's reward             | `_update_drafter`, where the reward is the win rate of the pool's best build |
 | Who drafts the other seats       | Pass different drafters as `other_seats`                |
 | The order of updates             | Reorder the calls                                       |
 

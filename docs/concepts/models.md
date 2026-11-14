@@ -6,7 +6,7 @@ each is a small transformer.
 | Model        | Reads                                         | Returns                                        |
 | ------------ | --------------------------------------------- | ---------------------------------------------- |
 | Drafter      | Every pack it has seen and every pick so far  | A score for each card in the current pack      |
-| Deck builder | A pool, and the deck written so far           | A score for each card it could add next        |
+| Deck builder | A pool, and the deck written so far           | A score for each card, each land total and each basic |
 | Deck score   | A deck                                        | One number: how likely the deck is to win      |
 | Guess model  | The board, recent events, its earlier guesses | The opponent's deck and hand, as probabilities |
 | Player       | The board and the guess                       | A score for each legal action, and a win chance|
@@ -42,9 +42,11 @@ pair in the engine's catalog, so a pair's id does not depend on the pool.
 
 ## Scoring cards by embedding
 
-No model has an output layer with one slot per card. The drafter, the deck
-builder and the guess model each produce a query vector and score a card by
-the dot product of the query with that card's embedding.
+No model has an output layer with one slot per card. The drafter and the
+guess model each produce a query vector and score a card by the dot product
+of the query with that card's embedding. The deck builder scores a card of
+the pool from that card's own encoding, and a basic land by a query's dot
+product with the basic's embedding.
 
 This keeps every weight independent of the card pool. A test builds each
 model on a small pool, grows the pool, and checks that the model still runs
@@ -57,12 +59,17 @@ each earlier pick, made from the card taken and the pack it came from, plus
 a token for the current pack. Reading the whole draft lets it see signals:
 which cards were still in a pack when it came around.
 
-**Deck builder**, `DeckBuilderModel.forward(available, partial)`. It writes a
-deck one card at a time. Rules it cannot break are enforced by masks, not
-learned: deck size, copies in the pool, and a land count within a range.
+**Deck builder**, `DeckBuilder.forward(pools, taken, rules=rules)`. One
+token for each non-basic card of the pool, with its copies in the pool and
+its copies already in the deck. A land head scores each land total and a
+basics head scores each basic. `sample_builds` writes many decks from it in
+one batch, a few cards a round, and the rules it cannot break are enforced
+by masks, not learned: deck size, copies in the pool, and a land count
+within a range.
 
-`build_decks` samples many decks from it, improves each by swaps, ranks them
-with the deck score, and returns the candidates best first.
+`build_decks` samples many decks for a pool, scores each distinct one once
+with the deck score, and returns the best first.
+[Deck building](deck-building.md) follows the whole process.
 
 **Deck score**, `DeckScore.forward(decks)`. One token per distinct card,
 with its count. It is trained on which decks won, so its score means "in the

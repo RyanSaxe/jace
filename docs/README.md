@@ -10,6 +10,7 @@ trying to do, and the other pages build on it.
 | [Architecture](concepts/architecture.md)   | The modules and how games reach them         |
 | [Models](concepts/models.md)               | What each model reads and returns            |
 | [Training](concepts/training.md)           | From played games to a gradient step         |
+| [Deck building](concepts/deck-building.md) | How decks are sampled, ranked and learned from |
 | [Write a loop](guides/write-a-loop.md)     | How to assemble and change a training loop   |
 | [Run records](reference/run-records.md)    | The files a training run writes              |
 | [Data](reference/data.md)                  | The human data jace reads and its source     |

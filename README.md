@@ -23,7 +23,7 @@ for each, and lets the result of every game teach all of them.
 | Model        | Decides                                 | Learns from                         |
 | ------------ | --------------------------------------- | ----------------------------------- |
 | Drafter      | Which card to take from a pack          | How often its decks win             |
-| Deck builder | Which 40 cards to play from a pool      | The best deck a search found        |
+| Deck builder | Which 40 cards to play from a pool      | How its decks win against its pool's other decks |
 | Deck score   | How good a deck is                      | Which decks won and lost            |
 | Guess model  | What the opponent's deck and hand hold  | The opponent's true cards           |
 | Player       | Each action in a game                   | Whether it won                      |
@@ -74,6 +74,7 @@ iteration 40  best card 0.78  win rate 0.77
 | [Architecture](docs/concepts/architecture.md)  | The modules and how games reach them           |
 | [Models](docs/concepts/models.md)              | What each model reads and returns              |
 | [Training](docs/concepts/training.md)          | From played games to a gradient step           |
+| [Deck building](docs/concepts/deck-building.md) | How decks are sampled, ranked and learned from |
 | [Write a loop](docs/guides/write-a-loop.md)    | How to assemble and change a training loop     |
 | [Run records](docs/reference/run-records.md)   | The files a training run writes                |
 | [Data](docs/reference/data.md)                 | The human data jace reads and its source       |
