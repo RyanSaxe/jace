@@ -1,18 +1,15 @@
 # Agents
 
-## Keep the sources page current
+## Sources
 
-[`docs/reference/sources.md`](docs/reference/sources.md) lists every outside
-source that informs jace's design: papers, repositories, datasets and
-documents.
+`docs/reference/sources.md` lists the papers, repositories, datasets and
+documents behind jace's design.
 
-- When a source you read informs a design choice, add it to that page in
-  the same change as the code or doc it shaped.
-- Write the entry in the page's form: the linked title (the arXiv abs link
-  when one exists), the authors and year, what the source showed, and where
-  it shapes jace.
-- Add only what you have opened and checked. Never guess a title, an
-  author, a year or a finding.
-- When a design moves away from a source, update its entry in the same
-  change. Say what jace does now, or mark the entry "Decided against" with
-  the reason. Do not delete it.
+- When a source changes what you build, add it in the same commit.
+- Each entry gives the linked title (the arXiv abstract page when there is
+  one), the authors and year, what the source found, and which part of jace
+  uses it.
+- Add only sources you have read, and check the title, authors, year and
+  finding against the source itself.
+- When jace stops following a source, keep the entry: say what jace does
+  instead, or mark it "Decided against" with the reason.

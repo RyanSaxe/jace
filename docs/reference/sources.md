@@ -1,10 +1,10 @@
 # Sources
 
-This page lists the papers, repositories, datasets and documents that
-informed jace's design. Each entry says what the source showed and where it
-shapes jace. An entry marked "Decided against" was read and not followed,
-with the reason. To add a source, put it under the heading that fits, in
-the same form, in the change it shapes.
+This page lists the papers, repositories, datasets and documents behind
+jace's design. Each entry says what the source found and which part of jace
+uses it. An entry marked "Decided against" was read and not followed, with
+the reason. To add a source, put it under the heading that fits, in the same
+form, in the commit that uses it.
 
 ## Game-playing RL and search
 
