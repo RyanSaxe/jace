@@ -1,16 +1,18 @@
 """Turn the engine's board arrays into the tokens the play models read.
 
-`board_tokens` and `legal_actions` are the only code in this package that
-names the engine's arrays. What they cannot know from the names alone,
-which columns of each kind of row are numbers and which name a card,
-another board object or a small category, comes in a `BoardLayout` that the
-engine adapter builds from the engine's own description of its arrays. The
-guess model and the player model read `BoardTokens` and nothing else, so a
-change of engine or of encoder version stops here. `EntityEncoder` is the
-first layer both models share: it projects each kind of token to the
-model's width, adds the shared card embedding to the tokens that are a
-card, and adds to each permanent the object it is attached to or blocks.
-`CategoryEncoder` embeds the categories of actions and events.
+`board_tokens`, `legal_actions` and `opponent_cards` are the only code in
+this package that names the engine's arrays. What they cannot know from
+the names alone, which columns of each kind of row are numbers and which
+name a card, another board object or a small category, comes in a
+`BoardLayout` that the engine adapter builds from the engine's own
+description of its arrays. The guess model and the player model read
+`BoardTokens`, and the guess model also reads `OpponentCards`, its counts
+of the opponent's cards. They read nothing else, so a change of engine or
+of encoder version stops here. `EntityEncoder` is the first layer both
+models share: it projects each kind of token to the model's width, adds
+the shared card embedding to the tokens that are a card, and adds to each
+permanent the object it is attached to or blocks. `CategoryEncoder` embeds
+the categories of actions and events.
 """
 
 from dataclasses import dataclass
@@ -27,15 +29,17 @@ __all__ = (
     "BoardTokens",
     "CategoryEncoder",
     "EntityEncoder",
+    "OpponentCards",
     "board_tokens",
     "card_vectors",
     "gather_entities",
     "legal_actions",
+    "opponent_cards",
 )
 
 
-# Every engine array `board_tokens` reads. Whatever plays or stores boards for these models
-# needs these and no others, which is less than half of what the engine encodes.
+# Every engine array `board_tokens` and `opponent_cards` read. Whatever plays or stores boards for
+# these models needs these and no others, which is less than half of what the engine encodes.
 _ENTITY_ARRAYS = (
     "agent_player",
     "opponent_player",
@@ -51,6 +55,7 @@ BOARD_ARRAYS = (
     "card_turn_state",
     "semantic_cards",
     "decklists",
+    "known_hand",
     "actions",
     "actions_valid",
     "action_focus",
@@ -103,9 +108,47 @@ class BoardTokens:
     deck_mask: Tensor
 
 
+@dataclass(frozen=True, slots=True)
+class OpponentCards:
+    # shown: float [b, cards], copies of each card the acting seat sees on the opponent's side of the
+    # board: on the battlefield, in the graveyard, in exile or on the stack. The board files a card
+    # under its controller, so a card that changed control counts on its controller's side.
+    shown: Tensor
+    # known_in_hand: float [b, cards], copies of each card the acting seat knows the opponent holds
+    # because they were revealed. They are among the cards that `hand` counts.
+    known_in_hand: Tensor
+    # hand: float [b], cards in the opponent's hand. hidden: float [b], cards in its hand and library.
+    hand: Tensor
+    hidden: Tensor
+
+
 def legal_actions(boards: Boards) -> Tensor:
     # Returns bool [b, max_actions], true for the actions the acting seat may take.
     return boards["actions_valid"] > 0
+
+
+def opponent_cards(boards: Boards, *, layout: BoardLayout, engine_to_card: Tensor, cards: int) -> OpponentCards:
+    # The opponent's cards are row 1 of `semantic_cards` and `known_hand`. Its permanents are also its
+    # card rows on the battlefield, so the permanent rows are not counted again. `cards` is the pool size.
+    rows = boards["opponent_cards"]
+    unshown = (rows[..., list(layout.card_unshown_flags)] > 0).any(dim=-1)
+    shown_rows = (boards["opponent_cards_valid"] > 0) & ~unshown
+    shown = _copies(_card_ids(boards["semantic_cards"][:, 1], engine_to_card), shown_rows.float(), cards=cards)
+    known = boards["known_hand"][:, 1]
+    known_ids = _card_ids(known[..., layout.known_hand_definition], engine_to_card)
+    known_in_hand = _copies(known_ids, known[..., layout.known_hand_copies], cards=cards)
+    # The counts are whole numbers stored divided by the scale, so rounding undoes the float error.
+    player = (boards["opponent_player"][:, 0] * layout.zone_count_scale).round()
+    hand = player[:, layout.hand_count]
+    return OpponentCards(
+        shown=shown, known_in_hand=known_in_hand, hand=hand, hidden=hand + player[:, layout.library_count]
+    )
+
+
+def _copies(card_ids: Tensor, copies: Tensor, *, cards: int) -> Tensor:
+    # card_ids: int64 [b, rows], -1 for none. copies: float [b, rows]. Returns float [b, cards], each card's copies.
+    counted = torch.where(card_ids >= 0, copies, 0.0)
+    return torch.zeros(len(card_ids), cards, device=copies.device).scatter_add_(1, card_ids.clamp_min(0), counted)
 
 
 def _squash(features: Tensor) -> Tensor:

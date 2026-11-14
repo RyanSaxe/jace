@@ -91,6 +91,9 @@ _EVENT_OBJECT_ENCODING = (
 # An action's continuation has the selectors' encoding, but it numbers a frame of the `relations`
 # array, which jace does not read. manabot's own model joins it to its encoding of that frame.
 _ACTION_FRAME_COLUMN = int(_ARRAYS["actions"]["columns"]["continuation"]["index"])
+# A player's row holds the size of each zone divided by this.
+_ZONE_COUNT_SCALE = 60
+_ZONE_COUNT_ENCODING = f"Value / {_ZONE_COUNT_SCALE}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,7 +194,10 @@ def board_layout() -> BoardLayout:
     state to its player row and each card's to its card row. It reads every
     column of a player's and a card's row as a number, and the columns of
     other rows that name something by what their encoding says they name.
-    Each of those is compared with the engine's description of its arrays.
+    It counts the opponent's cards from the zone flags of its card rows,
+    the hand and library sizes of its player row and the definitions and
+    copies of its known-hand rows. Each of those is compared with the
+    engine's description of its arrays.
     Raises `BoardLayoutError`, naming what differs, when one no longer holds.
     """
     columns = {name: list(array["columns"]) for name, array in _ARRAYS.items()}
@@ -199,6 +205,7 @@ def board_layout() -> BoardLayout:
         _naming_columns(name) for name in ("agent_permanents", "actions", "events")
     )
     decklist = _naming_columns("decklists")
+    player_columns = _ARRAYS["agent_player"]["columns"]
     holds = {
         "the columns of the two seats' players": columns["agent_player"] == columns["opponent_player"],
         "the columns of the two seats' cards": columns["agent_cards"] == columns["opponent_cards"],
@@ -218,11 +225,18 @@ def board_layout() -> BoardLayout:
         "the axes of decklists": _ARRAYS["decklists"]["axes"] == ["viewer_relative_seat", "definition", "feature"],
         "the columns of decklists": set(decklist) == {_DEFINITION_ENCODING}
         and {"definition", "unseen", "main"} <= set(columns["decklists"]),
+        "the axes of known_hand": _ARRAYS["known_hand"]["axes"] == ["viewer_relative_seat", "definition", "feature"],
+        "the columns of known_hand": set(_naming_columns("known_hand")) == {_DEFINITION_ENCODING}
+        and {"definition", "count"} <= set(columns["known_hand"]),
+        "the hand and library counts of players": all(
+            player_columns[name]["encoding"] == _ZONE_COUNT_ENCODING for name in ("hand_count", "library_count")
+        ),
     }
     changed = [name for name, held in holds.items() if not held]
     if changed:
         raise BoardLayoutError(changed)
     decklist_columns = _ARRAYS["decklists"]["columns"]
+    known_hand_columns = _ARRAYS["known_hand"]["columns"]
     return BoardLayout(
         player_features=len(columns["agent_player"]) + len(columns["player_turn_state"]),
         card_features=len(columns["agent_cards"]) + 1,
@@ -237,6 +251,12 @@ def board_layout() -> BoardLayout:
         event_categories=event_names[_SEAT_ENCODING],
         decklist_definition=decklist[_DEFINITION_ENCODING][0],
         decklist_copies=(int(decklist_columns["unseen"]["index"]), int(decklist_columns["main"]["index"])),
+        card_unshown_flags=(_LIBRARY_COLUMN, _HAND_COLUMN, _TOKEN_COLUMN),
+        hand_count=int(player_columns["hand_count"]["index"]),
+        library_count=int(player_columns["library_count"]["index"]),
+        zone_count_scale=float(_ZONE_COUNT_SCALE),
+        known_hand_definition=int(known_hand_columns["definition"]["index"]),
+        known_hand_copies=int(known_hand_columns["count"]["index"]),
     )
 
 
