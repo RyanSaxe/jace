@@ -13,10 +13,10 @@ import math
 import torch
 from torch import Tensor, nn
 
-from jace.cards import CardEmbedding
+from jace.cards import CardVectors
 from jace.engine import BoardLayout
 from jace.modules import encode_real, transformer
-from jace.play.tokens import EntityEncoder, board_tokens
+from jace.play.tokens import CategoryEncoder, EntityEncoder, board_tokens
 from jace.play.types import Boards, Earlier, Guess
 
 __all__ = ("GuessModel",)
@@ -42,13 +42,13 @@ class GuessModel(nn.Module):
     `guess` satisfies the `Guesser` type. No
     weight is sized by the card pool, so the model scores a larger pool once
     `embedding` and `engine_to_card` are replaced by ones that cover it. The
-    embedding is shared and trained by its own optimizer: leave
-    `embedding.parameters()` out of this model's optimizer.
+    card vectors are shared with the other models and are not this model's
+    to train: build its optimizer from `own_parameters`.
     """
 
     def __init__(
         self,
-        embedding: CardEmbedding,
+        embedding: CardVectors,
         *,
         engine_to_card: Tensor,
         layout: BoardLayout,
@@ -57,15 +57,16 @@ class GuessModel(nn.Module):
         heads: int,
     ) -> None:
         super().__init__()
-        card_width = embedding.starting.shape[1]
-        self.embedding: CardEmbedding = embedding
+        card_width = embedding.width
+        self.embedding: CardVectors = embedding
         self.width: int = width
         # engine_to_card: int64 [engine definition ids] -> CardId, -1 for a definition the pool lacks.
         self.engine_to_card: Tensor
         self.register_buffer("engine_to_card", engine_to_card.detach().clone(), persistent=False)
         self.layout: BoardLayout = layout
         self.entities: EntityEncoder = EntityEncoder(layout, card_width=card_width, width=width)
-        self.events: nn.Linear = nn.Linear(layout.event_features, width)
+        self.events: nn.Linear = nn.Linear(len(layout.event_features), width)
+        self.event_categories: CategoryEncoder = CategoryEncoder(len(layout.event_categories), width=width)
         self.earlier: nn.Linear = nn.Linear(_GUESS_PARTS * card_width, width)
         # queries: float [guess parts, width], the tokens whose encodings score the deck and the hand.
         self.queries: nn.Parameter = nn.Parameter(torch.randn(_GUESS_PARTS, width) * width**-0.5)
@@ -77,14 +78,15 @@ class GuessModel(nn.Module):
         # earlier.guesses.deck, .hand: float [b, t, cards], this game's guesses so far, newest first; t may be 0.
         # earlier.mask: bool [b, t]. Returns deck and hand, each float [b, cards].
         tokens = board_tokens(boards, layout=self.layout, engine_to_card=self.engine_to_card)
-        pool = torch.arange(self.embedding.starting.shape[0], device=self.embedding.starting.device)
+        pool = torch.arange(self.embedding.cards, device=self.embedding.device)
         card_table = self.embedding(pool)  # [cards, card_width]
 
         entities = self.entities.embed(tokens, card_table)
         # Events are oldest first and earlier guesses newest first, so their ages count in opposite directions.
         # A cumulative sum taken from the newest end counts the real events at or after each one.
         event_age = tokens.event_mask.flip(1).cumsum(1).flip(1) - 1
-        events = self.events(tokens.events) + _age_encoding(event_age, width=self.width)
+        events = self.events(tokens.events) + self.event_categories(tokens.event_categories)
+        events = events + _age_encoding(event_age, width=self.width)
         # One token per earlier guess: its two probability vectors, each as a weighted sum of card embeddings.
         earlier_cards = torch.cat((earlier.guesses.deck @ card_table, earlier.guesses.hand @ card_table), dim=-1)
         earlier_age = earlier.mask.cumsum(1) - 1

@@ -17,7 +17,7 @@ from typing import override
 import torch
 from torch import Tensor, nn
 
-from jace.cards import CardEmbedding, CardId, Deck, Pool
+from jace.cards import CardId, CardVectors, Deck, Pool
 from jace.decks.score import CardSetEncoder, Scorer
 
 __all__ = (
@@ -96,13 +96,13 @@ class DeckBuilderModel(nn.Module):
     the proposer masks the moves that would break them.
     """
 
-    def __init__(self, embedding: CardEmbedding, *, width: int, layers: int, heads: int) -> None:
+    def __init__(self, embedding: CardVectors, *, width: int, layers: int, heads: int) -> None:
         super().__init__()
         self.cards: CardSetEncoder = CardSetEncoder(
             embedding, amounts=_AMOUNTS_PER_CARD, width=width, layers=layers, heads=heads
         )
         self.query: nn.Linear = nn.Linear(width, width)
-        self.key: nn.Linear = nn.Linear(embedding.starting.shape[1], width)
+        self.key: nn.Linear = nn.Linear(embedding.width, width)
 
     @override
     def forward(self, available: Tensor, partial: Tensor) -> Tensor:

@@ -32,8 +32,11 @@ exact answers to learn from, which makes them cheaper to train.
 
 ## One card embedding
 
-Each card has a fixed starting vector. A small head, shared by all cards,
-adjusts it, and every model reads the result.
+A card encoder makes one vector for each card, and every model reads it. The
+encoder reads three things a card has before anyone plays it: its printed
+text, as a frozen language model embeds it, its engine program and a few
+printed facts such as mana value, colours and rarity. A card's vector
+depends on that card alone. No vector holds 17Lands statistics.
 
 Models never have an output with one slot per card. To choose a card, a
 model produces a query vector and scores each candidate by its embedding.
@@ -41,9 +44,9 @@ model produces a query vector and scores each candidate by its embedding.
 A card the model has never seen still has an embedding, so it can be
 scored. This is how jace is meant to reach a new set without retraining.
 
-A starting vector can be made from a card's printed text, from its engine
-program or from its 17Lands statistics. The first two exist before anyone
-has played the card. [Data](../reference/data.md) describes all three.
+The drafter's pretraining on human picks trains the encoder. Every later
+stage reads its vectors as a fixed table. [Models](models.md) describes the
+encoder and [Data](../reference/data.md) its inputs.
 
 ## A guess of the opponent's cards
 

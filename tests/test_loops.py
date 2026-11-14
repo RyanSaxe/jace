@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
-from jace.cards import CardEmbedding, CardPool, CardRecord, Rarity, own_parameters
+from jace.cards import CardPool, CardRecord, CardTable, Rarity, own_parameters
 from jace.decks import BuildRules, DeckBuilderModel, DeckScore
 from jace.draft import DrafterModel, DraftFormat
 from jace.engine.toy import HAND_SIZE, TOY_CARDS, ToyBatch
@@ -35,7 +35,7 @@ class _Toy:
     play: PlayGames
     # trained: every model the loop updates, by name.
     trained: dict[str, nn.Module]
-    embedding: CardEmbedding
+    embedding: CardTable
 
 
 def _toy_loop() -> _Toy:
@@ -46,7 +46,7 @@ def _toy_loop() -> _Toy:
         for card in range(1, TOY_CARDS)
     ]
     pool = CardPool(records)
-    embedding = CardEmbedding(torch.randn(TOY_CARDS, 8), hidden=16, offset_bound=None)
+    embedding = CardTable(torch.randn(TOY_CARDS, 8))
     player = nn.Sequential(nn.Linear(HAND_SIZE + 1, 16), nn.Tanh(), nn.Linear(16, HAND_SIZE + 1))
     guess = nn.Sequential(nn.Linear(HAND_SIZE + 1, 16), nn.Tanh(), nn.Linear(16, 2 * TOY_CARDS))
     drafter = DrafterModel(embedding, width=16, layers=1, heads=2, picks=3)

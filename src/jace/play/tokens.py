@@ -1,17 +1,20 @@
 """Turn the engine's board arrays into the tokens the play models read.
 
 `board_tokens` and `legal_actions` are the only code in this package that
-names the engine's arrays. What they cannot know from the names alone, the
-width of each kind of row and the column that holds a permanent's card,
-comes in a `BoardLayout` that the engine adapter builds from the engine's
-own description of its arrays. The guess model and the player model read
-`BoardTokens` and nothing else, so a change of engine or of encoder version
-stops here. `EntityEncoder` is the first layer both
-models share: it projects each kind of token to the model's width and adds
-the shared card embedding to the tokens that are a card.
+names the engine's arrays. What they cannot know from the names alone,
+which columns of each kind of row are numbers and which name a card,
+another board object or a small category, comes in a `BoardLayout` that the
+engine adapter builds from the engine's own description of its arrays. The
+guess model and the player model read `BoardTokens` and nothing else, so a
+change of engine or of encoder version stops here. `EntityEncoder` is the
+first layer both models share: it projects each kind of token to the
+model's width, adds the shared card embedding to the tokens that are a
+card, and adds to each permanent the object it is attached to or blocks.
+`CategoryEncoder` embeds the categories of actions and events.
 """
 
 from dataclasses import dataclass
+from typing import override
 
 import torch
 from torch import Tensor, nn
@@ -19,7 +22,16 @@ from torch import Tensor, nn
 from jace.engine.batch import SEATS, BoardLayout
 from jace.play.types import Boards
 
-__all__ = ("BOARD_ARRAYS", "BoardTokens", "EntityEncoder", "board_tokens", "legal_actions")
+__all__ = (
+    "BOARD_ARRAYS",
+    "BoardTokens",
+    "CategoryEncoder",
+    "EntityEncoder",
+    "board_tokens",
+    "card_vectors",
+    "gather_entities",
+    "legal_actions",
+)
 
 
 # Every engine array `board_tokens` reads. Whatever plays or stores boards for these models
@@ -38,12 +50,18 @@ BOARD_ARRAYS = (
     "player_turn_state",
     "card_turn_state",
     "semantic_cards",
+    "decklists",
     "actions",
     "actions_valid",
     "action_focus",
     "events",
     "events_valid",
 )
+
+# A category's value plus one, so that -1 for none is row 0, is clamped to the rows of its table,
+# and larger values share the last row. Mode and ability selectors are the largest categories: in
+# 7,000 decisions of random games, ability selectors stayed below 3 and mode selectors reached 17.
+_CATEGORY_ROWS = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +72,9 @@ class BoardTokens:
     cards: Tensor
     # permanents: float [b, permanents, permanent features], the acting seat's, then the opponent's.
     permanents: Tensor
+    # permanent_links: int64 [b, permanents, links], the entity number of the object each of a
+    # permanent's links names, in the order of `BoardLayout.permanent_links`, or -1 for none.
+    permanent_links: Tensor
     # entity_mask: bool [b, 2 + cards + permanents], true for real rows. Entities are
     # numbered in the order players, cards, permanents.
     entity_mask: Tensor
@@ -61,14 +82,25 @@ class BoardTokens:
     card_ids: Tensor
     # actions: float [b, max_actions, action features].
     actions: Tensor
+    # action_categories: int64 [b, max_actions, action categories], each a row of its column's table.
+    action_categories: Tensor
     # action_mask: bool [b, max_actions], true for legal actions.
     action_mask: Tensor
     # action_focus: int64 [b, max_actions, 2], the entity numbers an action names, or -1 for none.
     action_focus: Tensor
     # events: float [b, events, event features], oldest first.
     events: Tensor
+    # event_categories: int64 [b, events, event categories], each a row of its column's table.
+    event_categories: Tensor
     # event_mask: bool [b, events].
     event_mask: Tensor
+    # deck_card_ids: int64 [b, decklist rows], the `CardId` of each card in the acting seat's
+    # deck, or -1 for none.
+    deck_card_ids: Tensor
+    # deck_copies: float [b, decklist rows, 2], each card's copies not yet seen, then its copies in the deck.
+    deck_copies: Tensor
+    # deck_mask: bool [b, decklist rows], true for a card with copies not yet seen.
+    deck_mask: Tensor
 
 
 def legal_actions(boards: Boards) -> Tensor:
@@ -77,8 +109,21 @@ def legal_actions(boards: Boards) -> Tensor:
 
 
 def _squash(features: Tensor) -> Tensor:
-    # Some columns hold raw ids, indices and ranks in the hundreds; this keeps every input near unit scale.
+    # Some columns hold unscaled counts, amounts and ranks; this keeps every input near unit scale.
     return features.sign() * features.abs().log1p()
+
+
+def _card_ids(definitions: Tensor, engine_to_card: Tensor) -> Tensor:
+    # definitions: float [...], engine definition ids plus one, zero for none. Returns int64 [...]
+    # `CardId`s, -1 for none and for a definition the card pool lacks.
+    engine_ids = definitions.long() - 1
+    return torch.where(engine_ids >= 0, engine_to_card[engine_ids.clamp_min(0)], -1)
+
+
+def _categories(values: Tensor) -> Tensor:
+    # values: float [..., columns], each -1 or 0 for none. Returns int64 rows of the category tables.
+    rows = values.long() + 1
+    return rows.clamp(0, _CATEGORY_ROWS - 1)
 
 
 def board_tokens(boards: Boards, *, layout: BoardLayout, engine_to_card: Tensor) -> BoardTokens:
@@ -90,11 +135,13 @@ def board_tokens(boards: Boards, *, layout: BoardLayout, engine_to_card: Tensor)
     #   - `action_focus` numbers objects as agent player, opponent player, agent cards,
     #     opponent cards, agent permanents, opponent permanents, each kind padded to its
     #     capacity, so concatenating the arrays in that order makes a focus index the
-    #     position of its token;
+    #     position of its token. A permanent's link columns hold the same index plus one;
     #   - `semantic_cards` holds the definition id + 1 of each card row, acting seat first,
-    #     and a permanent's row holds the same in column `layout.permanent_definition`;
+    #     and a permanent's row and a decklist's row hold the same in the columns `layout` names;
     #   - `player_turn_state` has one row for each seat and `card_turn_state` one value for
-    #     each card row, acting seat first.
+    #     each card row, acting seat first, and `decklists` has the acting seat's rows first.
+    # A column that names something, such as a definition or a link, is read only as what it
+    # names, never as a number.
     #
     # engine_to_card: int64 [engine definition ids], the `CardId` of each engine definition,
     # or -1 for a definition the card pool lacks.
@@ -104,24 +151,45 @@ def board_tokens(boards: Boards, *, layout: BoardLayout, engine_to_card: Tensor)
     cards = torch.cat((cards, boards["card_turn_state"].flatten(1)[..., None]), dim=-1)
     permanents = torch.cat((boards["agent_permanents"], boards["opponent_permanents"]), dim=1)
     definitions = torch.cat((boards["semantic_cards"].flatten(1), permanents[..., layout.permanent_definition]), dim=1)
-    engine_ids = definitions.long() - 1
-    # card_ids: int64 [b, cards + permanents], -1 for none.
-    card_ids = torch.where(engine_ids >= 0, engine_to_card[engine_ids.clamp_min(0)], -1)
-    # The definition id is an identity, read through the card embedding, never a numeric feature.
-    permanents[..., layout.permanent_definition] = 0.0
     entity_valid = torch.cat([boards[f"{name}_valid"] for name in _ENTITY_ARRAYS], dim=1)
+    actions, events = boards["actions"], boards["events"]
+    decklist = boards["decklists"][:, 0]  # the acting seat's: [b, decklist rows, decklist columns]
+    unseen, _ = layout.decklist_copies
     return BoardTokens(
         players=_squash(players),
         cards=_squash(cards),
-        permanents=_squash(permanents),
+        permanents=_squash(permanents[..., list(layout.permanent_features)]),
+        # A link holds its object's position in the focus order plus one, and the entities are the
+        # same rows in the same order, so the link minus one is the object's entity number.
+        permanent_links=permanents[..., list(layout.permanent_links)].long() - 1,
         entity_mask=entity_valid > 0,
-        card_ids=card_ids,
-        actions=_squash(boards["actions"]),
+        card_ids=_card_ids(definitions, engine_to_card),
+        actions=_squash(actions[..., list(layout.action_features)]),
+        action_categories=_categories(actions[..., list(layout.action_categories)]),
         action_mask=legal_actions(boards),
         action_focus=boards["action_focus"].long(),
-        events=_squash(boards["events"]),
+        events=_squash(events[..., list(layout.event_features)]),
+        event_categories=_categories(events[..., list(layout.event_categories)]),
         event_mask=boards["events_valid"] > 0,
+        deck_card_ids=_card_ids(decklist[..., layout.decklist_definition], engine_to_card),
+        deck_copies=_squash(decklist[..., list(layout.decklist_copies)]),
+        deck_mask=decklist[..., unseen] > 0,
     )
+
+
+def card_vectors(card_table: Tensor, card_ids: Tensor) -> Tensor:
+    # card_table: float [pool cards, card_width]. card_ids: int64 [...], -1 for none.
+    # Returns float [..., card_width], zeros where the id is -1.
+    return card_table[card_ids.clamp_min(0)] * (card_ids >= 0)[..., None]
+
+
+def gather_entities(entities: Tensor, numbers: Tensor) -> Tensor:
+    # entities: float [b, entities, width]. numbers: int64 [b, rows, slots], entity numbers or -1 for none.
+    # Returns float [b, rows, slots * width]: each row's entities side by side, zeros where a slot names none.
+    batch, rows, slots = numbers.shape
+    named = (numbers >= 0).reshape(batch, rows * slots, 1)
+    index = numbers.clamp_min(0).reshape(batch, rows * slots, 1).expand(-1, -1, entities.shape[-1])
+    return (entities.gather(1, index) * named).reshape(batch, rows, -1)
 
 
 class EntityEncoder(nn.Module):
@@ -129,23 +197,52 @@ class EntityEncoder(nn.Module):
 
     Each kind has its own projection. A card or permanent with a known card
     also gets the projection of that card's shared embedding, which is how a
-    model tells one card from another. `embed` returns `[b, entities, width]`
-    in the order that `BoardTokens.action_focus` indexes.
+    model tells one card from another. A permanent that is attached to an
+    object or blocks an attacker also gets a projection of that object's
+    vector, with one projection for each kind of link, so the transformer
+    sees which attacker a blocker blocks. `embed` returns
+    `[b, entities, width]` in the order that `BoardTokens.action_focus`
+    indexes.
     """
 
     def __init__(self, layout: BoardLayout, *, card_width: int, width: int) -> None:
         super().__init__()
         self.players: nn.Linear = nn.Linear(layout.player_features, width)
         self.cards: nn.Linear = nn.Linear(layout.card_features, width)
-        self.permanents: nn.Linear = nn.Linear(layout.permanent_features, width)
+        self.permanents: nn.Linear = nn.Linear(len(layout.permanent_features), width)
         self.card_vectors: nn.Linear = nn.Linear(card_width, width, bias=False)
         # seats: float [seats, width], added to the player rows to tell the acting seat from its opponent.
         self.seats: nn.Parameter = nn.Parameter(torch.zeros(SEATS, width))
+        # One linear map of the linked objects side by side is one projection for each kind of link, summed.
+        self.links: nn.Linear = nn.Linear(len(layout.permanent_links) * width, width, bias=False)
 
     def embed(self, tokens: BoardTokens, card_table: Tensor) -> Tensor:
         # card_table: float [pool cards, card_width], the shared embedding of every card in the pool.
-        known = tokens.card_ids >= 0
-        vectors = card_table[tokens.card_ids.clamp_min(0)] * known[..., None]
         objects = torch.cat((self.cards(tokens.cards), self.permanents(tokens.permanents)), dim=1)
-        players = self.players(tokens.players) + self.seats
-        return torch.cat((players, objects + self.card_vectors(vectors)), dim=1)
+        objects = objects + self.card_vectors(card_vectors(card_table, tokens.card_ids))
+        entities = torch.cat((self.players(tokens.players) + self.seats, objects), dim=1)
+        # A link reads its object's vector from before any link is added, so it reaches one object away.
+        linked = self.links(gather_entities(entities, tokens.permanent_links))  # [b, permanents, width]
+        first_permanent = entities.shape[1] - linked.shape[1]
+        return torch.cat((entities[:, :first_permanent], entities[:, first_permanent:] + linked), dim=1)
+
+
+class CategoryEncoder(nn.Module):
+    """Embed the category columns of one kind of row and sum the embeddings.
+
+    Each column has its own table, so an action's mode 2 and its ability 2
+    get different vectors. `forward` takes the int64 `[..., columns]` that
+    `BoardTokens` holds for the kind and returns float `[..., width]`.
+    """
+
+    def __init__(self, columns: int, *, width: int) -> None:
+        super().__init__()
+        self.table: nn.Embedding = nn.Embedding(columns * _CATEGORY_ROWS, width)
+        # first_rows: int64 [columns], the row of `table` where each column's own rows start.
+        self.first_rows: Tensor
+        self.register_buffer("first_rows", torch.arange(columns) * _CATEGORY_ROWS, persistent=False)
+
+    @override
+    def forward(self, categories: Tensor) -> Tensor:
+        rows = categories + self.first_rows
+        return self.table(rows).sum(dim=-2)

@@ -173,7 +173,7 @@ def _build(
             candidates = build_decks(
                 pool,
                 cards=len(setup.pool),
-                device=learners.drafter.embedding.starting.device,
+                device=learners.drafter.embedding.device,
                 propose=model_proposer(learners.builder, rules=rules, generator=generator),
                 score=score,
                 rules=rules,
@@ -260,7 +260,7 @@ def _update_drafter(
     if not views:
         nothing: dict[str, float] = {}
         return nothing
-    device = learners.drafter.embedding.starting.device
+    device = learners.drafter.embedding.device
     reward = torch.tensor(rewards, device=device)
     seen, picks, pack = view_tensors(views, cards=len(setup.pool), device=device)
     logits = learners.drafter.forward(seen, picks, pack=pack)
@@ -310,7 +310,7 @@ def _update_deck_score(
     if not bool(has_games.any()):
         nothing: dict[str, float] = {}
         return nothing
-    device = learners.drafter.embedding.starting.device
+    device = learners.drafter.embedding.device
     logits = learners.score(_counts(decks, cards=len(setup.pool), device=device)[has_games.to(device)])
     loss = score_loss(logits, wins=wins[has_games].to(device), games=games_played[has_games].to(device))
     apply(loss, [learners.optimizers["deck_score"]], max_grad_norm=setup.max_grad_norm)
@@ -327,7 +327,7 @@ def _update_builder(
 ) -> Metrics:
     # Teaches the builder to write the top-scored deck the search found for each pool.
     cards = len(setup.pool)
-    device = learners.drafter.embedding.starting.device
+    device = learners.drafter.embedding.device
     pools = _counts([pool for record in records for pool in record.pools], cards=cards, device=device)
     best = _counts([candidate.deck for candidate in best_decks], cards=cards, device=device)
     available, partial, chosen = writing_steps(best, pool_counts=pools, rules=setup.rules, generator=generator)

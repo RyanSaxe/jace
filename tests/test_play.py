@@ -2,9 +2,11 @@
 
 The boards in `tests/data/manabot_v10_boards.npz` are three decisions from
 real games, encoded by the engine adapter at input version 10, each with
-permanents and events on the board. The models are built from the layout
-the adapter reports, and the tests call them only through `jace.play`, so
-the token layout and the network can change without touching them.
+permanents, events and the acting seat's decklist on the board. No
+permanent on them blocks or is attached to anything, so the test of those
+links adds one. The models are built from the layout the adapter reports,
+and the tests call them only through `jace.play`, so the token layout and
+the network can change without touching them.
 """
 
 from pathlib import Path
@@ -14,7 +16,7 @@ import pytest
 import torch
 from torch import Tensor
 
-from jace.cards import CardEmbedding
+from jace.cards import CardTable
 from jace.engine.manabot import board_layout
 from jace.play import Boards, Earlier, Guess, GuessModel, PlayerModel, random_policy
 
@@ -34,7 +36,7 @@ def _real_boards() -> dict[str, Tensor]:
 def _models(cards: int) -> tuple[PlayerModel, GuessModel]:
     torch.manual_seed(0)
     starting = torch.randn(MORE_CARDS, CARD_WIDTH, generator=torch.Generator().manual_seed(0))
-    embedding = CardEmbedding(starting[:cards], hidden=CARD_WIDTH, offset_bound=None)
+    embedding = CardTable(starting[:cards])
     engine_to_card = torch.arange(ENGINE_DEFINITIONS)
     player = PlayerModel(
         embedding,
@@ -95,6 +97,41 @@ def test_player_reads_both_the_hand_guess_and_the_deck_guess() -> None:
     legal = boards["actions_valid"] > 0
     assert not torch.allclose(logits[legal], with_other_hand[legal])
     assert not torch.allclose(logits[legal], with_other_deck[legal])
+
+
+def _action_odds(player: PlayerModel, boards: Boards) -> Tensor:
+    with torch.no_grad():
+        logits, _ = player.policy(boards, _some_guess((3, CARDS), seed=1))
+    return logits.softmax(dim=-1)
+
+
+def test_player_reads_which_object_a_permanent_blocks_or_is_attached_to() -> None:
+    # A link names an object by its index plus one in the engine's order: both players, the acting
+    # seat's cards, the opponent's cards, then the acting seat's permanents. The acting seat's
+    # permanents 0 and 3 on board 0 are different cards.
+    boards = _real_boards()
+    player, _ = _models(CARDS)
+    first_permanent = 2 + boards["agent_cards"].shape[1] + boards["opponent_cards"].shape[1]
+
+    for link in board_layout().permanent_links:
+        odds = []
+        for linked_permanent in (0, 3):
+            linked = {name: rows.clone() for name, rows in boards.items()}
+            linked["opponent_permanents"][0, 0, link] = first_permanent + linked_permanent + 1
+            odds.append(_action_odds(player, linked)[0])
+        assert not torch.allclose(odds[0], odds[1])
+
+
+@pytest.mark.parametrize(("row", "unseen_after"), [(1, 0), (11, 8)], ids=["last copy", "one of nine"])
+def test_player_reads_the_copies_left_unseen_in_its_own_deck(row: int, unseen_after: int) -> None:
+    # Board 0's decklist row 1 is a card with one unseen copy, and row 11 a land with nine.
+    boards = _real_boards()
+    player, _ = _models(CARDS)
+    unseen, _ = board_layout().decklist_copies
+    drawn = {name: rows.clone() for name, rows in boards.items()}
+    drawn["decklists"][0, 0, row, unseen] = unseen_after
+
+    assert not torch.allclose(_action_odds(player, boards)[0], _action_odds(player, drawn)[0])
 
 
 def test_random_policy_spreads_probability_evenly_over_legal_actions() -> None:

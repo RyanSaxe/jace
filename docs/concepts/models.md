@@ -14,24 +14,31 @@ each is a small transformer.
 ## The card embedding
 
 ```python
-embedding = CardEmbedding(starting, hidden=64, offset_bound=None)
-vectors = embedding(card_ids)  # [..., width]
+vocabulary = FIRST_PROGRAM_TOKEN + len(program_vocabulary())
+encoder = CardEncoder(inputs, width=64, program_vocabulary=vocabulary, program_layers=1, heads=4)
+vectors = encoder(card_ids)  # [..., 64]
+table = frozen_table(encoder)  # the same vectors, with nothing to train
 ```
 
-`starting` holds one fixed vector per card. The embedding of a card is its
-starting vector plus the output of a small head:
+`inputs` is a `CardInputs`, which holds three things for each card: the
+vector a frozen language model gives its printed text, its engine program
+as token ids, and its printed facts. The encoder maps the text vector and
+the printed facts to 64 numbers each. It reads the program's tokens, each
+with a learned position, with a one-layer transformer and averages them. A
+small network joins the three vectors and a layer norm ends it. A card's
+vector depends only on that card's inputs, so the vectors do not change
+when other cards join the pool.
 
-```text
-embedding = starting + head(starting)
-```
+The drafter's pretraining trains the encoder. Deck pretraining and
+self-play read `frozen_table(encoder)`, a `CardTable` that holds every
+card's vector and has no parameters, so no later loss can move what the
+drafter learned. A model takes either one as `CardVectors`: the number of
+cards, the width, the device, and a call that turns card ids into vectors.
 
-The head is shared by every card and starts at zero, so before training the
-embedding equals the starting vector. Training changes the head, never the
-starting vectors.
-
-Setting `offset_bound` adds a per-card correction whose length is capped at
-that bound. It lets a card with a lot of data move a little away from what
-the head gives it. Both versions exist so they can be compared.
+The program's token ids start at `FIRST_PROGRAM_TOKEN`. The three ids
+below it pad a program, stand for a card the engine cannot play, and mark a
+(kind, value) pair the vocabulary lacks. `program_vocabulary` numbers every
+pair in the engine's catalog, so a pair's id does not depend on the pool.
 
 ## Scoring cards by embedding
 
@@ -66,8 +73,11 @@ over cards: each card's share of the opponent's unseen cards, and the chance
 the opponent holds at least one copy.
 
 **Player**, `PlayerModel.policy(boards, guess)`. It reads the players, cards
-and permanents on the board as tokens, plus the likeliest cards from the
-guess. Illegal actions get no probability.
+and permanents on the board as tokens. A permanent's token also holds the
+object it is attached to and the attacker it blocks. The player adds one
+token for each card of its own deck that has copies it has not yet seen,
+and tokens for the likeliest cards from the guess. Illegal actions get no
+probability.
 
 ## The engine's boards
 
@@ -75,3 +85,11 @@ The guess model and the player read manabot's encoded boards directly. That
 knowledge sits in one function, `board_tokens` in
 [`jace/play/tokens.py`](../../src/jace/play/tokens.py), whose comment lists
 every array it assumes.
+
+Most columns of a board are numbers, such as a creature's power. Some name
+something instead: a card definition, another object on the board, or a
+choice such as an ability's number. `board_layout` reads which columns those
+are from the engine's own description of its arrays. A column that names a
+card becomes that card's embedding, one that names an object becomes that
+object's vector, and a choice gets a small learned table. The rest, such as
+an event's raw engine ids, are not read.

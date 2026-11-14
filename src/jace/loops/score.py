@@ -28,7 +28,7 @@ from pathlib import Path
 
 import torch
 
-from jace.cards import CardEmbedding
+from jace.cards import CardTable
 from jace.data import SetCards, card_table, load_decks, read_set
 from jace.engine import BoardLayout
 from jace.engine.manabot import board_layout, engine_card_ids, engine_cards
@@ -52,7 +52,7 @@ from jace.eval import (
     model_seat,
     score_match,
 )
-from jace.loops.entry_points import playable_decks
+from jace.loops.entry_points import card_inputs, load_card_table, playable_decks
 from jace.loops.matches import SCRIPTED, draw_deals, guess_details, play_match
 from jace.play import GuessModel, PlayerModel
 from jace.tracking import CheckpointRef, ModelName, Running, evaluating, load_checkpoint, record_evaluation
@@ -124,13 +124,18 @@ def _checkpoint(run: Path, model: ModelName, *, update: int) -> CheckpointRef:
 
 
 def _model_player(
-    update: int, *, run: Path, config: Mapping[str, object], cards: SetCards, layout: BoardLayout
+    update: int,
+    *,
+    run: Path,
+    config: Mapping[str, object],
+    cards: SetCards,
+    embedding: CardTable,
+    layout: BoardLayout,
 ) -> tuple[Player, CheckpointRef]:
-    # Builds the player and the guess model of iteration `update` as the run built them, each on
-    # that iteration's card embedding, and returns the player with its player checkpoint.
+    # Builds the player and the guess model of iteration `update` as the run built them, on the
+    # run's card table, and returns the player with its player checkpoint.
     numbers = {name: value for name, value in config.items() if isinstance(value, int)}
     engine_to_card = engine_card_ids(cards.pool)
-    embedding = CardEmbedding(cards.features, hidden=numbers["embedding_hidden"], offset_bound=None)
     shape = {"width": numbers["play_width"], "layers": numbers["play_layers"], "heads": numbers["play_heads"]}
     player = PlayerModel(
         embedding,
@@ -141,7 +146,6 @@ def _model_player(
         **shape,
     )
     guess = GuessModel(embedding, engine_to_card=engine_to_card, layout=layout, **shape)
-    load_checkpoint(run.parent, _checkpoint(run, "embedding", update=update), into=embedding, keeping=None)
     reference = _checkpoint(run, "player", update=update)
     load_checkpoint(run.parent, reference, into=player, keeping=embedding)
     load_checkpoint(run.parent, _checkpoint(run, "guess", update=update), into=guess, keeping=embedding)
@@ -154,7 +158,13 @@ def _model_player(
 
 
 def _players(
-    names: Sequence[str], *, run: Path, config: Mapping[str, object], cards: SetCards, layout: BoardLayout
+    names: Sequence[str],
+    *,
+    run: Path,
+    config: Mapping[str, object],
+    cards: SetCards,
+    embedding: CardTable,
+    layout: BoardLayout,
 ) -> tuple[dict[str, Player], dict[str, CheckpointRef]]:
     # Returns every named player, and the player checkpoint of each one that is a checkpoint.
     players: dict[str, Player] = {}
@@ -166,7 +176,7 @@ def _players(
             players[name] = functools.partial(flat_seat, sims=int(name.removeprefix(_FLAT_PREFIX)))
         else:
             players[name], checkpoints[name] = _model_player(
-                int(name), run=run, config=config, cards=cards, layout=layout
+                int(name), run=run, config=config, cards=cards, embedding=embedding, layout=layout
             )
     return players, checkpoints
 
@@ -317,18 +327,18 @@ def main(argv: Sequence[str]) -> None:
     config = json.loads((arguments.run / "identity.json").read_text())["config"]
     data = read_set(str(config["set_code"]))
     cards = card_table(data.attributes, data.statistics, programs={card.name: card.program for card in engine_cards()})
+    data_dir = Path(str(config["data_dir"]))
     human = load_decks(
-        data.games,
-        pool=cards.pool,
-        cache_dir=Path(str(config["data_dir"])),
-        held_out_share=float(str(config["held_out_share"])),
+        data.games, pool=cards.pool, cache_dir=data_dir, held_out_share=float(str(config["held_out_share"]))
     )
+    # Self-play never trains the card table, so every checkpoint of the run reads the newest one.
+    embedding, _ = load_card_table(arguments.run, inputs=card_inputs(data, cards, data_dir=data_dir))
     # The decks the run kept out of training, the same ones it scored itself on.
     decks = playable_decks(human.decks[human.held_out], pool=cards.pool, count=arguments.decks)
     deals = draw_deals(decks, count=arguments.deals, seed=arguments.seed)
     games = legs(deals)
     players, checkpoints = _players(
-        arguments.players, run=arguments.run, config=config, cards=cards, layout=board_layout()
+        arguments.players, run=arguments.run, config=config, cards=cards, embedding=embedding, layout=board_layout()
     )
     pairs = [tuple(pair.split(":")) for pair in arguments.pairs] or list(itertools.combinations(arguments.players, 2))
     names = tuple(cards.pool[card].name for card in range(len(cards.pool)))

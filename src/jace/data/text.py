@@ -1,4 +1,4 @@
-"""Make each card's starting vector from its printed text with a frozen language model.
+"""Make a vector of each card's printed text with a frozen language model, for the card encoder.
 
 A card from a new set has no play statistics, but its mana cost, type line,
 power, toughness, rarity and rules text are printed on it. `card_texts`

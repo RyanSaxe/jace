@@ -4,15 +4,18 @@
 into a frozen record, start a run folder and write a curve file beside it.
 The flags all three take, the record that holds them, the choice of device
 and the start of the run live here, so the three agree on what a run
-folder and its config look like. The two entry points that train a player
-on real games also share how games reach them: `PlayArguments` are their
-common flags, `play_actor` builds what a worker process plays with, and
-`score_player` scores the player on held-out decks with the scoring
-harness. This is not a framework: an entry point calls what it needs and
-does the rest itself.
+folder and its config look like. So do the card encoder's inputs, its
+shape flags and `load_card_table`, which every entry point after the
+drafter's pretraining reads its card vectors with. The two entry points
+that train a player on real games also share how games reach them:
+`PlayArguments` are their common flags, `play_actor` builds what a worker
+process plays with, and `score_player` scores the player on held-out decks
+with the scoring harness. This is not a framework: an entry point calls
+what it needs and does the rest itself.
 """
 
 import argparse
+import json
 import random
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -21,8 +24,19 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
-from jace.cards import CardEmbedding, CardPool, Deck, Rarity
-from jace.data import SetCards, card_table, load_decks, read_set
+from jace.cards import FIRST_PROGRAM_TOKEN, CardEncoder, CardInputs, CardPool, CardTable, Deck, Rarity, frozen_table
+from jace.data import (
+    TEXT_MODEL,
+    SetCards,
+    SetData,
+    card_table,
+    card_texts,
+    load_decks,
+    program_tokens,
+    read_set,
+    text_vectors,
+)
+from jace.data.hugging_face import hugging_face_encoder
 from jace.decks import BuildRules
 from jace.engine import GameBatch, Matchup
 from jace.engine.manabot import (
@@ -30,26 +44,40 @@ from jace.engine.manabot import (
     engine_card_ids,
     engine_cards,
     land_and_spell_actions,
+    program_vocabulary,
     start_batch,
     turn_numbers,
 )
 from jace.loops.matches import Harness, draw_deals, model_player, score_against_scripted
 from jace.play import BOARD_ARRAYS, GuessModel, PlayerModel
-from jace.tracking import CheckpointRef, Clock, Identity, Running, create_run
+from jace.tracking import (
+    CheckpointRef,
+    Clock,
+    Identity,
+    Running,
+    create_run,
+    latest_checkpoint,
+    load_checkpoint,
+    read_checkpoint,
+)
 from jace.train import Rollout
 from jace.train.workers import Actor, Weights
 
 __all__ = (
     "ADAM_BETAS",
+    "NotCardVectorsError",
     "PlayArguments",
     "PlayModels",
     "RunArguments",
+    "add_card_flags",
     "add_play_flags",
     "add_run_flags",
     "build_play_models",
+    "card_inputs",
     "device_named",
     "land_and_spell_rates",
     "limited_rules",
+    "load_card_table",
     "play_actor",
     "play_weights",
     "playable_decks",
@@ -119,14 +147,21 @@ class PlayArguments(RunArguments):
     play_heads: int
     guess_cards: int
     deck_guess_cards: int
-    embedding_hidden: int
 
 
 @dataclass(frozen=True, slots=True)
 class PlayModels:
     player: PlayerModel
     guess: GuessModel
-    embedding: CardEmbedding
+    embedding: CardTable
+
+
+class NotCardVectorsError(ValueError):
+    def __init__(self, run_folder: Path) -> None:
+        super().__init__(
+            f"the embedding checkpoint of run {run_folder} is not a card table, and the run's config records "
+            "no card encoder shape; it was probably saved before the card encoder existed"
+        )
 
 
 def add_play_flags(parser: argparse.ArgumentParser) -> None:
@@ -151,7 +186,13 @@ def add_play_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--play-heads", type=int, default=4)
     parser.add_argument("--guess-cards", type=int, default=8, help="hand-guess tokens the player sees")
     parser.add_argument("--deck-guess-cards", type=int, default=16, help="deck-guess tokens the player sees")
-    parser.add_argument("--embedding-hidden", type=int, default=256)
+
+
+def add_card_flags(parser: argparse.ArgumentParser) -> None:
+    # The card encoder's shape. `load_card_table` reads it back from a run's config under these names.
+    parser.add_argument("--card-width", type=int, default=64, help="numbers in a card's vector")
+    parser.add_argument("--card-layers", type=int, default=1, help="transformer layers that read a card's program")
+    parser.add_argument("--card-heads", type=int, default=4, help="attention heads of those layers")
 
 
 def add_run_flags(parser: argparse.ArgumentParser) -> None:
@@ -204,7 +245,7 @@ def playable_decks(decks: Tensor, *, pool: CardPool, count: int) -> list[Deck]:
 
 
 def limited_rules(cards: SetCards) -> BuildRules:
-    is_land = cards.features[:, cards.feature_names.index("type_land")] > 0  # bool [cards]
+    is_land = cards.printed[:, cards.printed_names.index("type_land")] > 0  # bool [cards]
     basics = cards.pool.of_rarity(Rarity.BASIC)
     return BuildRules(
         size=_DECK_SIZE,
@@ -215,17 +256,61 @@ def limited_rules(cards: SetCards) -> BuildRules:
     )
 
 
-def set_cards(set_code: str) -> SetCards:
+def set_cards(data: SetData) -> SetCards:
     # The card set as jace trains on it, with the engine's program for every card the engine can play.
-    data = read_set(set_code)
     programs = {card.name: card.program for card in engine_cards()}
     return card_table(data.attributes, data.statistics, programs=programs)
 
 
-def build_play_models(arguments: PlayArguments, cards: SetCards) -> PlayModels:
+def card_inputs(data: SetData, cards: SetCards, *, data_dir: Path) -> CardInputs:
+    """Build what the card encoder reads about every card of `cards`, in card id order.
+
+    The text vectors are cached in `data_dir`, and the first run without
+    them downloads the text model from Hugging Face. The program tokens use
+    the engine's own vocabulary, so a card's tokens do not depend on the
+    pool. `data` must be the set `cards` was built from.
+    """
+    text = text_vectors(
+        card_texts(data.attributes),
+        encode=hugging_face_encoder(TEXT_MODEL, device=torch.device("cpu")),
+        model_name=TEXT_MODEL,
+        cache_dir=data_dir,
+    )
+    program = program_tokens(cards.pool, vocabulary=program_vocabulary())
+    return CardInputs(text=text, program=program, printed=cards.printed)
+
+
+def load_card_table(run_folder: Path, *, inputs: CardInputs) -> tuple[CardTable, CheckpointRef]:
+    """Load the newest card vectors the run at `run_folder` saved, as a table, and the reference of their checkpoint.
+
+    A drafter pretraining run is the one kind whose config records the card
+    encoder's shape, under the names `add_card_flags` gives it, and it saves
+    a `CardEncoder`. That encoder is rebuilt on `inputs` with the recorded
+    shape, loaded and frozen. Every other run saves the `CardTable` it read,
+    which holds its own shape and is loaded as it is. Raises
+    `NotCardVectorsError` for a run saved before the card encoder existed.
+    """
+    reference = latest_checkpoint(run_folder, "embedding")
+    config = json.loads((run_folder / "identity.json").read_text())["config"]
+    if "card_width" in config:
+        encoder = CardEncoder(
+            inputs,
+            width=int(config["card_width"]),
+            program_vocabulary=FIRST_PROGRAM_TOKEN + len(program_vocabulary()),
+            program_layers=int(config["card_layers"]),
+            heads=int(config["card_heads"]),
+        )
+        load_checkpoint(run_folder.parent, reference, into=encoder, keeping=None)
+        return frozen_table(encoder), reference
+    saved = read_checkpoint(run_folder.parent, reference)
+    if "table" not in saved:
+        raise NotCardVectorsError(run_folder)
+    return CardTable(saved["table"]), reference
+
+
+def build_play_models(arguments: PlayArguments, embedding: CardTable, *, pool: CardPool) -> PlayModels:
     layout = board_layout()
-    engine_to_card = engine_card_ids(cards.pool)
-    embedding = CardEmbedding(cards.features, hidden=arguments.embedding_hidden, offset_bound=None)
+    engine_to_card = engine_card_ids(pool)
     shape = {"width": arguments.play_width, "layers": arguments.play_layers, "heads": arguments.play_heads}
     return PlayModels(
         player=PlayerModel(
@@ -249,17 +334,17 @@ def play_weights(models: PlayModels) -> Weights:
     }
 
 
-def play_actor(seed: int, *, arguments: PlayArguments) -> Actor:
+def play_actor(seed: int, *, arguments: PlayArguments, card_width: int) -> Actor:
     """Build what one worker plays with, inside the worker's process.
 
-    The models have the shapes the arguments give and whatever weights
-    PyTorch starts them with: every round replaces them with the training
-    process's. Each round's games start on a new engine seed drawn from a
-    generator made from `seed`, and report only the board arrays the
-    models read.
+    The models have the shapes the arguments give, a card table of zeros
+    `card_width` wide and whatever weights PyTorch starts the models with:
+    every round replaces them, and the table, with the training process's.
+    Each round's games start on a new engine seed drawn from a generator
+    made from `seed`, and report only the board arrays the models read.
     """
-    cards = set_cards(arguments.set_code)
-    models = build_play_models(arguments, cards)
+    cards = set_cards(read_set(arguments.set_code))
+    models = build_play_models(arguments, CardTable(torch.zeros(len(cards.pool), card_width)), pool=cards.pool)
     rng = random.Random(seed)
 
     def start(matchups: Sequence[Matchup]) -> GameBatch:

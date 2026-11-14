@@ -5,11 +5,12 @@ decks are human decks from the training share of the 17Lands data, so what
 is measured is how well the player learns to play, and nothing else moves.
 Each iteration plays a fixed number of games to the end in worker
 processes, all with that iteration's weights, and then updates the two
-models. The card embedding is not trained here: both models read cards
-through it, and a step taken for one would change the other's input. Every
-few iterations the player is scored with the scoring harness on paired
-deals of held-out human decks, which are never played in training, against
-random play, scripted greedy and the heuristic player. Every flag that
+models. Both read cards through the card vectors of `--embedding-run`,
+frozen into a `CardTable`, which is not trained here: a step taken for one
+model would change the other's input. Every few iterations the player is
+scored with the scoring harness on paired deals of held-out human decks,
+which are never played in training, against random play, scripted greedy
+and the heuristic player. Every flag that
 shapes the player's update is on the command line, because this loop exists
 to compare them. Run it with
 `uv run python -m jace.loops.train_player --help`.
@@ -37,8 +38,10 @@ from jace.loops.entry_points import (
     add_play_flags,
     add_run_flags,
     build_play_models,
+    card_inputs,
     device_named,
     land_and_spell_rates,
+    load_card_table,
     play_actor,
     play_weights,
     playable_decks,
@@ -78,7 +81,7 @@ _SAVED: tuple[ModelName, ...] = ("embedding", "player", "guess")
 @dataclass(frozen=True, slots=True)
 class _Arguments(PlayArguments):
     iterations: int
-    embedding_run: Path | None
+    embedding_run: Path
     checkpoint_every: int
     resume: Path | None
     games: int
@@ -96,7 +99,12 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     add_run_flags(parser)
     add_play_flags(parser)
     parser.add_argument("--iterations", type=int, required=True)
-    parser.add_argument("--embedding-run", type=Path, help="a run folder whose newest card embedding to start from")
+    parser.add_argument(
+        "--embedding-run",
+        type=Path,
+        required=True,
+        help="a drafter pretraining, deck pretraining or self-play run folder whose newest card vectors to read",
+    )
     parser.add_argument(
         "--checkpoint-every", type=int, default=0, help="also save every checkpoint each N iterations; 0 for never"
     )
@@ -140,7 +148,7 @@ def _update(
 ) -> dict[str, float]:
     # One update of the player and one of the guess model on a round's games.
     # optimizers: the player's, then the guess model's.
-    device = models.embedding.starting.device
+    device = models.embedding.device
     # The model's inputs go to its device once, so every slice of every pass is cut there.
     on_device = replace(
         rollout,
@@ -182,7 +190,7 @@ def _update(
 
 
 def _save(run: Running, models: PlayModels, *, iteration: int) -> CheckpointRef:
-    # Saves the three modules and returns the player's checkpoint. The embedding does not change
+    # Saves the three modules and returns the player's checkpoint. The card table does not change
     # in this loop, and is saved so that a checkpoint can be loaded and scored by itself.
     save_checkpoint(run, model="embedding", update=iteration, module=models.embedding)
     save_checkpoint(run, model="guess", update=iteration, module=models.guess)
@@ -275,31 +283,29 @@ def main(argv: Sequence[str]) -> None:
     """
     arguments = _arguments(argv)
     torch.manual_seed(arguments.seed)
-    cards = set_cards(arguments.set_code)
+    data = read_set(arguments.set_code)
+    cards = set_cards(data)
     human = load_decks(
-        read_set(arguments.set_code).games,
-        pool=cards.pool,
-        cache_dir=arguments.data_dir,
-        held_out_share=arguments.held_out_share,
+        data.games, pool=cards.pool, cache_dir=arguments.data_dir, held_out_share=arguments.held_out_share
     )
     decks = playable_decks(human.decks[~human.held_out], pool=cards.pool, count=arguments.decks)
-    models = build_play_models(arguments, cards)
-    inputs: tuple[CheckpointRef, ...] = ()
-    if arguments.embedding_run is not None:
-        ref = latest_checkpoint(arguments.embedding_run, "embedding")
-        load_checkpoint(arguments.embedding_run.parent, ref, into=models.embedding, keeping=None)
-        inputs = (ref,)
+    embedding, embedding_ref = load_card_table(
+        arguments.embedding_run, inputs=card_inputs(data, cards, data_dir=arguments.data_dir)
+    )
+    models = build_play_models(arguments, embedding, pool=cards.pool)
     done = 0 if arguments.resume is None else _resume(arguments.resume, models)
     device = device_named(arguments.device)
     for module in (models.embedding, models.player, models.guess):
         module.to(device)
     clock = functools.partial(datetime.now, UTC)
     if arguments.resume is None:
-        folder, curve_file = start_run(arguments, device=device, inputs=inputs, clock=clock)
+        folder, curve_file = start_run(arguments, device=device, inputs=(embedding_ref,), clock=clock)
     else:
         folder, curve_file = arguments.resume, arguments.resume.with_name(f"{arguments.resume.name}.curve.json")
     workers = start_workers(
-        functools.partial(play_actor, arguments=arguments), count=arguments.workers, seed=arguments.seed + done
+        functools.partial(play_actor, arguments=arguments, card_width=embedding.width),
+        count=arguments.workers,
+        seed=arguments.seed + done,
     )
 
     def play(matchups: Sequence[Matchup]) -> Collected:

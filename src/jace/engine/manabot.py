@@ -55,6 +55,7 @@ __all__ = (
     "engine_cards",
     "land_and_spell_actions",
     "observation_space",
+    "program_vocabulary",
     "start_batch",
     "turn_numbers",
 )
@@ -78,6 +79,18 @@ _TURN_COLUMN = int(_ARRAYS["agent_player"]["columns"]["turn"]["index"])
 # What `jace.play.tokens` assumes about the arrays, in the engine's own words.
 _DEFINITION_ENCODING = "CardDefId + 1; 0 means absent"
 _FOCUS_ORDER = "agent player, opponent player, agent cards, opponent cards, agent permanents, opponent permanents"
+# The engine marks a column that names something, rather than counting it, as kind "id" or
+# "reference". These are the encodings of such columns in the arrays `jace.play.tokens` reads.
+_NAMING_KINDS = ("id", "reference")
+_LINK_ENCODING = f"Padded object table index + 1; 0 absent. Order: {_FOCUS_ORDER}"
+_SELECTOR_ENCODING = "Zero-based selector + 1; 0 absent"
+_SEAT_ENCODING = "Raw player seat; -1 absent"
+_EVENT_OBJECT_ENCODING = (
+    "Raw event entity id in the accompanying kind namespace; -1 absent; not a padded object-table index"
+)
+# An action's continuation has the selectors' encoding, but it numbers a frame of the `relations`
+# array, which jace does not read. manabot's own model joins it to its encoding of that frame.
+_ACTION_FRAME_COLUMN = int(_ARRAYS["actions"]["columns"]["continuation"]["index"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +155,14 @@ def engine_cards() -> tuple[EngineCard, ...]:
     return tuple(cards)
 
 
+def program_vocabulary() -> dict[tuple[int, int], int]:
+    # Every distinct (kind, value) pair in the engine's card programs, numbered from 0 in sorted order.
+    # It is read from the whole catalog, so a pair's number does not depend on which cards a pool holds.
+    catalog = managym.catalog_tokens()
+    pairs = sorted(set(zip(catalog["token_kind"], catalog["token_value"], strict=True)))
+    return {pair: number for number, pair in enumerate(pairs)}
+
+
 def engine_card_ids(pool: CardPool) -> Tensor:
     # Returns int64 [engine definition ids]: the `CardId` of each engine definition, or -1 when the pool lacks it.
     names = {pool[card].name: card for card in range(len(pool))}
@@ -167,11 +188,17 @@ def board_layout() -> BoardLayout:
     `jace.play.tokens` joins the acting seat's and the opponent's arrays in
     the order the engine numbers an action's objects, reads a card's
     identity as a definition id plus one, and appends each seat's turn
-    state to its player row and each card's to its card row. Each of those
-    is compared with the engine's description of its arrays. Raises
-    `BoardLayoutError`, naming what differs, when one no longer holds.
+    state to its player row and each card's to its card row. It reads every
+    column of a player's and a card's row as a number, and the columns of
+    other rows that name something by what their encoding says they name.
+    Each of those is compared with the engine's description of its arrays.
+    Raises `BoardLayoutError`, naming what differs, when one no longer holds.
     """
     columns = {name: list(array["columns"]) for name, array in _ARRAYS.items()}
+    permanent_names, action_names, event_names = (
+        _naming_columns(name) for name in ("agent_permanents", "actions", "events")
+    )
+    decklist = _naming_columns("decklists")
     holds = {
         "the columns of the two seats' players": columns["agent_player"] == columns["opponent_player"],
         "the columns of the two seats' cards": columns["agent_cards"] == columns["opponent_cards"],
@@ -179,22 +206,53 @@ def board_layout() -> BoardLayout:
         "the order of action_focus": str(_ARRAYS["action_focus"]["element"]["encoding"]).endswith(_FOCUS_ORDER),
         "the ids in semantic_cards": _ARRAYS["semantic_cards"]["element"]["encoding"] == _DEFINITION_ENCODING,
         "the axes of semantic_cards": _ARRAYS["semantic_cards"]["axes"] == ["viewer_relative_seat", "card"],
-        "the id of a permanent": _ARRAYS["agent_permanents"]["columns"]["definition"]["encoding"]
-        == _DEFINITION_ENCODING,
         "the axes of player_turn_state": _ARRAYS["player_turn_state"]["axes"] == ["viewer_relative_seat", "feature"],
         "the axes of card_turn_state": _ARRAYS["card_turn_state"]["axes"] == ["viewer_relative_seat", "card"],
+        "the columns that name something in players and cards": not any(
+            _naming_columns(name) for name in ("agent_player", "player_turn_state", "agent_cards")
+        ),
+        "the columns that name something in permanents": set(permanent_names) == {_DEFINITION_ENCODING, _LINK_ENCODING}
+        and len(permanent_names[_DEFINITION_ENCODING]) == 1,
+        "the columns that name something in actions": set(action_names) == {_SELECTOR_ENCODING},
+        "the columns that name something in events": set(event_names) == {_SEAT_ENCODING, _EVENT_OBJECT_ENCODING},
+        "the axes of decklists": _ARRAYS["decklists"]["axes"] == ["viewer_relative_seat", "definition", "feature"],
+        "the columns of decklists": set(decklist) == {_DEFINITION_ENCODING}
+        and {"definition", "unseen", "main"} <= set(columns["decklists"]),
     }
     changed = [name for name, held in holds.items() if not held]
     if changed:
         raise BoardLayoutError(changed)
+    decklist_columns = _ARRAYS["decklists"]["columns"]
     return BoardLayout(
         player_features=len(columns["agent_player"]) + len(columns["player_turn_state"]),
         card_features=len(columns["agent_cards"]) + 1,
-        permanent_features=len(columns["agent_permanents"]),
-        action_features=len(columns["actions"]),
-        event_features=len(columns["events"]),
-        permanent_definition=int(_ARRAYS["agent_permanents"]["columns"]["definition"]["index"]),
+        permanent_features=_number_columns("agent_permanents"),
+        action_features=_number_columns("actions"),
+        event_features=_number_columns("events"),
+        permanent_definition=permanent_names[_DEFINITION_ENCODING][0],
+        permanent_links=permanent_names[_LINK_ENCODING],
+        action_categories=tuple(
+            column for column in action_names[_SELECTOR_ENCODING] if column != _ACTION_FRAME_COLUMN
+        ),
+        event_categories=event_names[_SEAT_ENCODING],
+        decklist_definition=decklist[_DEFINITION_ENCODING][0],
+        decklist_copies=(int(decklist_columns["unseen"]["index"]), int(decklist_columns["main"]["index"])),
     )
+
+
+def _number_columns(array: str) -> tuple[int, ...]:
+    # The columns of one row of `array` that the engine does not mark as naming something.
+    described = _ARRAYS[array]["columns"].values()
+    return tuple(int(column["index"]) for column in described if column["kind"] not in _NAMING_KINDS)
+
+
+def _naming_columns(array: str) -> dict[str, tuple[int, ...]]:
+    # The columns of one row of `array` that name something, grouped by the engine's encoding of them.
+    grouped: dict[str, list[int]] = collections.defaultdict(list)
+    for column in _ARRAYS[array]["columns"].values():
+        if column["kind"] in _NAMING_KINDS:
+            grouped[str(column["encoding"])].append(int(column["index"]))
+    return {encoding: tuple(indices) for encoding, indices in grouped.items()}
 
 
 def start_batch(

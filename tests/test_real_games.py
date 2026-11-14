@@ -11,7 +11,7 @@ import random
 
 import torch
 
-from jace.cards import CardEmbedding, CardPool, CardRecord, Deck, Rarity, own_parameters
+from jace.cards import CardPool, CardRecord, CardTable, Deck, Rarity, own_parameters
 from jace.engine.manabot import board_layout, engine_card_ids, engine_cards, start_batch
 from jace.play import BOARD_ARRAYS, GuessModel, PlayerModel
 from jace.train import PlayerRule, play_games, update_guess, update_player
@@ -40,7 +40,7 @@ def test_real_games_train_the_player_and_the_guess_model_for_one_step() -> None:
         return first, second
 
     layout = board_layout()
-    embedding = CardEmbedding(torch.randn(len(pool), 16), hidden=16, offset_bound=None)
+    embedding = CardTable(torch.randn(len(pool), 16))
     engine_to_card = engine_card_ids(pool)
     player = PlayerModel(
         embedding,
