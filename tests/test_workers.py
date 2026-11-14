@@ -21,6 +21,8 @@ from jace.train.workers import Actor, play_on_workers, start_workers, stop_worke
 
 __all__ = ()
 
+_CPU = torch.device("cpu")
+
 
 def _blank_guesser(boards: Boards, _earlier: Earlier) -> Guess:
     rows = len(boards["hand"])
@@ -58,8 +60,8 @@ def test_a_worker_that_stops_moving_is_replaced_and_the_other_workers_games_are_
     matchups = [((game,), (game + 100,)) for game in range(30)]
     workers = start_workers(functools.partial(_toy_actor, stall_marker=tmp_path / "stalled"), count=3, seed=0)
     try:
-        first, workers = play_on_workers(workers, matchups, weights=weights, stall_seconds=3.0)
-        second, workers = play_on_workers(workers, matchups, weights=weights, stall_seconds=3.0)
+        first, workers = play_on_workers(workers, matchups, weights=weights, stall_seconds=3.0, device=_CPU)
+        second, workers = play_on_workers(workers, matchups, weights=weights, stall_seconds=3.0, device=_CPU)
     finally:
         stop_workers(workers)
 
@@ -79,7 +81,7 @@ def test_every_decision_of_a_round_is_made_with_the_weights_sent_for_that_round(
         rounds = []
         for score in (0.25, 0.75):
             weights = {"scores": {"weight": torch.tensor([[score, -30.0, -30.0]])}}
-            collected, workers = play_on_workers(workers, matchups, weights=weights, stall_seconds=30.0)
+            collected, workers = play_on_workers(workers, matchups, weights=weights, stall_seconds=30.0, device=_CPU)
             rounds.append(collected.rollout)
     finally:
         stop_workers(workers)

@@ -63,13 +63,17 @@ interrupt it. Played in the training process, that step freezes the run.
 
 ```python
 workers = start_workers(build_actor, count=6, seed=0)
-collected, workers = play_on_workers(workers, matchups, weights=weights, stall_seconds=60.0)
+collected, workers = play_on_workers(
+    workers, matchups, weights=weights, stall_seconds=60.0, device=torch.device("mps")
+)
 ```
 
 `build_actor` runs inside each worker and returns its models and how it
 starts a batch. `play_on_workers` deals the matchups out to the workers
 and sends each one the weights. Every worker plays its share to the end
-with `play_games`, in self-play.
+with `play_games`, in self-play. The decisions come back on `device`, the
+one the models train on: each worker's are moved there as soon as they
+arrive, while the other workers still play.
 
 A worker that completes no step for `stall_seconds` is killed. The games of
 its share are lost and `collected.lost` counts them. The round returns what

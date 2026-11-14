@@ -327,7 +327,11 @@ def main(argv: Sequence[str]) -> None:
         # The workers of one round are the ones the round before left, with any stalled one replaced.
         nonlocal workers
         collected, workers = play_on_workers(
-            workers, matchups, weights=play_weights(models), stall_seconds=arguments.stall_seconds
+            workers,
+            matchups,
+            weights=play_weights(models),
+            stall_seconds=arguments.stall_seconds,
+            device=torch.device("cpu"),
         )
         return collected
 
