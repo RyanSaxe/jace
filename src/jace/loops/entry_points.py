@@ -382,19 +382,22 @@ def score_player(
     # Returns the win rates by opponent name, with "_top" after the name for the top action. The guess
     # model's field is the decks of the harness's deals, which its opponents hold.
     dealt = [deck for deal in harness.deals for deck in deal.decks]
-    rates: dict[str, float] = {}
-    for action in ("sampled", "top"):
-        suffix = "_top" if action == "top" else ""
-        scores = score_against_scripted(
-            run,
-            checkpoint,
-            player=model_player(models.player, models.guess, decks=dealt, history=history, action=action),
-            action=action,
-            harness=harness,
-            generator=torch.Generator().manual_seed(checkpoint.update),
-        )
-        rates |= {f"{name}{suffix}": score.rate.rate for name, score in scores.items()}
-    return rates
+    scores = score_against_scripted(
+        run,
+        checkpoint,
+        players={
+            action: model_player(models.player, models.guess, decks=dealt, history=history, action=action)
+            for action in ("sampled", "top")
+        },
+        harness=harness,
+        seed=checkpoint.update,
+    )
+    suffixes = {"sampled": "", "top": "_top"}
+    return {
+        f"{name}{suffixes[action]}": score.rate.rate
+        for action, by_name in scores.items()
+        for name, score in by_name.items()
+    }
 
 
 def land_and_spell_rates(rollout: Rollout) -> dict[str, float]:

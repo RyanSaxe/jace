@@ -6,8 +6,8 @@ iterations. Both deal from held-out human decks, seat the players through
 `jace.engine.scoring` and summarize with `jace.eval`, so the pieces they
 share live here and a number in a training curve means what the same number
 means in the scoring table. `score_against_scripted` is the in-training
-form: one player against manabot's three scripted players, each result
-appended to the run's record.
+form: one player, sampling its actions and taking its top one, against
+manabot's three scripted players, each result appended to the run's record.
 """
 
 import copy
@@ -45,7 +45,7 @@ __all__ = (
     "draw_deals",
     "guess_details",
     "model_player",
-    "play_match",
+    "play_matches",
     "score_against_scripted",
 )
 
@@ -111,27 +111,29 @@ def model_player(
     )
 
 
-def play_match(
+def play_matches(
     games: Sequence[Game],
-    players: tuple[Player, Player],
+    pairs: Sequence[tuple[Player, Player]],
     *,
     names: Sequence[str],
     workers: int,
     game_seconds: float,
     decklists: Literal["open", "closed"],
-) -> tuple[Played[GuessTally], ...]:
-    # Plays `games` with player A and player B seated as each game says, and returns one result
-    # for each game, in order, with the tally of each seat's hand guesses.
+) -> list[tuple[Played[GuessTally], ...]]:
+    # Plays `games` once for each pair of players A and B, seated as each game says, all in one call so
+    # the worker processes start once. Returns, for each pair, one result for each game, in order, with
+    # the tally of each seat's hand guesses.
     seatings = [
         Seating(
             seed=game.seed,
             decks=game.decks,
-            players=players if game.a_seat == 0 else (players[1], players[0]),
+            players=pair if game.a_seat == 0 else (pair[1], pair[0]),
             player_seeds=game.player_seeds,
         )
+        for pair in pairs
         for game in games
     ]
-    return play_games(
+    played = play_games(
         seatings,
         check_guesses=tally_guess,
         names=names,
@@ -139,6 +141,7 @@ def play_match(
         game_seconds=game_seconds,
         decklists=decklists,
     )
+    return [played[first : first + len(games)] for first in range(0, len(played), len(games))]
 
 
 def guess_details(tally: GuessTally) -> dict[str, object]:
@@ -160,35 +163,41 @@ def score_against_scripted(
     run: Running,
     checkpoint: CheckpointRef,
     *,
-    player: Player,
-    action: ActionChoice,
+    players: Mapping[ActionChoice, Player],
     harness: Harness,
-    generator: torch.Generator,
-) -> dict[str, MatchScore]:
-    """Score `player` against each scripted player and record the results under `checkpoint`.
+    seed: int,
+) -> dict[ActionChoice, dict[str, MatchScore]]:
+    """Score each of `players` against each scripted player and record the results under `checkpoint`.
 
-    Every opponent is met on all of the harness's deals, four games a deal.
-    Each result is appended to the run's evaluations with the games that
-    had no result, the guess model's loss on those games and `action`, how
-    the player chose its actions, in the same fields `jace.loops.score`
-    writes. Returns the player's score against each opponent, by the
-    opponent's name.
+    `players` holds one player for each way it chooses its action. Each
+    meets every opponent on all of the harness's deals, four games a deal,
+    and every game of every match is played in one call, so the worker
+    processes start once and share out all the games. Each result is
+    appended to the run's evaluations with the games that had no result,
+    the guess model's loss on those games and how the player chose its
+    actions, in the same fields `jace.loops.score` writes. Each choice's
+    ranges are resampled from a generator seeded with `seed`. Returns the
+    player's score against each opponent, by choice and opponent name.
     """
     games = legs(harness.deals)
-    scores: dict[str, MatchScore] = {}
-    for name, opponent in SCRIPTED.items():
-        played = play_match(
-            games,
-            (player, opponent),
-            names=harness.names,
-            workers=harness.workers,
-            game_seconds=harness.game_seconds,
-            decklists="closed",
+    matches = [(action, name) for action in players for name in SCRIPTED]
+    played = play_matches(
+        games,
+        [(players[action], SCRIPTED[name]) for action, name in matches],
+        names=harness.names,
+        workers=harness.workers,
+        game_seconds=harness.game_seconds,
+        decklists="closed",
+    )
+    scores: dict[ActionChoice, dict[str, MatchScore]] = {action: {} for action in players}
+    generators = {action: torch.Generator().manual_seed(seed) for action in players}
+    for (action, name), match in zip(matches, played, strict=True):
+        score = score_match(
+            games, [game.outcome for game in match], resamples=harness.resamples, generator=generators[action]
         )
-        score = score_match(games, [game.outcome for game in played], resamples=harness.resamples, generator=generator)
         guesses = add_tallies(
             tally
-            for game, result in zip(games, played, strict=True)
+            for game, result in zip(games, match, strict=True)
             if (tally := result.guesses[game.a_seat]) is not None
         )
         record_evaluation(
@@ -208,5 +217,5 @@ def score_against_scripted(
                 **guess_details(guesses),
             },
         )
-        scores[name] = score
+        scores[action][name] = score
     return scores
