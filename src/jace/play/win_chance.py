@@ -26,6 +26,12 @@ __all__ = ("WinChanceModel",)
 _HIDDEN_CARD_NUMBERS = 2
 
 
+# TODO: Check more deeply whether reading the hidden cards is sound and whether it helps. The player's advantages
+# lean on later win chances (lambda below 1), and a critic that reads the true state but not the agent's own history
+# can bias the policy gradient (Baisero and Amato 2021, arXiv 2105.11674). This model reads the player's current view
+# and the hidden cards, but not the recent events or earlier guesses. A critic with extra information also gives the
+# same expected update with variance at least as large (Lyu et al. 2021, arXiv 2102.04402), so a gain is not given.
+# Settle both with a run against a win chance that reads only the player's view, and one that adds its history.
 class WinChanceModel(nn.Module):
     """Estimate the acting seat's chance to win from its board and the opponent's true hidden cards.
 
