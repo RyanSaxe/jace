@@ -295,6 +295,9 @@ def build_decks(
     deck are returned once. Choosing which candidate to play is left to the
     caller. Raises `NoLegalDeckError` when the pool cannot make a legal deck.
     """
+    # TODO: The builder reads only its own pool. When decks play opponents from their own pod, the cards
+    # passed to them could change a build, such as a main-deck artifact answer after passing three artifact
+    # bombs. That changes a build rarely, so the builder ignores draft history until in-pod play matters.
     copies = torch.ones(len(pool))
     pool_counts = torch.zeros(cards).index_add_(0, torch.tensor(pool, dtype=torch.int64), copies).to(device)
     proposed = propose(pool_counts, proposals)
