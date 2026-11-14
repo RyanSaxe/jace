@@ -170,7 +170,10 @@ def add_play_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--evaluate-deals", type=int, default=25, help="deals per opponent; each is four games")
     parser.add_argument("--evaluate-decks", type=int, default=64, help="held-out human decks the deals are drawn from")
     parser.add_argument(
-        "--passes", type=int, default=4, help="passes of the player's and the guess model's updates over each round"
+        "--passes",
+        type=int,
+        default=4,
+        help="passes of the player's and the guess model's updates over each block of games",
     )
     parser.add_argument(
         "--normalize",

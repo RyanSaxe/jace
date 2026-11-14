@@ -219,7 +219,7 @@ the same form, in the change it shapes.
   mattered.
 
   In jace, the win chance is its own network with its own optimizer, and
-  the player's update makes four passes over a round by default.
+  the player's update makes four passes over each block of games by default.
 
 - [Phasic Policy Gradient](https://arxiv.org/abs/2009.04416).
   Cobbe, Hilton, Klimov and Schulman, 2020. Policy and value losses
