@@ -295,6 +295,7 @@ class _Arguments(RunArguments):
     card_layers: int
     card_heads: int
     rate: float
+    encoder_rate: float
     dropout: float
     rare_penalty: float
     mana_penalty: float
@@ -312,7 +313,14 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument("--width", type=int, default=256)
     parser.add_argument("--layers", type=int, default=4)
     parser.add_argument("--heads", type=int, default=8)
-    parser.add_argument("--rate", type=float, default=5e-4, help="the peak learning rate of both optimizers")
+    parser.add_argument("--rate", type=float, default=5e-4, help="the drafter's peak learning rate")
+    parser.add_argument(
+        "--encoder-rate",
+        type=float,
+        default=1.5e-3,
+        help="the card encoder's peak learning rate; at a third of the drafter's it copies picks worse, at three times "
+        "a little better",
+    )
     parser.add_argument(
         "--dropout",
         type=float,
@@ -404,7 +412,7 @@ def main(argv: Sequence[str]) -> None:
     ).to(device)
     optimizers = [
         torch.optim.Adam(own_parameters(model, encoder), lr=arguments.rate, betas=ADAM_BETAS),
-        torch.optim.Adam(encoder.parameters(), lr=arguments.rate, betas=ADAM_BETAS),
+        torch.optim.Adam(encoder.parameters(), lr=arguments.encoder_rate, betas=ADAM_BETAS),
     ]
     settings = PretrainSettings(
         steps=arguments.steps,
