@@ -307,11 +307,16 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     add_run_flags(parser)
     add_card_flags(parser)
     parser.add_argument("--device", default="auto", help="cpu, mps or cuda; auto takes mps when it is available")
-    parser.add_argument("--steps", type=int, required=True, help="training steps")
-    parser.add_argument("--drafts-per-step", type=int, default=128)
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=4000,
+        help="training steps; with dropout 0.2 the held-out log loss still falls slowly at 4,000",
+    )
+    parser.add_argument("--drafts-per-step", type=int, default=256)
     parser.add_argument("--evaluate-every", type=int, default=500)
     parser.add_argument("--width", type=int, default=256)
-    parser.add_argument("--layers", type=int, default=4)
+    parser.add_argument("--layers", type=int, default=6, help="the drafter's layers, as train_limited builds it")
     parser.add_argument("--heads", type=int, default=8)
     parser.add_argument("--rate", type=float, default=5e-4, help="the drafter's peak learning rate")
     parser.add_argument(
@@ -324,7 +329,7 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument(
         "--dropout",
         type=float,
-        default=0.1,
+        default=0.2,
         help="dropout in the drafter's transformer; without it the drafter overfits its training drafts",
     )
     parser.add_argument("--rare-penalty", type=float, default=0.0, help="weight of the rare-drafting prior, 0 for off")
