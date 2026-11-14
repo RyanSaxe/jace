@@ -1,10 +1,11 @@
 """The types that connect models to the code that plays and trains.
 
 Collection, training and evaluation take a policy and a guesser as plain
-functions over batched tensors, so they work with any model and with the toy
-engine in tests. The real models in this package satisfy these types, and so
-does a three-line function written in a test. Every tensor here has a leading
-batch axis, one row per pending decision.
+functions over batched tensors, and training also takes a win chance, so
+they work with any model and with the toy engine in tests. The real models
+in this package satisfy these types, and so does a three-line function
+written in a test. Every tensor here has a leading batch axis, one row per
+pending decision.
 """
 
 from collections.abc import Callable, Mapping
@@ -12,7 +13,7 @@ from dataclasses import dataclass
 
 from torch import Tensor
 
-__all__ = ("Boards", "Earlier", "Guess", "Guesser", "Policy")
+__all__ = ("Boards", "Earlier", "Guess", "Guesser", "Policy", "WinChance")
 
 # The engine's named arrays as tensors, each [n, ...].
 type Boards = Mapping[str, Tensor]
@@ -39,3 +40,8 @@ type Policy = Callable[[Boards, Guess], tuple[Tensor, Tensor]]
 
 # (boards, the game's earlier guesses) -> the new guess, each [n, cards].
 type Guesser = Callable[[Boards, Earlier], Guess]
+
+# (boards, the opponent's true hidden cards as a `Guess`) -> the acting seat's chance to win [n].
+# Its `deck` is each card's share of the opponent's hand and library, and its `hand` is 1 where
+# the opponent holds the card. Only training calls one, so the hidden cards never reach a player.
+type WinChance = Callable[[Boards, Guess], Tensor]

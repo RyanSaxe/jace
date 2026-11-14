@@ -1,4 +1,4 @@
-"""Check the guess model and the player model on real engine boards.
+"""Check the guess model, the player model and the win-chance model on real engine boards.
 
 The boards in `tests/data/manabot_v10_boards.npz` are three decisions from
 real games, encoded by the engine adapter at input version 10, each with
@@ -18,7 +18,7 @@ from torch import Tensor
 
 from jace.cards import CardTable
 from jace.engine.manabot import board_layout
-from jace.play import Boards, Earlier, Guess, GuessModel, PlayerModel, random_policy
+from jace.play import Boards, Earlier, Guess, GuessModel, PlayerModel, WinChanceModel, random_policy
 
 __all__ = ()
 
@@ -33,10 +33,15 @@ def _real_boards() -> dict[str, Tensor]:
         return {name: torch.from_numpy(arrays[name]) for name in arrays.files}
 
 
+def _card_table(cards: int) -> CardTable:
+    # The first `cards` rows of one fixed table, so a larger pool keeps the smaller pool's vectors.
+    starting = torch.randn(MORE_CARDS, CARD_WIDTH, generator=torch.Generator().manual_seed(0))
+    return CardTable(starting[:cards])
+
+
 def _models(cards: int) -> tuple[PlayerModel, GuessModel]:
     torch.manual_seed(0)
-    starting = torch.randn(MORE_CARDS, CARD_WIDTH, generator=torch.Generator().manual_seed(0))
-    embedding = CardTable(starting[:cards])
+    embedding = _card_table(cards)
     engine_to_card = torch.arange(ENGINE_DEFINITIONS)
     player = PlayerModel(
         embedding,
@@ -50,6 +55,23 @@ def _models(cards: int) -> tuple[PlayerModel, GuessModel]:
     )
     guesser = GuessModel(embedding, engine_to_card=engine_to_card, layout=board_layout(), width=64, layers=2, heads=4)
     return player.eval(), guesser.eval()
+
+
+def _win_chance_model(cards: int) -> WinChanceModel:
+    torch.manual_seed(0)
+    engine_to_card = torch.arange(ENGINE_DEFINITIONS)
+    model = WinChanceModel(
+        _card_table(cards), engine_to_card=engine_to_card, layout=board_layout(), width=64, layers=2, heads=4
+    )
+    return model.eval()
+
+
+def _hidden_cards(*, in_hand: range) -> Guess:
+    # The opponent holds one copy of each of the first twenty cards unseen, those of `in_hand` in hand.
+    truth = Guess(deck=torch.zeros(3, CARDS), hand=torch.zeros(3, CARDS))
+    truth.deck[:, :20] = 1 / 20
+    truth.hand[:, in_hand] = 1.0
+    return truth
 
 
 def _some_guess(shape: tuple[int, ...], *, seed: int) -> Guess:
@@ -142,6 +164,20 @@ def test_random_policy_spreads_probability_evenly_over_legal_actions() -> None:
     assert torch.allclose(probabilities[:, 0], torch.tensor([1 / 5, 1 / 4, 1 / 2]))
     assert torch.equal(probabilities > 0, boards["actions_valid"] > 0)
     assert win_chance.tolist() == [0.5, 0.5, 0.5]
+
+
+def test_win_chance_reads_which_cards_the_opponent_truly_holds_in_hand() -> None:
+    # The same board and the same unseen cards, with different ones of them in the opponent's hand.
+    boards = _real_boards()
+    model = _win_chance_model(CARDS)
+
+    with torch.no_grad():
+        chance = model.win_chance(boards, _hidden_cards(in_hand=range(7)))
+        other_hand_chance = model.win_chance(boards, _hidden_cards(in_hand=range(10, 17)))
+
+    assert chance.shape == (3,)
+    assert bool(((chance > 0) & (chance < 1)).all())
+    assert not torch.allclose(chance, other_hand_chance)
 
 
 @pytest.mark.parametrize("earlier_guesses", [0, 3])
