@@ -127,10 +127,10 @@ class PlayArguments(RunArguments):
 
     `add_play_flags` adds them to a parser. They say how games are played
     (`workers` processes of `games_per_worker` games at once, a stalled one
-    replaced after `stall_seconds`), how the player learns from them, the
-    shapes of the player and the guess model, and how often and on how
-    many held-out deals the player is scored. `jace.loops.score` reads the
-    model shapes from a run's config under these names.
+    replaced after `stall_seconds`), how the player and the guess model
+    learn from them, their shapes, and how often and on how many held-out
+    deals the player is scored. `jace.loops.score` reads the model shapes
+    from a run's config under these names.
     """
 
     workers: int
@@ -173,7 +173,9 @@ def add_play_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--evaluate-every", type=int, default=10, help="score the player each N iterations")
     parser.add_argument("--evaluate-deals", type=int, default=25, help="deals per opponent; each is four games")
     parser.add_argument("--evaluate-decks", type=int, default=64, help="held-out human decks the deals are drawn from")
-    parser.add_argument("--passes", type=int, default=4, help="passes of the player's update over each round")
+    parser.add_argument(
+        "--passes", type=int, default=4, help="passes of the player's and the guess model's updates over each round"
+    )
     parser.add_argument(
         "--normalize",
         action=argparse.BooleanOptionalAction,

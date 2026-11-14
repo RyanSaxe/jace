@@ -103,8 +103,8 @@ rose after it.
 This is the rule manabot adapted from Ataraxos. With `stay`, `spread` and
 `keep_quantile` at zero it is plain PPO.
 
-`update_player` goes over the rollout `passes` times, and `update_guess`
-once. Both take the rows in a new random order on every pass. A rollout
+`update_player` and `update_guess` each go over the rollout `passes` times,
+and both take the rows in a new random order on every pass. A rollout
 lists its games one worker after another, so a slice of 512 rows cut in
 play order holds about eight games of a round's 48, and its gradient
 follows those games. Shuffled, every slice holds all of them. The

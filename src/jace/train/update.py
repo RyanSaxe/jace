@@ -132,24 +132,28 @@ def update_guess(
     slice_rows: int,
     max_grad_norm: float,
     optimizers: Sequence[Optimizer],
+    passes: int,
     generator: torch.Generator,
 ) -> Metrics:
-    """Run one pass of the guess model's update over `rollout`, in a random order.
+    """Run `passes` passes of the guess model's update over `rollout`.
 
     Each decision is scored against the opponent's true deck and hand. Its
     input includes the same seat's last `history` guesses in that game, as
     they were made during play, so the model learns from its own earlier
-    guesses and not from the truth. Those are looked up by row, so the
-    order of the rows does not matter to them. Returns the mean loss.
+    guesses and not from the truth, on every pass. Those are looked up by
+    row, so the order of the rows does not matter to them. Every pass takes
+    the rows in a new random order drawn from `generator`. Returns the mean
+    loss.
     """
     layout = sequences(rollout.games, rollout.seats)
     loss_total = 0.0
     slice_count = 0
-    for rows in torch.randperm(len(rollout.games), generator=generator).split(slice_rows):
-        part = select(rollout, rows)
-        guess = guesser(part.boards, earlier_guesses(rollout.guesses, layout, rows=rows, history=history))
-        loss = guess_loss(guess, deck_truth=part.deck_truth, hand_truth=part.hand_truth)
-        apply(loss, optimizers, max_grad_norm=max_grad_norm)
-        loss_total += float(loss.detach())
-        slice_count += 1
+    for _ in range(passes):
+        for rows in torch.randperm(len(rollout.games), generator=generator).split(slice_rows):
+            part = select(rollout, rows)
+            guess = guesser(part.boards, earlier_guesses(rollout.guesses, layout, rows=rows, history=history))
+            loss = guess_loss(guess, deck_truth=part.deck_truth, hand_truth=part.hand_truth)
+            apply(loss, optimizers, max_grad_norm=max_grad_norm)
+            loss_total += float(loss.detach())
+            slice_count += 1
     return {"loss": loss_total / max(slice_count, 1)}

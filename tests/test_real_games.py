@@ -90,6 +90,7 @@ def test_real_games_train_the_player_and_the_guess_model_for_one_step() -> None:
         slice_rows=64,
         max_grad_norm=1.0,
         optimizers=[torch.optim.Adam(own(guess), lr=1e-3)],
+        passes=1,
         generator=generator,
     )
 

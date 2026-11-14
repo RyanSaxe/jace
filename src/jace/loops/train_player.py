@@ -183,6 +183,7 @@ def _update(
         slice_rows=_SLICE_ROWS,
         max_grad_norm=_MAX_GRAD_NORM,
         optimizers=optimizers[1:],
+        passes=arguments.passes,
         generator=generator,
     )
     named = {f"player/{name}": value for name, value in player.items()}
