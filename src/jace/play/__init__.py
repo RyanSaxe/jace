@@ -9,7 +9,6 @@ the `Policy` and `Guesser` function types, and training also on the
 `WinChance` type, never on a model class.
 """
 
-from jace.play.device import guesser_on, policy_on, win_chance_on
 from jace.play.guess import GuessModel, MetaNotSetError
 from jace.play.meta import Meta, blend_meta, day_zero_meta, fit_meta
 from jace.play.player import PlayerModel, as_boards, random_policy
@@ -34,8 +33,5 @@ __all__ = (
     "blend_meta",
     "day_zero_meta",
     "fit_meta",
-    "guesser_on",
-    "policy_on",
     "random_policy",
-    "win_chance_on",
 )

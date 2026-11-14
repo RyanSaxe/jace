@@ -55,7 +55,7 @@ from jace.eval import (
     score_match,
 )
 from jace.loops.entry_points import card_inputs, load_card_table, playable_decks
-from jace.loops.matches import SCRIPTED, draw_deals, guess_details, play_match
+from jace.loops.matches import SCRIPTED, draw_deals, guess_details, play_matches
 from jace.play import GuessModel, PlayerModel
 from jace.tracking import CheckpointRef, ModelName, Running, evaluating, load_checkpoint, record_evaluation
 
@@ -379,9 +379,9 @@ def main(argv: Sequence[str]) -> None:
     with evaluating(arguments.run) as run:
         for a, b in pairs:
             began = time.perf_counter()
-            played = play_match(
+            (played,) = play_matches(
                 games,
-                (players[a], players[b]),
+                [(players[a], players[b])],
                 names=names,
                 workers=arguments.workers,
                 game_seconds=arguments.game_seconds,

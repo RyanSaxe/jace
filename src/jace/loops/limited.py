@@ -423,13 +423,13 @@ def limited_iteration(
     before, and `FIRST_CHECK` for the first. `dials` are this iteration's
     values from the schedule. `other_seats` are the drafters for the last
     seats of every pod, such as past versions; the learner drafts the rest.
-    `play` plays a list of matchups to the end with the learners' player in
-    both seats, on whatever engine and in whatever processes the caller
-    chose. Each block's games are the `balanced_matchups` of that block's
-    builds, so every deck plays the same number of games and none is cut
-    off. The builder learns only in an iteration whose search read the
-    learning deck score. The metrics include the seconds each of the four
-    steps took, playing and updating summed over the blocks.
+    `play` plays a list of matchups to the end with the learners' player in both
+    seats, on whatever engine and in whatever processes the caller chose, and
+    returns the decisions on the play models' device. Each block's games are the
+    `balanced_matchups` of that block's builds, so every deck plays the same
+    number of games and none is cut off. The builder learns only in an iteration
+    whose search read the learning deck score. The metrics include the seconds
+    each of the four steps took, playing and updating summed over the blocks.
     """
     generator = torch.Generator().manual_seed(rng.getrandbits(_SEED_BITS))
     _set_rate(learners.optimizers["player"], dials.player_rate)

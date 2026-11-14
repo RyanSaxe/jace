@@ -8,7 +8,10 @@ name a card, another board object or a small category, comes in a
 description of its arrays. The guess model and the player model read
 `BoardTokens`, and the guess model also reads `OpponentCards`, its counts
 of the opponent's cards. They read nothing else, so a change of engine or
-of encoder version stops here. `EntityEncoder` is the first layer both
+of encoder version stops here. The engine pads every kind of row to a
+fixed capacity, and in a real game most rows are padding, so the tokens
+keep each kind only up to its last real row in the batch and no layer
+reads the rest. `EntityEncoder` is the first layer both
 models share: it projects each kind of token to the model's width, adds
 the shared card embedding to the tokens that are a card, and adds to each
 permanent the object it is attached to or blocks. `CategoryEncoder` embeds
@@ -63,6 +66,9 @@ BOARD_ARRAYS = (
     "events_valid",
 )
 
+# The arrays whose rows `board_tokens` trims to the last real row of the batch. Each has a `_valid` array.
+_TRIMMED_ARRAYS = (*_ENTITY_ARRAYS, "actions", "events")
+
 # A category's value plus one, so that -1 for none is row 0, is clamped to the rows of its table,
 # and larger values share the last row. Mode and ability selectors are the largest categories: in
 # 7,000 decisions of random games, ability selectors stayed below 3 and mode selectors reached 17.
@@ -71,6 +77,10 @@ _CATEGORY_ROWS = 16
 
 @dataclass(frozen=True, slots=True)
 class BoardTokens:
+    # The engine pads every kind of row to a fixed capacity, and most rows are padding. Each kind
+    # here keeps its rows only up to the last real one in any board of the batch, so the rows of
+    # a kind can still hold padding, which the masks mark.
+    #
     # players: float [b, 2, player features]. Row 0 is the acting seat, row 1 its opponent.
     players: Tensor
     # cards: float [b, cards, card features], the acting seat's visible cards, then the opponent's.
@@ -93,6 +103,9 @@ class BoardTokens:
     action_mask: Tensor
     # action_focus: int64 [b, max_actions, 2], the entity numbers an action names, or -1 for none.
     action_focus: Tensor
+    # action_slots: the board's own number of action slots, of which the action fields keep the
+    # first max_actions. A policy scores every slot, so its logits keep the board's width.
+    action_slots: int
     # events: float [b, events, event features], oldest first.
     events: Tensor
     # event_categories: int64 [b, events, event categories], each a row of its column's table.
@@ -163,6 +176,30 @@ def _card_ids(definitions: Tensor, engine_to_card: Tensor) -> Tensor:
     return torch.where(engine_ids >= 0, engine_to_card[engine_ids.clamp_min(0)], -1)
 
 
+def _kept_rows(boards: Boards, *, layout: BoardLayout) -> dict[str, int]:
+    # How many leading rows of each trimmed array, and of the acting seat's decklist, every board of
+    # the batch fits in: up to the last real row. They are read from the device in one go, because
+    # each read waits for the device to finish its work.
+    real = {name: boards[f"{name}_valid"] > 0 for name in _TRIMMED_ARRAYS}
+    unseen, _ = layout.decklist_copies
+    real["decklists"] = boards["decklists"][:, 0, :, unseen] > 0
+    ends = [(rows * torch.arange(1, rows.shape[1] + 1, device=rows.device)).amax() for rows in real.values()]
+    return dict(zip(real, torch.stack(ends).tolist(), strict=True))
+
+
+def _entity_numbers(boards: Boards, kept: dict[str, int]) -> Tensor:
+    # int64 [padded entities]: the entity number of each object of the engine's padded order once
+    # each kind keeps only its leading rows, -1 for a row that was dropped. Nothing names a dropped
+    # row, because every row after a kind's last real one is padding.
+    numbers: list[int] = []
+    first = 0
+    for name in _ENTITY_ARRAYS:
+        capacity, count = boards[f"{name}_valid"].shape[1], kept[name]
+        numbers += [*range(first, first + count), *[-1] * (capacity - count)]
+        first += count
+    return torch.tensor(numbers, device=boards["actions"].device)
+
+
 def _categories(values: Tensor) -> Tensor:
     # values: float [..., columns], each -1 or 0 for none. Returns int64 rows of the category tables.
     rows = values.long() + 1
@@ -177,8 +214,9 @@ def board_tokens(boards: Boards, *, layout: BoardLayout, engine_to_card: Tensor)
     #     opponent, with the same columns, and a `_valid` array marks the real rows;
     #   - `action_focus` numbers objects as agent player, opponent player, agent cards,
     #     opponent cards, agent permanents, opponent permanents, each kind padded to its
-    #     capacity, so concatenating the arrays in that order makes a focus index the
-    #     position of its token. A permanent's link columns hold the same index plus one;
+    #     capacity, so concatenating the arrays in that order puts each object at its focus
+    #     index. A permanent's link columns hold the same index plus one. The tokens keep fewer
+    #     rows of each kind, so `_entity_numbers` maps each index to its object's token;
     #   - `semantic_cards` holds the definition id + 1 of each card row, acting seat first,
     #     and a permanent's row and a decklist's row hold the same in the columns `layout` names;
     #   - `player_turn_state` has one row for each seat and `card_turn_state` one value for
@@ -188,32 +226,46 @@ def board_tokens(boards: Boards, *, layout: BoardLayout, engine_to_card: Tensor)
     #
     # engine_to_card: int64 [engine definition ids], the `CardId` of each engine definition,
     # or -1 for a definition the card pool lacks.
-    players = torch.cat((boards["agent_player"], boards["opponent_player"]), dim=1)
+    kept = _kept_rows(boards, layout=layout)
+    rows = {name: boards[name][:, : kept[name]] for name in _TRIMMED_ARRAYS}
+    valid = {name: boards[f"{name}_valid"][:, : kept[name]] for name in _TRIMMED_ARRAYS}
+    agent_cards, opponent_cards = kept["agent_cards"], kept["opponent_cards"]
+    players = torch.cat((rows["agent_player"], rows["opponent_player"]), dim=1)
     players = torch.cat((players, boards["player_turn_state"]), dim=-1)
-    cards = torch.cat((boards["agent_cards"], boards["opponent_cards"]), dim=1)
-    cards = torch.cat((cards, boards["card_turn_state"].flatten(1)[..., None]), dim=-1)
-    permanents = torch.cat((boards["agent_permanents"], boards["opponent_permanents"]), dim=1)
-    definitions = torch.cat((boards["semantic_cards"].flatten(1), permanents[..., layout.permanent_definition]), dim=1)
-    entity_valid = torch.cat([boards[f"{name}_valid"] for name in _ENTITY_ARRAYS], dim=1)
-    actions, events = boards["actions"], boards["events"]
-    decklist = boards["decklists"][:, 0]  # the acting seat's: [b, decklist rows, decklist columns]
+    turn_state = boards["card_turn_state"]
+    card_turn_state = torch.cat((turn_state[:, 0, :agent_cards], turn_state[:, 1, :opponent_cards]), dim=1)
+    cards = torch.cat((rows["agent_cards"], rows["opponent_cards"]), dim=1)
+    cards = torch.cat((cards, card_turn_state[..., None]), dim=-1)
+    permanents = torch.cat((rows["agent_permanents"], rows["opponent_permanents"]), dim=1)
+    semantic = boards["semantic_cards"]
+    definitions = torch.cat(
+        (semantic[:, 0, :agent_cards], semantic[:, 1, :opponent_cards], permanents[..., layout.permanent_definition]),
+        dim=1,
+    )
+    entity_valid = torch.cat([valid[name] for name in _ENTITY_ARRAYS], dim=1)
+    entity_numbers = _entity_numbers(boards, kept)
+    # Both hold positions in the engine's padded order, -1 for none. A link holds its object's position plus one.
+    links = permanents[..., list(layout.permanent_links)].long() - 1
+    focus = boards["action_focus"][:, : kept["actions"]].long()
+    actions, events = rows["actions"], rows["events"]
+    # The acting seat's decklist: [b, decklist rows, decklist columns].
+    decklist = boards["decklists"][:, 0, : kept["decklists"]]
     unseen, _ = layout.decklist_copies
     return BoardTokens(
         players=_squash(players),
         cards=_squash(cards),
         permanents=_squash(permanents[..., list(layout.permanent_features)]),
-        # A link holds its object's position in the focus order plus one, and the entities are the
-        # same rows in the same order, so the link minus one is the object's entity number.
-        permanent_links=permanents[..., list(layout.permanent_links)].long() - 1,
+        permanent_links=torch.where(links >= 0, entity_numbers[links.clamp_min(0)], -1),
         entity_mask=entity_valid > 0,
         card_ids=_card_ids(definitions, engine_to_card),
         actions=_squash(actions[..., list(layout.action_features)]),
         action_categories=_categories(actions[..., list(layout.action_categories)]),
-        action_mask=legal_actions(boards),
-        action_focus=boards["action_focus"].long(),
+        action_mask=valid["actions"] > 0,
+        action_focus=torch.where(focus >= 0, entity_numbers[focus.clamp_min(0)], -1),
+        action_slots=boards["actions_valid"].shape[1],
         events=_squash(events[..., list(layout.event_features)]),
         event_categories=_categories(events[..., list(layout.event_categories)]),
-        event_mask=boards["events_valid"] > 0,
+        event_mask=valid["events"] > 0,
         deck_card_ids=_card_ids(decklist[..., layout.decklist_definition], engine_to_card),
         deck_copies=_squash(decklist[..., list(layout.decklist_copies)]),
         deck_mask=decklist[..., unseen] > 0,
@@ -232,7 +284,7 @@ def gather_entities(entities: Tensor, numbers: Tensor) -> Tensor:
     batch, rows, slots = numbers.shape
     named = (numbers >= 0).reshape(batch, rows * slots, 1)
     index = numbers.clamp_min(0).reshape(batch, rows * slots, 1).expand(-1, -1, entities.shape[-1])
-    return (entities.gather(1, index) * named).reshape(batch, rows, -1)
+    return (entities.gather(1, index) * named).reshape(batch, rows, slots * entities.shape[-1])
 
 
 class EntityEncoder(nn.Module):

@@ -167,7 +167,10 @@ The guess model, the player and the win chance read manabot's encoded
 boards directly. That knowledge sits in
 [`jace/play/tokens.py`](../../src/jace/play/tokens.py): in `board_tokens`,
 whose comment lists every array it assumes, and in `opponent_cards`, which
-counts the opponent's cards for the guess model's meta guess.
+counts the opponent's cards for the guess model's meta guess. The engine pads
+each kind of row to a fixed capacity, such as 80 cards and 512 actions,
+and a real board fills few of them, so `board_tokens` keeps each kind only
+up to its last real row in the batch.
 
 Most columns of a board are numbers, such as a creature's power. Some name
 something instead: a card definition, another object on the board, or a

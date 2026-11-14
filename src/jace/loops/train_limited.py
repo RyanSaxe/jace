@@ -61,7 +61,7 @@ from jace.loops.formats import booster_cards, deck_rules, limited_format
 from jace.loops.limited import Learners, LimitedSetup, limited_iteration
 from jace.loops.matches import Harness
 from jace.loops.schedules import phased_schedule
-from jace.play import GuessModel, PlayerModel, WinChanceModel, blend_meta, guesser_on, policy_on, win_chance_on
+from jace.play import GuessModel, PlayerModel, WinChanceModel, blend_meta
 from jace.tracking import (
     CheckpointRef,
     ModelName,
@@ -72,7 +72,7 @@ from jace.tracking import (
     save_checkpoint,
     writing,
 )
-from jace.train import Collected, PlayerRule
+from jace.train import Collected, PlayerRule, to_device
 from jace.train.workers import play_on_workers, start_workers, stop_workers
 
 __all__ = ("main",)
@@ -428,9 +428,9 @@ def main(argv: Sequence[str]) -> None:
     )
     device = _move(models, frozen=[*filter(None, [human_drafter]), human_score], to=device_named(arguments.device))
     learners = Learners(
-        policy=policy_on(models.player.policy, device),
-        win_chance=win_chance_on(models.win_chance.win_chance, device),
-        guesser=guesser_on(models.guess.guess, device),
+        policy=models.player.policy,
+        win_chance=models.win_chance.win_chance,
+        guesser=models.guess.guess,
         drafter=models.drafter,
         human_drafter=human_drafter,
         builder=models.builder,
@@ -449,12 +449,12 @@ def main(argv: Sequence[str]) -> None:
     )
 
     def play(matchups: Sequence[Matchup]) -> Collected:
-        # The workers of one round are the ones the round before left, with any stalled one replaced.
+        # Reuses the last round's workers, a stalled one replaced, and moves the decisions to the models' device.
         nonlocal workers
         collected, workers = play_on_workers(
             workers, matchups, weights=play_weights(play_models), stall_seconds=arguments.stall_seconds
         )
-        return collected
+        return replace(collected, rollout=to_device(collected.rollout, device))
 
     def iterate(iteration: int) -> dict[str, float]:
         # Each iteration hands the deck-score check it ends with to the next.

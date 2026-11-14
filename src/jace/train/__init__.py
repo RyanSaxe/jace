@@ -17,6 +17,7 @@ from jace.train.collect import (
     join,
     play_games,
     select,
+    to_device,
 )
 from jace.train.losses import (
     PlayerRule,
@@ -54,6 +55,7 @@ __all__ = (
     "score_loss",
     "select",
     "sequences",
+    "to_device",
     "update_guess",
     "update_player",
     "win_chance_loss",

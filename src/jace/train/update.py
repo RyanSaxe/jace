@@ -8,6 +8,9 @@ new random order on every pass. A rollout lists its games one worker after
 another, so a slice cut in play order would hold a handful of games, and
 its gradient would follow those games and not the round. `update_player`
 also trains the win chance its advantages come from, on the same slices.
+Both run on the device that holds the rollout, which must be the models'
+device: every slice is cut and every loss computed there, and the losses
+are read back once, after the last pass.
 """
 
 from collections.abc import Mapping, Sequence
@@ -71,10 +74,11 @@ def update_player(
     `loss` and the win chance's as `win_chance_loss`, the share of decisions
     kept, and the learner's mean advantage size before any normalizing.
     """
+    device = rollout.results.device
     layout = sequences(rollout.games, rollout.seats)
-    chances = torch.empty(len(rollout.games))
+    chances = torch.empty(len(rollout.games), device=device)
     with torch.no_grad():
-        for rows in torch.arange(len(rollout.games)).split(slice_rows):
+        for rows in torch.arange(len(rollout.games), device=device).split(slice_rows):
             part = select(rollout, rows)
             chances[rows] = win_chance(part.boards, Guess(deck=part.deck_truth, hand=part.hand_truth))
     advantage = advantages(chances, rollout.results, layout=layout, lam=lam_advantage)
@@ -86,10 +90,10 @@ def update_player(
     keep = rollout.learner & (advantage_size >= max(threshold, rule.keep_floor))
     if rule.normalize and int(keep.sum()) > 1:
         advantage = (advantage - advantage[keep].mean()) / advantage[keep].std().clamp_min(_SMALLEST_SPREAD)
-    policy_losses: list[float] = []
-    chance_losses: list[float] = []
+    policy_losses: list[Tensor] = []
+    chance_losses: list[Tensor] = []
     for _ in range(passes):
-        for rows in torch.randperm(len(advantage), generator=generator).split(slice_rows):
+        for rows in torch.randperm(len(advantage), generator=generator).to(device).split(slice_rows):
             part = select(rollout, rows)
             policy_loss = player_loss(
                 policy(part.boards, part.guesses),
@@ -106,11 +110,11 @@ def update_player(
                 learner=part.learner,
             )
             apply(chance_loss, win_chance_optimizers, max_grad_norm=max_grad_norm)
-            policy_losses.append(float(policy_loss.detach()))
-            chance_losses.append(float(chance_loss.detach()))
+            policy_losses.append(policy_loss.detach())
+            chance_losses.append(chance_loss.detach())
     return {
-        "loss": sum(policy_losses) / max(len(policy_losses), 1),
-        "win_chance_loss": sum(chance_losses) / max(len(chance_losses), 1),
+        "loss": _mean(policy_losses),
+        "win_chance_loss": _mean(chance_losses),
         "kept_share": float(keep.float().mean()),
         "advantage_size": float(learner_sizes.mean()) if len(learner_sizes) else 0.0,
     }
@@ -137,15 +141,19 @@ def update_guess(
     the rows in a new random order drawn from `generator`. Returns the mean
     loss.
     """
+    device = rollout.results.device
     layout = sequences(rollout.games, rollout.seats)
-    loss_total = 0.0
-    slice_count = 0
+    losses: list[Tensor] = []
     for _ in range(passes):
-        for rows in torch.randperm(len(rollout.games), generator=generator).split(slice_rows):
+        for rows in torch.randperm(len(rollout.games), generator=generator).to(device).split(slice_rows):
             part = select(rollout, rows)
             guess = guesser(part.boards, earlier_guesses(rollout.guesses, layout, rows=rows, history=history))
             loss = guess_loss(guess, deck_truth=part.deck_truth, hand_truth=part.hand_truth)
             apply(loss, optimizers, max_grad_norm=max_grad_norm)
-            loss_total += float(loss.detach())
-            slice_count += 1
-    return {"loss": loss_total / max(slice_count, 1)}
+            losses.append(loss.detach())
+    return {"loss": _mean(losses)}
+
+
+def _mean(losses: list[Tensor]) -> float:
+    # The mean of the slices' losses, zero for no slice. Reading a loss waits for the device, so it is read once.
+    return float(torch.stack(losses).mean()) if losses else 0.0

@@ -25,7 +25,7 @@ import random
 import sys
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -54,7 +54,7 @@ from jace.loops.entry_points import (
     starting_meta,
 )
 from jace.loops.matches import Harness
-from jace.play import Guess, blend_meta, guesser_on, policy_on, win_chance_on
+from jace.play import blend_meta
 from jace.tracking import (
     CheckpointRef,
     ModelName,
@@ -65,7 +65,7 @@ from jace.tracking import (
     save_checkpoint,
     writing,
 )
-from jace.train import Collected, PlayerRule, PlayGames, Rollout, update_guess, update_player
+from jace.train import Collected, PlayerRule, PlayGames, Rollout, to_device, update_guess, update_player
 from jace.train.workers import play_on_workers, start_workers, stop_workers
 
 __all__ = ("main",)
@@ -156,13 +156,7 @@ def _update(
     generator: torch.Generator,
 ) -> dict[str, float]:
     # One update of the player and its win chance and one of the guess model on a round's games.
-    device = models.embedding.device
-    # The model's inputs go to its device once, so every slice of every pass is cut there.
-    on_device = replace(
-        rollout,
-        boards={name: board.to(device) for name, board in rollout.boards.items()},
-        guesses=Guess(deck=rollout.guesses.deck.to(device), hand=rollout.guesses.hand.to(device)),
-    )
+    on_device = to_device(rollout, models.embedding.device)
     rule = PlayerRule(
         clip=_CLIP,
         stay=_STAY,
@@ -172,9 +166,9 @@ def _update(
         normalize=arguments.normalize,
     )
     player = update_player(
-        policy_on(models.player.policy, device),
+        models.player.policy,
         on_device,
-        win_chance=win_chance_on(models.win_chance.win_chance, device),
+        win_chance=models.win_chance.win_chance,
         rule=rule,
         lam_advantage=arguments.lam_advantage,
         lam_value=arguments.lam_value,
@@ -186,7 +180,7 @@ def _update(
         generator=generator,
     )
     guess = update_guess(
-        guesser_on(models.guess.guess, device),
+        models.guess.guess,
         on_device,
         history=arguments.history,
         slice_rows=_SLICE_ROWS,

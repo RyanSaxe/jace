@@ -35,6 +35,7 @@ __all__ = (
     "join",
     "play_games",
     "select",
+    "to_device",
 )
 
 
@@ -119,6 +120,21 @@ def select(rollout: Rollout, rows: Tensor) -> Rollout:
     return Rollout(
         boards={name: rows_of(array) for name, array in rollout.boards.items()},
         guesses=Guess(deck=rows_of(rollout.guesses.deck), hand=rows_of(rollout.guesses.hand)),
+        **plain,
+    )
+
+
+def to_device(rollout: Rollout, device: torch.device) -> Rollout:
+    # Every field of `rollout` on `device`. An update on a GPU moves its rollout there once, so each
+    # slice of every pass is cut on the GPU and no model input crosses from the CPU again.
+    plain = {
+        field.name: getattr(rollout, field.name).to(device)
+        for field in fields(Rollout)
+        if field.name not in {"boards", "guesses"}
+    }
+    return Rollout(
+        boards={name: array.to(device) for name, array in rollout.boards.items()},
+        guesses=Guess(deck=rollout.guesses.deck.to(device), hand=rollout.guesses.hand.to(device)),
         **plain,
     )
 

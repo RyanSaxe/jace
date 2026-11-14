@@ -410,19 +410,22 @@ def score_player(
     # Scores the player as it is now against random play, scripted greedy and the heuristic player, once
     # sampling its actions and once taking its top action, and records each result under `checkpoint`.
     # Returns the win rates by opponent name, with "_top" after the name for the top action.
-    rates: dict[str, float] = {}
-    for action in ("sampled", "top"):
-        suffix = "_top" if action == "top" else ""
-        scores = score_against_scripted(
-            run,
-            checkpoint,
-            player=model_player(models.player, models.guess, history=history, action=action),
-            action=action,
-            harness=harness,
-            generator=torch.Generator().manual_seed(checkpoint.update),
-        )
-        rates |= {f"{name}{suffix}": score.rate.rate for name, score in scores.items()}
-    return rates
+    scores = score_against_scripted(
+        run,
+        checkpoint,
+        players={
+            action: model_player(models.player, models.guess, history=history, action=action)
+            for action in ("sampled", "top")
+        },
+        harness=harness,
+        seed=checkpoint.update,
+    )
+    suffixes = {"sampled": "", "top": "_top"}
+    return {
+        f"{name}{suffixes[action]}": score.rate.rate
+        for action, by_name in scores.items()
+        for name, score in by_name.items()
+    }
 
 
 def land_and_spell_rates(rollout: Rollout) -> dict[str, float]:
