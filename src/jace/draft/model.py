@@ -21,7 +21,7 @@ from torch import Tensor, nn
 
 from jace.cards import CardId, CardVectors
 from jace.draft.drafting import Drafter, SeatView
-from jace.modules import transformer
+from jace.modules import DROPOUT, transformer
 
 __all__ = ("DrafterModel", "model_drafter", "view_tensors")
 
@@ -33,9 +33,12 @@ class DrafterModel(nn.Module):
     the pack it came from, and a learned position. The current pack is one
     more token, and the encoder's output at that token is the query. `picks`
     is the largest number of picks in a draft, which sizes the positions.
+    `dropout` is the encoder's, and acts only in training mode.
     """
 
-    def __init__(self, embedding: CardVectors, *, width: int, layers: int, heads: int, picks: int) -> None:
+    def __init__(
+        self, embedding: CardVectors, *, width: int, layers: int, heads: int, picks: int, dropout: float = DROPOUT
+    ) -> None:
         super().__init__()
         card_width = embedding.width
         self.embedding: CardVectors = embedding
@@ -45,7 +48,7 @@ class DrafterModel(nn.Module):
         self.positions: nn.Embedding = nn.Embedding(picks, width)
         # Stands where an earlier token has its picked card.
         self.current: nn.Parameter = nn.Parameter(torch.zeros(width))
-        self.encoder: nn.TransformerEncoder = transformer(width, layers=layers, heads=heads)
+        self.encoder: nn.TransformerEncoder = transformer(width, layers=layers, heads=heads, dropout=dropout)
 
     @override
     def forward(self, seen: Tensor, picks: Tensor, *, pack: Tensor) -> Tensor:

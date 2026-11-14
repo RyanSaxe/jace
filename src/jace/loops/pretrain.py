@@ -165,6 +165,8 @@ def pretrain_drafter(
     lives on the CPU. Every point of the curve is also logged to `run` under
     "drafter". The last point holds the final held-out accuracy. The
     training drafts measured are the first ones, as many as are held out.
+    The model is measured in eval mode, so without its dropout, and is left
+    in training mode.
     """
     device = model.embedding.device
     cards = model.embedding.cards
@@ -188,10 +190,12 @@ def pretrain_drafter(
         apply(loss, optimizers, max_grad_norm=settings.max_grad_norm)
         loss_sum += float(loss.detach())
         if step % settings.evaluate_every == 0 or step == settings.steps:
+            model.eval()  # turns dropout off while measuring
             accuracy, on_training = (
                 pick_accuracy(model.whole_draft, drafts, rows=rows, cards=cards, device=device, settings=settings)
                 for rows in (held_out, measured_training)
             )
+            model.train()
             point = CurvePoint(
                 step=step,
                 loss=loss_sum / (step - (curve[-1].step if curve else 0)),
@@ -291,6 +295,7 @@ class _Arguments(RunArguments):
     card_layers: int
     card_heads: int
     rate: float
+    dropout: float
     rare_penalty: float
     mana_penalty: float
     mana_margin: float
@@ -308,6 +313,12 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument("--layers", type=int, default=4)
     parser.add_argument("--heads", type=int, default=8)
     parser.add_argument("--rate", type=float, default=5e-4, help="the peak learning rate of both optimizers")
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=0.1,
+        help="dropout in the drafter's transformer; without it the drafter overfits its training drafts",
+    )
     parser.add_argument("--rare-penalty", type=float, default=0.0, help="weight of the rare-drafting prior, 0 for off")
     parser.add_argument("--mana-penalty", type=float, default=0.0, help="weight of the mana-cost prior, 0 for off")
     parser.add_argument("--mana-margin", type=float, default=1.0)
@@ -389,6 +400,7 @@ def main(argv: Sequence[str]) -> None:
         layers=arguments.layers,
         heads=arguments.heads,
         picks=limited_format(arguments.set_code).picks,
+        dropout=arguments.dropout,
     ).to(device)
     optimizers = [
         torch.optim.Adam(own_parameters(model, encoder), lr=arguments.rate, betas=ADAM_BETAS),

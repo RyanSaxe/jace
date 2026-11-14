@@ -37,14 +37,14 @@ def _lowest_card_drafts(drafts: int, *, generator: torch.Generator) -> HumanDraf
     return HumanDrafts(packs=packs, picks=lowest, weights=torch.ones(drafts, steps), held_out=held_out)
 
 
-def _model() -> DrafterModel:
+def _model(*, dropout: float) -> DrafterModel:
     embedding = CardTable(torch.randn(_CARDS, 8))
-    return DrafterModel(embedding, width=16, layers=2, heads=2, picks=_ROUNDS * _PICKS_PER_ROUND)
+    return DrafterModel(embedding, width=16, layers=2, heads=2, picks=_ROUNDS * _PICKS_PER_ROUND, dropout=dropout)
 
 
 def test_scoring_a_whole_draft_gives_each_pick_the_logits_it_gets_from_its_own_history() -> None:
     torch.manual_seed(0)
-    model = _model()
+    model = _model(dropout=0.0)
     seen = (torch.rand(3, 6, _CARDS) < 0.4).float()
     seen[:, :, 0] = 1.0
     picks = torch.randint(_CARDS, (3, 6))
@@ -62,7 +62,7 @@ def test_pretraining_on_picks_that_follow_a_rule_learns_the_rule_on_held_out_dra
     torch.manual_seed(0)
     generator = torch.Generator().manual_seed(0)
     drafts = _lowest_card_drafts(64, generator=generator)
-    model = _model()
+    model = _model(dropout=0.1)
     optimizers = [torch.optim.Adam(model.parameters(), lr=1e-2)]
     settings = PretrainSettings(steps=60, drafts_per_step=16, evaluate_every=20, evaluate_drafts=16, max_grad_norm=1.0)
     identity = Identity(config={}, seed=0, jace_commit="test", manabot_commit="test", inputs=())
@@ -70,8 +70,9 @@ def test_pretraining_on_picks_that_follow_a_rule_learns_the_rule_on_held_out_dra
     folder = create_run(tmp_path, identity, clock=clock)
     held_out = drafts.held_out.nonzero().squeeze(1)
     untrained = pick_accuracy(
-        model.whole_draft, drafts, rows=held_out, cards=_CARDS, device=torch.device("cpu"), settings=settings
+        model.eval().whole_draft, drafts, rows=held_out, cards=_CARDS, device=torch.device("cpu"), settings=settings
     )
+    model.train()
 
     with writing(folder, clock=clock) as run:
         curve = pretrain_drafter(
@@ -88,3 +89,4 @@ def test_pretraining_on_picks_that_follow_a_rule_learns_the_rule_on_held_out_dra
     assert untrained.top1 < 0.8
     assert curve[-1].top1 > 0.95
     assert curve[-1].log_loss < untrained.log_loss / 2
+    assert model.training
