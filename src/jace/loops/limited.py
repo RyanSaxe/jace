@@ -1,15 +1,19 @@
 """One iteration of limited training, written from the package's pieces.
 
-This is an example loop, not a framework: it drafts pods, builds a deck from
-every pool, plays the decks against each other in blocks and updates every
-model, in that order, as plain calls. The player and the guess model update
-after every block, because a policy-gradient step learns only from games
-its current weights played. The deck models and the drafter update once,
-from every block's games, because each needs one steady win rate per deck.
-Constructed play would be another short function that skips the first two
-steps. A user who wants a different order, another
-reward or another explore rule edits this function or writes their own; the
-pieces it calls do not change.
+This is an example loop, not a framework: it drafts pods, searches decks
+for every pool, plays them against each other in blocks and updates every
+model, in that order, as plain calls. The search keeps each pool's best
+few decks by the deck score, and block `b` plays every pool's `b`-th, so a
+pool's builds are compared on games against the same field. The player and
+the guess model update after every block, because a policy-gradient step
+learns only from games its current weights played. The deck models and the
+drafter update once per iteration, from every block's games. The builder
+learns from each build's win rate against its pool's other builds, and only
+once the search reads the deck score that learns from self-play, which
+`jace.loops.checked_score` decides. Constructed play would be another short
+function that skips the first two steps. A user who wants a different
+order, another reward or another explore rule edits this function or writes
+their own; the pieces it calls do not change.
 
 No update here steps the shared card embedding. Every model reads cards
 through it, so a step taken for one model's loss would change what every
@@ -28,21 +32,10 @@ from torch import Tensor
 from torch.optim import Optimizer
 
 from jace.cards import CardId, CardPool, Deck, Rarity
-from jace.decks import (
-    BuildRules,
-    Candidate,
-    DeckBuilderModel,
-    DeckScore,
-    build_decks,
-    model_proposer,
-    rules_for_pool,
-    writing_steps,
-)
+from jace.decks import BuildRules, Builds, DeckBuilder, DeckScore, build_decks, build_log_probs, join_builds
 from jace.draft import (
-    BoosterSpec,
     Drafter,
     DrafterModel,
-    DraftFormat,
     DraftRecord,
     SeatView,
     model_drafter,
@@ -51,6 +44,8 @@ from jace.draft import (
     view_tensors,
 )
 from jace.engine import SEATS
+from jace.loops.checked_score import PlayedDecks, ScoreCheck, ScoreRule, check_scores, train_learning_score
+from jace.loops.formats import LimitedFormat
 from jace.loops.schedules import Dials
 from jace.play import Guesser, Policy, WinChance
 from jace.tracking import ModelName
@@ -64,7 +59,6 @@ from jace.train import (
     choice_loss,
     entropy,
     kl_to,
-    score_loss,
     update_guess,
     update_player,
 )
@@ -81,27 +75,31 @@ _EVEN_ODDS = 0.5
 class LimitedSetup:
     """Everything about a run that stays fixed from one iteration to the next.
 
-    `booster_cards` lists the cards a booster may hold, by rarity. `pods`
-    drafts are run per iteration, and each pool gets `proposals`
-    candidate decks improved for `search_rounds` rounds. Every deck then
-    plays `blocks` blocks of `games_per_block` games each, and the player
-    and the guess model update after each block. `history` is how many earlier guesses the
+    `limited_format` sizes the drafts, and `rules` are the deck rules
+    `deck_rules` derives from it for the card pool. `booster_cards` lists
+    the cards a booster may hold, by rarity. `pods`
+    drafts are run per iteration, and the search samples `deck_samples`
+    decks for each pool, `spells_per_round` cards in each round of the
+    builder at `deck_temperature`, and keeps the `blocks` distinct decks
+    the deck score ranks best. Block `b` plays build `b` of every pool,
+    `games_per_block` games each, and the player and the guess model update
+    after each block. `score_rule` says how the learning deck score trains
+    and when the search switches to it. `history` is how many earlier guesses the
     guess model is shown. `player_rule` is the player's update rule; its
     `spread` is replaced each iteration by the schedule's, and `passes` is
     how many times the player's and the guess model's updates go over a
-    block's games. `score_chunk` bounds how many decks the deck score rates
-    in one call during the search.
+    block's games.
     """
 
     pool: CardPool
-    draft_format: DraftFormat
-    booster: BoosterSpec
+    limited_format: LimitedFormat
     booster_cards: Mapping[Rarity, Sequence[CardId]]
     rules: BuildRules
     pods: int
-    proposals: int
-    search_rounds: int
-    score_chunk: int
+    deck_samples: int
+    spells_per_round: int
+    deck_temperature: float
+    score_rule: ScoreRule
     blocks: int
     games_per_block: int
     history: int
@@ -126,11 +124,13 @@ class Learners:
     model's and the guess model's functions, which depend on the engine's
     board layout. `human_drafter` is the frozen drafter trained on human
     picks that `Dials.human_pull` pulls toward, or `None` for no pull.
-    `optimizers` holds one optimizer per model, keyed "player",
-    "win_chance", "guess", "drafter", "deck_builder" and "deck_score", over
-    that model's own parameters. The win chance learns at the player's
-    rate. None of them may hold the shared card embedding's parameters:
-    build each from `own_parameters`.
+    `score` is the deck score that learns from self-play, and `human_score`
+    the frozen one trained on human decks, which the search reads until the
+    learning copy has earned its place. `optimizers` holds one optimizer per
+    model, keyed "player", "win_chance", "guess", "drafter", "deck_builder"
+    and "deck_score", over that model's own parameters. The win chance
+    learns at the player's rate. None of them may hold the shared card
+    embedding's parameters: build each from `own_parameters`.
     """
 
     policy: Policy
@@ -138,8 +138,9 @@ class Learners:
     guesser: Guesser
     drafter: DrafterModel
     human_drafter: DrafterModel | None
-    builder: DeckBuilderModel
+    builder: DeckBuilder
     score: DeckScore
+    human_score: DeckScore
     optimizers: Mapping[ModelName, Optimizer]
 
 
@@ -152,56 +153,47 @@ def _draft(
     setup: LimitedSetup, *, drafter: Drafter, other_seats: Sequence[Drafter], rng: random.Random
 ) -> tuple[DraftRecord, ...]:
     # The learner's drafter fills every seat that `other_seats` does not.
-    seats = setup.draft_format.seats
+    seats = setup.limited_format.draft.seats
     drafters = [*([drafter] * (seats - len(other_seats))), *other_seats]
     boosters = [
         [
-            [open_booster(setup.booster, setup.booster_cards, rng=rng) for _ in range(seats)]
-            for _ in range(setup.draft_format.rounds)
+            [open_booster(setup.limited_format.booster, setup.booster_cards, rng=rng) for _ in range(seats)]
+            for _ in range(setup.limited_format.draft.rounds)
         ]
         for _ in range(setup.pods)
     ]
-    return run_drafts(setup.draft_format, boosters, drafters=drafters)
+    return run_drafts(setup.limited_format.draft, boosters, drafters=drafters)
 
 
 def _build(
-    setup: LimitedSetup, learners: Learners, *, records: Sequence[DraftRecord], dials: Dials, rng: random.Random
-) -> tuple[list[Candidate], list[Candidate]]:
-    # Returns (the deck played for each pool, the top-scored deck for each pool), pools in pod then seat order.
-    generator = torch.Generator().manual_seed(rng.getrandbits(_SEED_BITS))
-
-    def score(decks: Tensor) -> Tensor:
-        parts = [learners.score(part) for part in decks.split(setup.score_chunk)]
-        return torch.cat(parts)
-
-    played_decks: list[Candidate] = []
-    best_decks: list[Candidate] = []
-    for record in records:
-        for pool in record.pools:
-            # A drafter that took too many lands still gets a deck, with as many lands as it must play.
-            rules = rules_for_pool(setup.rules, pool)
-            candidates = build_decks(
-                pool,
-                cards=len(setup.pool),
-                device=learners.drafter.embedding.device,
-                propose=model_proposer(learners.builder, rules=rules, generator=generator),
-                score=score,
-                rules=rules,
-                proposals=setup.proposals,
-                rounds=setup.search_rounds,
-            )
-            explore = len(candidates) > 1 and rng.random() < dials.explore_share
-            played_decks.append(rng.choice(candidates[1:]) if explore else candidates[0])
-            best_decks.append(candidates[0])
-    return played_decks, best_decks
-
-
-def _counts(decks: Sequence[Deck], *, cards: int, device: torch.device) -> Tensor:
-    # Returns float [decks, cards] on `device`, the copies of each card in each deck.
-    counts = torch.zeros(len(decks), cards)
-    for row, deck in enumerate(decks):
-        counts[row].index_add_(0, torch.tensor(deck), torch.ones(len(deck)))
-    return counts.to(device)
+    setup: LimitedSetup,
+    learners: Learners,
+    *,
+    records: Sequence[DraftRecord],
+    check: ScoreCheck,
+    generator: torch.Generator,
+) -> Builds:
+    # Returns one row per pool and block, pools in pod then seat order and each pool's blocks in a row: block b
+    # plays the build the search ranked b-th. A pool with fewer distinct decks than blocks plays its best again.
+    score = learners.score if check.reads_learning else learners.human_score
+    ranked = [
+        build_decks(
+            pool,
+            builder=learners.builder,
+            score=score,
+            rules=setup.rules,
+            cards=len(setup.pool),
+            samples=setup.deck_samples,
+            keep=setup.blocks,
+            spells_per_round=setup.spells_per_round,
+            temperature=setup.deck_temperature,
+            generator=generator,
+        )[0]
+        for record in records
+        for pool in record.pools
+    ]
+    in_each_block = torch.arange(setup.blocks, device=learners.builder.cards.embedding.device)
+    return join_builds([builds.rows(in_each_block % len(builds.decks)) for builds in ranked])
 
 
 def balanced_matchups(pods: int, *, seats: int, games_per_deck: int, rng: random.Random) -> list[tuple[int, int]]:
@@ -255,7 +247,7 @@ def _update_drafter(
     dials: Dials,
 ) -> Metrics:
     # win_rates, games_played: [pods * seats] in pod then seat order. Seats whose deck played no game teach nothing.
-    seats = setup.draft_format.seats
+    seats = setup.limited_format.draft.seats
     views: list[SeatView] = []
     chosen: list[int] = []
     rewards: list[float] = []
@@ -317,8 +309,8 @@ def _update_play_models(
 
 @dataclass(frozen=True, slots=True)
 class _Blocks:
-    # wins, games_played: float [decks], summed over every block. metrics: the counts summed over the blocks and
-    # each update's numbers averaged over them. seconds: (playing, updating), summed over the blocks.
+    # wins, games_played: float [blocks, decks], each block's record of each deck. metrics: the counts summed over
+    # the blocks and each update's numbers averaged over them. seconds: (playing, updating), summed over the blocks.
     wins: Tensor
     games_played: Tensor
     metrics: Metrics
@@ -329,27 +321,26 @@ def _play_blocks(
     setup: LimitedSetup,
     learners: Learners,
     *,
-    decks: Sequence[Deck],
+    decks: Sequence[Sequence[Deck]],
     play: PlayGames,
     dials: Dials,
     rng: random.Random,
     generator: torch.Generator,
 ) -> _Blocks:
-    # Plays `setup.blocks` blocks of the decks' games and updates the player and the guess model after each.
-    wins = torch.zeros(len(decks))
-    games_played = torch.zeros(len(decks))
+    # decks: one list of every pool's deck per block. Plays each block's games and updates the player and the guess
+    # model after each.
+    wins = torch.zeros(len(decks), len(decks[0]))
+    games_played = torch.zeros(len(decks), len(decks[0]))
     counts: collections.Counter[str] = collections.Counter()
     updates: collections.defaultdict[str, list[float]] = collections.defaultdict(list)
     playing = updating = 0.0
-    for _ in range(setup.blocks):
+    for block, block_decks in enumerate(decks):
         began = time.perf_counter()
         schedule = balanced_matchups(
-            setup.pods, seats=setup.draft_format.seats, games_per_deck=setup.games_per_block, rng=rng
+            setup.pods, seats=setup.limited_format.draft.seats, games_per_deck=setup.games_per_block, rng=rng
         )
-        collected = play([(decks[first], decks[second]) for first, second in schedule])
-        block_wins, block_games = _deck_records(schedule, collected.games, decks=len(decks))
-        wins += block_wins
-        games_played += block_games
+        collected = play([(block_decks[first], block_decks[second]) for first, second in schedule])
+        wins[block], games_played[block] = _deck_records(schedule, collected.games, decks=len(block_decks))
         counts.update(
             games=len(collected.games),
             abandoned=collected.abandoned,
@@ -368,97 +359,118 @@ def _play_blocks(
     return _Blocks(wins=wins, games_played=games_played, metrics=metrics, seconds=(playing, updating))
 
 
-def _update_deck_score(
-    setup: LimitedSetup, learners: Learners, *, decks: Sequence[Deck], wins: Tensor, games_played: Tensor
-) -> Metrics:
-    # wins, games_played: [decks]. Decks that played no game teach nothing.
-    has_games = games_played > 0
-    if not bool(has_games.any()):
-        nothing: dict[str, float] = {}
-        return nothing
-    device = learners.drafter.embedding.device
-    logits = learners.score(_counts(decks, cards=len(setup.pool), device=device)[has_games.to(device)])
-    loss = score_loss(logits, wins=wins[has_games].to(device), games=games_played[has_games].to(device))
-    apply(loss, [learners.optimizers["deck_score"]], max_grad_norm=setup.max_grad_norm)
-    return {"deck_score/loss": float(loss.detach())}
-
-
 def _update_builder(
-    setup: LimitedSetup,
-    learners: Learners,
-    *,
-    records: Sequence[DraftRecord],
-    best_decks: Sequence[Candidate],
-    generator: torch.Generator,
+    setup: LimitedSetup, learners: Learners, *, played: Builds, wins: Tensor, games: Tensor, dials: Dials
 ) -> Metrics:
-    # Teaches the builder to write the top-scored deck the search found for each pool.
-    cards = len(setup.pool)
-    device = learners.drafter.embedding.device
-    pools = _counts([pool for record in records for pool in record.pools], cards=cards, device=device)
-    best = _counts([candidate.deck for candidate in best_decks], cards=cards, device=device)
-    available, partial, chosen = writing_steps(best, pool_counts=pools, rules=setup.rules, generator=generator)
-    loss = choice_loss(learners.builder(available, partial), chosen, weights=torch.ones(len(chosen), device=device))
+    # played: one row per pool and block, as `_build` returns them. wins, games: float [pools * blocks], each build's
+    # record. A build's reward is its win rate minus the mean of its pool's builds', the shared baseline of POMO.
+    games_by_pool = games.view(-1, setup.blocks)
+    rates = wins.view(-1, setup.blocks) / games_by_pool.clamp_min(1.0)
+    has_games = games_by_pool > 0
+    baseline = (rates * has_games).sum(dim=1, keepdim=True) / has_games.sum(dim=1, keepdim=True).clamp_min(1)
+    advantages = (rates - baseline)[has_games]
+    log_probs, entropies = build_log_probs(
+        learners.builder,
+        played.rows(has_games.flatten().nonzero().squeeze(1)),
+        rules=setup.rules,
+        spells_per_round=setup.spells_per_round,
+        temperature=setup.deck_temperature,
+    )
+    loss = -(advantages * log_probs).mean() - dials.builder_entropy * entropies.mean()
     apply(loss, [learners.optimizers["deck_builder"]], max_grad_norm=setup.max_grad_norm)
-    return {"deck_builder/loss": float(loss.detach())}
+    return {"deck_builder/loss": float(loss.detach()), "deck_builder/entropy": float(entropies.mean().detach())}
+
+
+def _block_decks(decks: Tensor, *, blocks: int) -> list[list[Deck]]:
+    # decks: float [pools * blocks, cards], as `_build` lays them out. Returns each block's list of every pool's deck.
+    every_card = torch.arange(decks.shape[1])
+    as_ids = [tuple(every_card.repeat_interleave(row).tolist()) for row in decks.long().cpu()]
+    return [as_ids[block::blocks] for block in range(blocks)]
 
 
 def limited_iteration(
     setup: LimitedSetup,
     learners: Learners,
     *,
+    check: ScoreCheck,
     dials: Dials,
     other_seats: Sequence[Drafter],
     play: PlayGames,
     rng: random.Random,
-) -> Metrics:
-    """Draft, build, play and learn once, and return the metrics of every update.
+) -> tuple[Metrics, ScoreCheck]:
+    """Draft, build, play and learn once, and return the metrics of every update with the deck-score check after it.
 
-    `dials` are this iteration's values from the schedule. `other_seats`
-    are the drafters for the last seats of every pod, such as past
-    versions; the learner drafts the rest. `play` plays a list of matchups
-    to the end with the learners' player in both seats, on whatever engine
-    and in whatever processes the caller chose. Each block's games are the
-    `balanced_matchups` of the decks just built, so every deck plays the
-    same number of games and none is cut off. The metrics include the
-    seconds each of the four steps took, playing and updating summed over
-    the blocks.
+    `check` is what the deck-score check carried out of the iteration
+    before, and `FIRST_CHECK` for the first. `dials` are this iteration's
+    values from the schedule. `other_seats` are the drafters for the last
+    seats of every pod, such as past versions; the learner drafts the rest.
+    `play` plays a list of matchups to the end with the learners' player in
+    both seats, on whatever engine and in whatever processes the caller
+    chose. Each block's games are the `balanced_matchups` of that block's
+    builds, so every deck plays the same number of games and none is cut
+    off. The builder learns only in an iteration whose search read the
+    learning deck score. The metrics include the seconds each of the four
+    steps took, playing and updating summed over the blocks.
     """
     generator = torch.Generator().manual_seed(rng.getrandbits(_SEED_BITS))
     _set_rate(learners.optimizers["player"], dials.player_rate)
     _set_rate(learners.optimizers["win_chance"], dials.player_rate)
     _set_rate(learners.optimizers["drafter"], dials.drafter_rate)
-    _set_rate(learners.optimizers["deck_score"], dials.deck_rate)
-    _set_rate(learners.optimizers["deck_builder"], dials.deck_rate)
+    _set_rate(learners.optimizers["deck_score"], dials.score_rate)
+    _set_rate(learners.optimizers["deck_builder"], dials.builder_rate)
 
     began = time.perf_counter()
     drafter = model_drafter(learners.drafter, generator=generator)
     records = _draft(setup, drafter=drafter, other_seats=other_seats, rng=rng)
     drafted = time.perf_counter()
-    played_decks, best_decks = _build(setup, learners, records=records, dials=dials, rng=rng)
-    decks = [candidate.deck for candidate in played_decks]
+    played = _build(setup, learners, records=records, check=check, generator=generator)
     built = time.perf_counter()
-    blocks = _play_blocks(setup, learners, decks=decks, play=play, dials=dials, rng=rng, generator=generator)
-    wins, games_played = blocks.wins, blocks.games_played
+    blocks = _play_blocks(
+        setup,
+        learners,
+        decks=_block_decks(played.decks, blocks=setup.blocks),
+        play=play,
+        dials=dials,
+        rng=rng,
+        generator=generator,
+    )
     deck_updates_began = time.perf_counter()
 
-    metrics = dict(blocks.metrics)
-    if dials.deck_rate > 0:
-        metrics |= _update_deck_score(setup, learners, decks=decks, wins=wins, games_played=games_played)
-        metrics |= _update_builder(setup, learners, records=records, best_decks=best_decks, generator=generator)
+    device = played.decks.device
+    wins, games = blocks.wins.T.flatten().to(device), blocks.games_played.T.flatten().to(device)
+    has_games = games > 0
+    tested = PlayedDecks(decks=played.decks[has_games], wins=wins[has_games], games=games[has_games])
+    after, checked = check_scores(
+        check, played=tested, human=learners.human_score, learning=learners.score, rule=setup.score_rule
+    )
+    metrics = dict(blocks.metrics) | dict(checked)
+    if dials.score_rate > 0:
+        metrics |= train_learning_score(
+            learners.score,
+            learners.human_score,
+            recent=after.recent,
+            rule=setup.score_rule,
+            optimizer=learners.optimizers["deck_score"],
+            max_grad_norm=setup.max_grad_norm,
+        )
+    if check.reads_learning and dials.builder_rate > 0:
+        metrics |= _update_builder(setup, learners, played=played, wins=wins, games=games, dials=dials)
     if dials.drafter_rate > 0:
+        # A pool's deck is its best build, the one the deck score ranked first, which block 0 played.
         metrics |= _update_drafter(
             setup,
             learners,
             records=records,
-            learner_seats=setup.draft_format.seats - len(other_seats),
-            win_rates=wins / games_played.clamp_min(1.0),
-            games_played=games_played,
+            learner_seats=setup.limited_format.draft.seats - len(other_seats),
+            win_rates=blocks.wins[0] / blocks.games_played[0].clamp_min(1.0),
+            games_played=blocks.games_played[0],
             dials=dials,
         )
     playing, updating = blocks.seconds
-    return metrics | {
+    seconds = {
         "draft_seconds": drafted - began,
         "build_seconds": built - drafted,
         "play_seconds": playing,
         "update_seconds": updating + time.perf_counter() - deck_updates_began,
     }
+    return metrics | seconds, after

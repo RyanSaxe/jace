@@ -5,7 +5,8 @@ order of the cards cannot matter and a deck of any size fits. Its only
 knowledge of the cards comes through the shared `CardVectors`, and none of
 its own parameters has a slot per card, so it scores decks that hold cards
 from a set it was not trained on. `CardSetEncoder` is the part it shares with
-the deck builder's model: both turn per-card amounts into one vector.
+the deck builder: the score reads the mean of its card encodings, and the
+builder reads each card's encoding to score that card.
 """
 
 from collections.abc import Callable
@@ -33,9 +34,10 @@ class CardSetEncoder(nn.Module):
 
     A card is in a row's set when any of its amounts is above zero. Each such
     card becomes one token: its projected embedding plus a learned encoding
-    of its amounts. A transformer encoder reads the tokens and the result is
-    their mean. Amounts enter through `log1p`, so a count of 17 basic lands
-    stays in the range the encoding saw for small counts.
+    of its amounts. A transformer encoder reads the tokens. `encode` returns
+    each card's encoding and calling the module returns their mean. Amounts
+    enter through `log1p`, so a count of 17 basic lands stays in the range
+    the encoding saw for small counts.
     """
 
     def __init__(self, embedding: CardVectors, *, amounts: int, width: int, layers: int, heads: int) -> None:
@@ -53,9 +55,10 @@ class CardSetEncoder(nn.Module):
         )
         self.encoder: nn.TransformerEncoder = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
 
-    @override
-    def forward(self, amounts: Tensor) -> Tensor:
-        # amounts: float [b, cards, amounts]. Returns float [b, width].
+    def encode(self, amounts: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        # amounts: float [b, cards, amounts]. Returns (tokens, cards, real): each row's present cards, in id order and
+        # then padding, as float [b, longest, width] encodings, int64 [b, longest] card ids and bool [b, longest],
+        # true for a present card. A padding position holds a card that is not present, so no id repeats in a row.
         present = amounts.gt(0).any(dim=-1)  # bool [b, cards]
         sizes = present.sum(dim=1)  # int64 [b], distinct cards in each row
         if not bool(sizes.gt(0).all()):
@@ -63,13 +66,19 @@ class CardSetEncoder(nn.Module):
         longest = int(sizes.max())
         # A stable sort of the flags puts each row's present cards first, in id order.
         cards = present.int().argsort(dim=1, descending=True, stable=True)[:, :longest]  # int64 [b, longest]
-        padding = ~present.gather(1, cards)  # bool [b, longest]
+        real = present.gather(1, cards)  # bool [b, longest]
         kept = amounts.gather(1, cards.unsqueeze(-1).expand(-1, -1, amounts.shape[-1]))  # [b, longest, amounts]
         tokens = self.project(self.embedding(cards)) + self.amount(kept.log1p())
         # `forward` is called directly because it is typed and takes the mask by keyword.
-        encoded = self.encoder.forward(tokens, src_key_padding_mask=padding)  # [b, longest, width]
-        real = (~padding).unsqueeze(-1).to(encoded.dtype)
-        return (encoded * real).sum(dim=1) / sizes.unsqueeze(-1)
+        encoded = self.encoder.forward(tokens, src_key_padding_mask=~real)  # [b, longest, width]
+        return encoded, cards, real
+
+    @override
+    def forward(self, amounts: Tensor) -> Tensor:
+        # amounts: float [b, cards, amounts]. Returns float [b, width], the mean of the present cards' encodings.
+        encoded, _, real = self.encode(amounts)
+        weights = real.unsqueeze(-1).to(encoded.dtype)
+        return (encoded * weights).sum(dim=1) / weights.sum(dim=1)
 
 
 class DeckScore(nn.Module):

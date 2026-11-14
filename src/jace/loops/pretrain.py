@@ -45,6 +45,7 @@ from jace.loops.entry_points import (
     device_named,
     start_run,
 )
+from jace.loops.formats import limited_format
 from jace.loops.schedules import RateScale, current_rates, scale_rates, warm_up_then_decay
 from jace.tracking import Running, log_update, save_checkpoint, writing
 from jace.train import apply, choice_loss
@@ -345,7 +346,11 @@ def main(argv: Sequence[str]) -> None:
         heads=arguments.card_heads,
     )
     model = DrafterModel(
-        encoder, width=arguments.width, layers=arguments.layers, heads=arguments.heads, picks=drafts.picks.shape[1]
+        encoder,
+        width=arguments.width,
+        layers=arguments.layers,
+        heads=arguments.heads,
+        picks=limited_format(arguments.set_code).picks,
     ).to(device)
     optimizers = [
         torch.optim.Adam(own_parameters(model, encoder), lr=arguments.rate, betas=ADAM_BETAS),

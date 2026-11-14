@@ -1,17 +1,18 @@
 """Train the deck score and the deck builder on human decks, before any self-play.
 
 The deck score learns each deck's chance of winning a game from the wins
-and losses of the event it played. The deck builder learns to write the
-human's deck for a pool one card at a time, from every partial deck that a
-random order of the deck passes through, so it also learns to finish a deck
-that is partly built. Both read the card vectors of a drafter pretraining
-run, frozen into a `CardTable`, so neither can move what the drafter
-learned about the cards.
+and losses of the event it played. The deck builder learns the human's deck
+for a pool by teacher forcing: the deck's spells and nonbasic lands in a
+random order, cut into the rounds the builder samples in, the human's land
+total and the human's basics split. A new random order each time the deck
+is drawn teaches it to finish a deck from any partial one. Both read the
+card vectors of a drafter pretraining run, frozen into a `CardTable`, so
+neither can move what the drafter learned about the cards.
 
 Basic lands follow `BuildRules`: a deck may hold any number of them, so the
-builder is always offered as many basics as the deck has empty slots, and
-the basics counted in a human pool are ignored. Only human decks that the
-rules allow teach or test the builder. The deck score reads every deck.
+builder never reads the basics counted in a human pool and splits the land
+slots left with its basics head. Only human decks that the rules allow
+teach or test the builder. The deck score reads every deck.
 
 Run it with `uv run python -m jace.loops.pretrain_decks --help`. The card
 set must already be downloaded with `uv run spells add <set>`.
@@ -22,7 +23,7 @@ import functools
 import json
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,31 +34,22 @@ from torch.optim import Optimizer
 
 from jace.cards import own_parameters
 from jace.data import RESULT_FLOOR, HumanDecks, load_decks, read_set
-from jace.decks import (
-    BuildRules,
-    DeckBuilderModel,
-    DeckScore,
-    Proposer,
-    Scorer,
-    model_proposer,
-    random_proposer,
-    writing_steps,
-)
+from jace.decks import BuildRules, DeckBuilder, DeckScore, Scorer, build_log_probs, builds_from_decks, sample_builds
 from jace.loops.entry_points import (
     ADAM_BETAS,
     RunArguments,
     add_run_flags,
     card_inputs,
     device_named,
-    limited_rules,
     load_card_table,
     set_cards,
     start_run,
 )
+from jace.loops.formats import deck_rules, limited_format
 from jace.loops.schedules import RateScale, current_rates, scale_rates, warm_up_then_decay
 from jace.tracking import Running, log_update, save_checkpoint
 from jace.tracking import writing as writing_run
-from jace.train import apply, choice_loss, score_loss
+from jace.train import apply, score_loss
 
 __all__ = (
     "BuilderPoint",
@@ -78,6 +70,9 @@ _GAMES_FOR_A_RATE = 5
 _SCORE_CHUNK = 1024
 # Keeps the correlation finite when every prediction is the same.
 _SMALLEST_CORRELATION_SCALE = 1e-12
+
+# Takes float [n, cards] pools and returns float [n, cards], one deck built from each.
+type WriteDecks = Callable[[Tensor], Tensor]
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,10 +202,11 @@ def score_fit(score: Scorer, decks: HumanDecks, *, rows: Tensor, device: torch.d
 
 
 def pretrain_deck_builder(
-    model: DeckBuilderModel,
+    model: DeckBuilder,
     decks: HumanDecks,
     *,
     rules: BuildRules,
+    spells_per_round: int,
     optimizers: Sequence[Optimizer],
     rate_scale: RateScale,
     settings: DeckSettings,
@@ -219,13 +215,15 @@ def pretrain_deck_builder(
 ) -> tuple[BuilderPoint, ...]:
     """Train `model` to write the human deck for a pool and return its learning curve.
 
-    Each step puts the cards of `decks_per_step` human decks in a random
-    order and trains on every prefix of every order: given the cards written
-    so far and the rest of the pool, the target is the card the order adds
-    next. A deck's examples weigh the share of games its event won, kept at
-    or above `jace.data.RESULT_FLOOR` as the pick weights are, and the
-    weights of a batch average one. Only decks that
-    `allowed_by(rules, decks)` accepts are used, for training and measuring.
+    Each step lays `decks_per_step` human decks out with `builds_from_decks`
+    and lowers their negative log-probability under the builder's sampling
+    at temperature 1, in rounds of `spells_per_round`, so one call of the
+    model learns every round of every deck. A deck's log-probability weighs
+    the share of games its event won, kept at or above
+    `jace.data.RESULT_FLOOR` as the pick weights are, and the weights of a
+    batch average one. Only decks that `allowed_by(rules, decks)` accepts
+    are used, for training and measuring. The measure is `deck_overlap` of
+    the builder's likeliest deck for each held-out pool.
 
     `optimizers` and `rate_scale` are as in `pretrain_deck_score`.
     `generator` draws the batches and the orders and lives on the CPU. Every
@@ -237,23 +235,38 @@ def pretrain_deck_builder(
     held_out = (allowed & decks.held_out).nonzero().squeeze(1)[: settings.evaluate_decks]
     wins = decks.wins.float()
     result = (wins / (wins + decks.losses.float()).clamp_min(1.0)).clamp_min(RESULT_FLOOR)  # [drafts]
-    best_guess = model_proposer(model, rules=rules, generator=torch.Generator(device=device), greedy=True)
+
+    def likeliest(pools: Tensor) -> Tensor:
+        built, _ = sample_builds(
+            model,
+            pools,
+            rules=rules,
+            spells_per_round=spells_per_round,
+            temperature=1.0,
+            generator=generator,
+            greedy=True,
+        )
+        return built.decks
+
     starting_rates = current_rates(optimizers)
     curve: list[BuilderPoint] = []
     loss_sum = 0.0
     for step in range(1, settings.steps + 1):
         chosen = training[torch.randint(len(training), (settings.decks_per_step,), generator=generator)]
-        available, partial, added = writing_steps(
-            decks.decks[chosen].float(), pool_counts=decks.pools[chosen].float(), rules=rules, generator=generator
+        builds = builds_from_decks(
+            decks.decks[chosen].to(device).float(),
+            pools=decks.pools[chosen].to(device).float(),
+            rules=rules,
+            generator=generator,
         )
-        weights = result[chosen].repeat_interleave(rules.size)  # [b * size], in the order of the steps
-        logits = model(available.to(device), partial.to(device))
-        loss = choice_loss(logits, added.to(device), weights=(weights / weights.mean()).to(device))
+        log_probs, _ = build_log_probs(model, builds, rules=rules, spells_per_round=spells_per_round, temperature=1.0)
+        weights = result[chosen].to(device)
+        loss = -(weights / weights.mean() * log_probs).mean()
         scale_rates(optimizers, starting_rates, factor=rate_scale(step))
         apply(loss, optimizers, max_grad_norm=settings.max_grad_norm)
         loss_sum += float(loss.detach())
         if step % settings.evaluate_every == 0 or step == settings.steps:
-            overlap = deck_overlap(best_guess, decks, rows=held_out, rules=rules, device=device)
+            overlap = deck_overlap(likeliest, decks, rows=held_out, rules=rules, device=device)
             steps_since_point = step - (curve[-1].step if curve else 0)
             point = BuilderPoint(step, loss_sum / steps_since_point, overlap)
             log_update(
@@ -265,26 +278,23 @@ def pretrain_deck_builder(
 
 
 def deck_overlap(
-    propose: Proposer, decks: HumanDecks, *, rows: Tensor, rules: BuildRules, device: torch.device
+    write: WriteDecks, decks: HumanDecks, *, rows: Tensor, rules: BuildRules, device: torch.device
 ) -> float:
-    """Measure how much of each human deck `propose` rebuilds from the same pool.
+    """Measure how much of each human deck `write` rebuilds from the same pool.
 
-    `rows` is int64 `[n]`, the decks to rebuild. For each, `propose` writes
-    one deck from the human's pool, and the deck's share is the number of
-    the human deck's non-basic cards that the written deck also holds,
-    counting copies, over the human deck's non-basic cards. Returns the mean
-    share. Basics are left out because they are free to add, so matching
-    them says little. One pool is built at a time, which is what a
-    `Proposer` takes.
+    `rows` is int64 `[n]`, the decks to rebuild. `write` builds one deck
+    from each of their human pools, all in one call. A deck's share is the
+    number of the human deck's non-basic cards that the written deck also
+    holds, counting copies, over the human deck's non-basic cards. Returns
+    the mean share. Basics are left out because they are free to add, so
+    matching them says little.
     """
     not_basic = torch.ones(decks.decks.shape[1], dtype=torch.bool, device=device)
     not_basic[list(rules.basics)] = False
-    shares: list[Tensor] = []
-    for row in rows.tolist():
-        human = decks.decks[row].to(device).float()[not_basic]
-        built = propose(decks.pools[row].to(device).float(), 1)[0][not_basic]
-        shares.append(torch.minimum(built, human).sum() / human.sum())
-    return float(torch.stack(shares).mean())
+    with torch.no_grad():
+        built = write(decks.pools[rows].to(device).float())[:, not_basic]
+    human = decks.decks[rows].to(device).float()[:, not_basic]
+    return float((torch.minimum(built, human).sum(dim=1) / human.sum(dim=1)).mean())
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +308,7 @@ class _Arguments(RunArguments):
     score_evaluate_every: int
     builder_evaluate_every: int
     builder_evaluate_decks: int
+    spells_per_round: int
     width: int
     layers: int
     heads: int
@@ -317,10 +328,13 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
         help="a drafter pretraining run folder whose newest card encoder the models read, frozen",
     )
     parser.add_argument("--score-decks-per-step", type=int, default=256)
-    parser.add_argument("--builder-decks-per-step", type=int, default=32, help="each deck is 40 training examples")
+    parser.add_argument("--builder-decks-per-step", type=int, default=128)
     parser.add_argument("--score-evaluate-every", type=int, default=250)
     parser.add_argument("--builder-evaluate-every", type=int, default=500)
     parser.add_argument("--builder-evaluate-decks", type=int, default=300, help="held-out pools built per measurement")
+    parser.add_argument(
+        "--spells-per-round", type=int, default=6, help="spells or nonbasic lands the builder draws between two calls"
+    )
     parser.add_argument("--width", type=int, default=128)
     parser.add_argument("--layers", type=int, default=3)
     parser.add_argument("--heads", type=int, default=4)
@@ -334,10 +348,11 @@ def main(argv: Sequence[str]) -> None:
     The score trains first and the builder second, on one card table.
     The run folder is created under `--run-dir` by `jace.tracking` and gets
     a "deck_score", a "deck_builder" and an "embedding" checkpoint. The
-    curves are written beside it as `<run id>.curve.json` with two
-    baselines measured on the same held-out decks: the log loss of
-    predicting the training decks' overall win rate for every deck, and the
-    overlap of one random legal deck from each pool.
+    curves are written beside it as `<run id>.curve.json`, with the log
+    loss of predicting the training decks' overall win rate for every
+    held-out deck as the score's baseline. The builder's curve measures its
+    likeliest deck, and the summary adds the overlap of one deck sampled at
+    temperature 1 from each of the same held-out pools.
     """
     arguments = _arguments(argv)
     device = device_named(arguments.device)
@@ -347,13 +362,13 @@ def main(argv: Sequence[str]) -> None:
     decks = load_decks(
         data.games, pool=cards.pool, cache_dir=arguments.data_dir, held_out_share=arguments.held_out_share
     )
-    rules = limited_rules(cards)
+    rules = deck_rules(limited_format(arguments.set_code), cards)
     embedding, embedding_ref = load_card_table(
         arguments.embedding_run, inputs=card_inputs(data, cards, data_dir=arguments.data_dir)
     )
     shape = {"width": arguments.width, "layers": arguments.layers, "heads": arguments.heads}
     score = DeckScore(embedding, **shape).to(device)
-    builder = DeckBuilderModel(embedding, **shape).to(device)
+    builder = DeckBuilder(embedding, **shape).to(device)
 
     def optimizers(model: nn.Module) -> list[Optimizer]:
         return [torch.optim.Adam(own_parameters(model, embedding), lr=arguments.rate, betas=ADAM_BETAS)]
@@ -392,6 +407,7 @@ def main(argv: Sequence[str]) -> None:
             builder,
             decks,
             rules=rules,
+            spells_per_round=arguments.spells_per_round,
             optimizers=optimizers(builder),
             rate_scale=warm_up_then_decay(arguments.builder_steps),
             settings=builder_settings,
@@ -411,7 +427,18 @@ def main(argv: Sequence[str]) -> None:
     overall = score_fit(lambda counts: mean_rate.logit().expand(len(counts)), decks, rows=held_out, device=cpu)
     allowed = allowed_by(rules, decks)
     built = (allowed & decks.held_out).nonzero().squeeze(1)[: arguments.builder_evaluate_decks]
-    random_deck = random_proposer(rules=rules, generator=generator)
+
+    def sampled(pools: Tensor) -> Tensor:
+        builds, _ = sample_builds(
+            builder,
+            pools,
+            rules=rules,
+            spells_per_round=arguments.spells_per_round,
+            temperature=1.0,
+            generator=generator,
+        )
+        return builds.decks
+
     summary = {
         "run_id": folder.name,
         "device": device.type,
@@ -429,9 +456,7 @@ def main(argv: Sequence[str]) -> None:
             "seconds": builder_seconds,
             "training_decks": int((allowed & training).sum()),
             "held_out_pools_built": len(built),
-            "baselines": {
-                "random_legal_deck": {"overlap": deck_overlap(random_deck, decks, rows=built, rules=rules, device=cpu)}
-            },
+            "sampled_overlap": deck_overlap(sampled, decks, rows=built, rules=rules, device=device),
             "curve": [asdict(point) for point in builder_curve],
         },
     }

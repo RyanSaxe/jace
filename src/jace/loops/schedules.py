@@ -37,11 +37,13 @@ _RATE_CAP = 1e-4
 _SPREAD_START = 0.05
 _SPREAD_POWER = 0.3
 
-# First guesses with no source, to be replaced by measured values.
+# First guesses with no source, to be replaced by measured values. The builder's are the drafter's,
+# because both take a policy-gradient step on their decks' win rates.
 _DRAFTER_RATE = 1e-5
-_DECK_RATE = 1e-4
+_SCORE_RATE = 1e-4
+_BUILDER_RATE = 1e-5
 _DRAFTER_ENTROPY = 0.01
-_EXPLORE_SHARE = 0.1
+_BUILDER_ENTROPY = 0.01
 # The drafter's rate ramps up over this fraction of the iterations it was frozen for.
 _DRAFTER_WARM_UP = 0.1
 
@@ -55,21 +57,24 @@ _LAST_RATE_SHARE = 0.1
 class Dials:
     """The values a limited iteration reads, for one iteration.
 
-    `player_rate`, `deck_rate` and `drafter_rate` are learning rates; a rate
-    of zero freezes that model. `deck_rate` is the rate of both deck models.
-    `spread` is the player's pull toward even odds over legal actions. `human_pull` weighs the drafter's pull toward the
-    human-trained drafter, and `drafter_entropy` its bonus for keeping pick
-    odds spread out. `explore_share` is the share of pools for which a deck
-    other than the top-scored one is played.
+    `player_rate`, `score_rate`, `builder_rate` and `drafter_rate` are
+    learning rates; a rate of zero freezes that model. `score_rate` is the
+    rate of the learning deck score, and the builder learns at
+    `builder_rate` only once the search reads that score. `spread` is the
+    player's pull toward even odds over legal actions. `human_pull` weighs
+    the drafter's pull toward the human-trained drafter.
+    `drafter_entropy` and `builder_entropy` weigh each one's bonus for
+    keeping its odds spread out.
     """
 
     player_rate: float
     spread: float
-    deck_rate: float
+    score_rate: float
+    builder_rate: float
     drafter_rate: float
     human_pull: float
     drafter_entropy: float
-    explore_share: float
+    builder_entropy: float
 
 
 # iteration, counted from 1 -> that iteration's dials.
@@ -93,17 +98,18 @@ def ramp(iteration: int, *, start: int, end: int, first: float, last: float) -> 
     return first + (last - first) * (iteration - start) / (end - start)
 
 
-def phased_schedule(*, decks_start: int, drafter_starts: int, pull_ends: int) -> Schedule:
+def phased_schedule(*, drafter_starts: int, pull_ends: int) -> Schedule:
     """Build a schedule with soft phases, as a starting point to edit.
 
     The player's rate and spread follow Ataraxos's published curves from the
-    first iteration. The deck models stay frozen until `decks_start` and
-    the drafter until `drafter_starts`, so the player's results mean
-    something before they rank decks or steer picks. The deck models then
-    learn at a fixed rate. The drafter's rate ramps up over a tenth of the
-    iterations it was frozen for, and its pull toward the human drafter
-    falls in a straight line to zero at `pull_ends`. The drafter's
-    numbers and the explore share are first guesses with no source.
+    first iteration. The deck models' rates are fixed: when the builder
+    starts learning is not a phase of the schedule but the loop's checked
+    switch to the learning deck score. The drafter stays frozen until
+    `drafter_starts`, so the player's results mean something before they
+    steer picks. Its rate then ramps up over a tenth of the iterations it
+    was frozen for, and its pull toward the human drafter falls in a
+    straight line to zero at `pull_ends`. The deck models' and the
+    drafter's numbers are first guesses with no source.
     """
 
     def schedule(iteration: int) -> Dials:
@@ -111,11 +117,12 @@ def phased_schedule(*, decks_start: int, drafter_starts: int, pull_ends: int) ->
         return Dials(
             player_rate=power_decay(iteration, scale=_RATE_SCALE, power=_RATE_POWER, low=_RATE_FLOOR, high=_RATE_CAP),
             spread=power_decay(iteration, scale=_SPREAD_START, power=_SPREAD_POWER, low=0.0, high=_SPREAD_START),
-            deck_rate=_DECK_RATE if iteration >= decks_start else 0.0,
+            score_rate=_SCORE_RATE,
+            builder_rate=_BUILDER_RATE,
             drafter_rate=ramp(iteration, start=drafter_starts, end=drafter_warm_end, first=0.0, last=_DRAFTER_RATE),
             human_pull=ramp(iteration, start=drafter_starts, end=pull_ends, first=1.0, last=0.0),
             drafter_entropy=_DRAFTER_ENTROPY,
-            explore_share=_EXPLORE_SHARE,
+            builder_entropy=_BUILDER_ENTROPY,
         )
 
     return schedule

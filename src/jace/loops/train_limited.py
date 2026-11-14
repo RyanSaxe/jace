@@ -1,12 +1,14 @@
 """Train every model on real games of one card set, starting from human data.
 
 This is the limited loop run for real: packs of the set's playable cards are
-drafted, a deck is built from every pool, and the decks play each other on
-the engine in worker processes, every deck the same number of games and
-every game to its end. Every model reads cards through the card vectors of
-`--embedding-run`, frozen into a `CardTable`. The drafter and the deck
-models can start from checkpoints trained on human data; the player, its
-win chance and the guess model always start untrained. A model's weights fit only the card
+drafted, the search keeps each pool's best few decks, one for each block of
+games, and the decks play each other on the engine in worker processes,
+every deck the same number of games and every game to its end. Every model
+reads cards through the card vectors of `--embedding-run`, frozen into a
+`CardTable`. The drafter and the deck models can start from checkpoints
+trained on human data; the player, its win chance and the guess model
+always start untrained. The deck score `--decks-run` holds stays frozen as
+the human-trained score, and a copy of it learns from the games. A model's weights fit only the card
 vectors they were trained with, so `--embedding-run` should be the run its
 checkpoint came from or one that read the same vectors. The table is not
 trained here, so a model whose rate is zero does not change. Every few
@@ -33,9 +35,10 @@ from torch import nn
 
 from jace.cards import CardPool, CardTable, Rarity, own_parameters
 from jace.data import read_set
-from jace.decks import DeckBuilderModel, DeckScore
-from jace.draft import TLA_PLAY_BOOSTER, DrafterModel, DraftFormat
+from jace.decks import DeckBuilder, DeckScore
+from jace.draft import DrafterModel
 from jace.engine import Matchup
+from jace.loops.checked_score import FIRST_CHECK, ScoreCheck, ScoreRule
 from jace.loops.entry_points import (
     PlayArguments,
     PlayModels,
@@ -44,7 +47,6 @@ from jace.loops.entry_points import (
     build_play_models,
     card_inputs,
     device_named,
-    limited_rules,
     load_card_table,
     play_actor,
     play_weights,
@@ -53,6 +55,7 @@ from jace.loops.entry_points import (
     set_cards,
     start_run,
 )
+from jace.loops.formats import deck_rules, limited_format
 from jace.loops.limited import Learners, LimitedSetup, limited_iteration
 from jace.loops.matches import Harness
 from jace.loops.schedules import phased_schedule
@@ -72,11 +75,8 @@ from jace.train.workers import play_on_workers, start_workers, stop_workers
 
 __all__ = ("main",)
 
-_SEATS_IN_A_POD = 8
-_BOOSTERS_EACH = 3
 # Ataraxos's player rule. Its `keep_quantile`, `normalize` and `spread` are replaced by the arguments and the schedule.
 _PLAYER_RULE = PlayerRule(clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.75, keep_floor=0.0, normalize=True)
-_SCORE_CHUNK = 1024
 _SLICE_ROWS = 512
 
 
@@ -92,9 +92,14 @@ class _Arguments(PlayArguments):
     pods: int
     blocks: int
     games_per_block: int
-    proposals: int
-    search_rounds: int
-    decks_start: int
+    deck_samples: int
+    spells_per_round: int
+    deck_temperature: float
+    score_window: int
+    score_passes: int
+    score_pull: float
+    switch_iterations: int
+    switch_margin: float
     drafter_starts: int
     pull_ends: int
     drafter_width: int
@@ -128,14 +133,38 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
         "--checkpoint-every", type=int, default=0, help="also save every checkpoint each N iterations; 0 for never"
     )
     parser.add_argument("--resume", type=Path, help="a stopped run folder of this command to continue from")
-    parser.add_argument("--pods", type=int, default=2, help="eight-seat drafts per iteration")
+    parser.add_argument("--pods", type=int, default=2, help="drafts per iteration, each with every seat of the format")
     parser.add_argument(
-        "--blocks", type=int, default=4, help="blocks of games per iteration; the player updates after each"
+        "--blocks",
+        type=int,
+        default=4,
+        help="blocks of games per iteration; block b plays each pool's b-th best deck, then the player updates",
     )
     parser.add_argument("--games-per-block", type=int, default=25, help="games every drafted deck plays in each block")
-    parser.add_argument("--proposals", type=int, default=8, help="candidate decks per pool")
-    parser.add_argument("--search-rounds", type=int, default=1)
-    parser.add_argument("--decks-start", type=int, default=20, help="the iteration the deck models start learning at")
+    parser.add_argument("--deck-samples", type=int, default=256, help="decks the search samples for each pool")
+    parser.add_argument(
+        "--spells-per-round", type=int, default=6, help="spells or nonbasic lands the builder draws between two calls"
+    )
+    parser.add_argument("--deck-temperature", type=float, default=1.0, help="divides every logit of the builder")
+    parser.add_argument(
+        "--score-window", type=int, default=8, help="iterations of played decks the learning deck score trains on"
+    )
+    parser.add_argument("--score-passes", type=int, default=4, help="steps of the learning deck score each iteration")
+    parser.add_argument(
+        "--score-pull", type=float, default=1.0, help="weighs the learning deck score's KL to the human-trained one"
+    )
+    parser.add_argument(
+        "--switch-iterations",
+        type=int,
+        default=10,
+        help="iterations of test loss the switch to the learning score reads",
+    )
+    parser.add_argument(
+        "--switch-margin",
+        type=float,
+        default=0.002,
+        help="nats per game the learning score's mean test loss must be below the human-trained one's",
+    )
     parser.add_argument("--drafter-starts", type=int, default=20, help="the iteration the drafter starts learning at")
     parser.add_argument("--pull-ends", type=int, default=200, help="the iteration the human pull reaches zero at")
     parser.add_argument("--drafter-width", type=int, default=256)
@@ -150,11 +179,15 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument("--lam-value", type=float, default=0.8)
     parser.add_argument("--keep-quantile", type=float, default=0.75, help="learn from decisions above this quantile")
     arguments = _Arguments(**vars(parser.parse_args(argv)))
-    if arguments.resume is not None and arguments.drafter_run is None:
-        started_with = json.loads((arguments.resume / "identity.json").read_text())["config"]["drafter_run"]
-        if started_with is not None:
-            # The pull is toward the drafter that run started from, which only its checkpoint holds.
-            parser.error(f"the run being resumed pulls its drafter toward {started_with}: pass it as --drafter-run")
+    if arguments.resume is not None:
+        config = json.loads((arguments.resume / "identity.json").read_text())["config"]
+        # The drafter is pulled toward the drafter the run started from, and the learning deck score toward the
+        # deck score it started from. Only those runs' checkpoints hold them.
+        for name, given in (("drafter_run", arguments.drafter_run), ("decks_run", arguments.decks_run)):
+            if given is None and config[name] is not None:
+                parser.error(
+                    f"the run being resumed started from {config[name]}: pass it as --{name.replace('_', '-')}"
+                )
     return arguments
 
 
@@ -165,7 +198,7 @@ class _Models:
     win_chance: WinChanceModel
     guess: GuessModel
     drafter: DrafterModel
-    builder: DeckBuilderModel
+    builder: DeckBuilder
     score: DeckScore
     embedding: CardTable
 
@@ -196,7 +229,7 @@ def _build_models(arguments: _Arguments, embedding: CardTable, *, pool: CardPool
             heads=arguments.drafter_heads,
             picks=picks,
         ),
-        builder=DeckBuilderModel(embedding, **deck_shape),
+        builder=DeckBuilder(embedding, **deck_shape),
         score=DeckScore(embedding, **deck_shape),
         embedding=embedding,
     )
@@ -296,12 +329,36 @@ def _train(
         sys.stdout.flush()
 
 
-def _move(models: _Models, human_drafter: DrafterModel | None, *, to: torch.device) -> torch.device:
-    # Drafting, deck building and every update run on the device. The workers play on the CPU,
-    # with weights sent from here.
-    for module in (*_by_name(models).values(), *filter(None, [human_drafter])):
+def _move(models: _Models, *, frozen: Sequence[nn.Module], to: torch.device) -> torch.device:
+    # Drafting, deck building and every update run on the device, with the frozen human-trained models
+    # the updates read. The workers play on the CPU, with weights sent from here.
+    for module in (*_by_name(models).values(), *frozen):
         module.to(to)
     return to
+
+
+def _note_switch(iteration: int, *, before: ScoreCheck, after: ScoreCheck) -> None:
+    if after.reads_learning and not before.reads_learning:
+        sys.stdout.write(
+            f"iteration {iteration:4d}  from the next iteration the search reads the learning deck score\n"
+        )
+
+
+def _resumed_check(curve_file: Path, *, done: int, rule: ScoreRule) -> ScoreCheck:
+    # The deck-score check a stopped run had reached, from the losses and the switch its curve logged. The decks
+    # it played were not saved, so the learning deck score's window starts empty.
+    points = [
+        point
+        for point in json.loads(curve_file.read_text())["iterations"]
+        if point["iteration"] <= done and "deck_score/reads_learning" in point
+    ]
+    last = points[-rule.switch_iterations :]
+    return ScoreCheck(
+        recent=(),
+        human_losses=tuple(point["deck_score/human_test_loss"] for point in last),
+        learning_losses=tuple(point["deck_score/learning_test_loss"] for point in last),
+        reads_learning=any(point["deck_score/reads_learning"] > 0 for point in points),
+    )
 
 
 def main(argv: Sequence[str]) -> None:
@@ -320,17 +377,18 @@ def main(argv: Sequence[str]) -> None:
     cards = set_cards(data)
     pool = cards.pool
     playable = {rarity: [card for card in pool.of_rarity(rarity) if pool[card].program] for rarity in Rarity}
-    draft_format = DraftFormat(seats=_SEATS_IN_A_POD, rounds=_BOOSTERS_EACH, picks_per_round=len(TLA_PLAY_BOOSTER))
+    limited = limited_format(arguments.set_code)
     embedding, embedding_ref = load_card_table(
         arguments.embedding_run, inputs=card_inputs(data, cards, data_dir=arguments.data_dir)
     )
-    models = _build_models(arguments, embedding, pool=pool, picks=draft_format.rounds * draft_format.picks_per_round)
+    models = _build_models(arguments, embedding, pool=pool, picks=limited.picks)
     inputs = (embedding_ref, *_load_inputs(arguments, models))
-    # The copy is taken before a resumed run's own drafter is loaded, so the pull stays toward
-    # the drafter trained on human picks. It keeps its own copy of the card table.
+    # The copies are taken before a resumed run's own models are loaded, so the pulls stay toward the
+    # drafter and the deck score trained on human data. Each keeps its own copy of the card table.
     human_drafter = None
     if arguments.drafter_run is not None:
         human_drafter = copy.deepcopy(models.drafter).eval().requires_grad_(requires_grad=False)
+    human_score = copy.deepcopy(models.score).eval().requires_grad_(requires_grad=False)
     done = 0 if arguments.resume is None else _resume(arguments.resume, models)
     # A resumed run must not replay the games it already played.
     rng = random.Random(arguments.seed + done)
@@ -343,14 +401,20 @@ def main(argv: Sequence[str]) -> None:
     }
     setup = LimitedSetup(
         pool=pool,
-        draft_format=draft_format,
-        booster=TLA_PLAY_BOOSTER,
+        limited_format=limited,
         booster_cards=playable,
-        rules=limited_rules(cards),
+        rules=deck_rules(limited, cards),
         pods=arguments.pods,
-        proposals=arguments.proposals,
-        search_rounds=arguments.search_rounds,
-        score_chunk=_SCORE_CHUNK,
+        deck_samples=arguments.deck_samples,
+        spells_per_round=arguments.spells_per_round,
+        deck_temperature=arguments.deck_temperature,
+        score_rule=ScoreRule(
+            window=arguments.score_window,
+            passes=arguments.score_passes,
+            pull=arguments.score_pull,
+            switch_iterations=arguments.switch_iterations,
+            switch_margin=arguments.switch_margin,
+        ),
         blocks=arguments.blocks,
         games_per_block=arguments.games_per_block,
         history=arguments.history,
@@ -361,7 +425,7 @@ def main(argv: Sequence[str]) -> None:
         lam_advantage=arguments.lam_advantage,
         lam_value=arguments.lam_value,
     )
-    device = _move(models, human_drafter, to=device_named(arguments.device))
+    device = _move(models, frozen=[*filter(None, [human_drafter]), human_score], to=device_named(arguments.device))
     learners = Learners(
         policy=policy_on(models.player.policy, device),
         win_chance=win_chance_on(models.win_chance.win_chance, device),
@@ -370,11 +434,10 @@ def main(argv: Sequence[str]) -> None:
         human_drafter=human_drafter,
         builder=models.builder,
         score=models.score,
+        human_score=human_score,
         optimizers=optimizers,
     )
-    schedule = phased_schedule(
-        decks_start=arguments.decks_start, drafter_starts=arguments.drafter_starts, pull_ends=arguments.pull_ends
-    )
+    schedule = phased_schedule(drafter_starts=arguments.drafter_starts, pull_ends=arguments.pull_ends)
     workers = start_workers(
         functools.partial(play_actor, arguments=arguments, card_width=embedding.width),
         count=arguments.workers,
@@ -396,16 +459,25 @@ def main(argv: Sequence[str]) -> None:
         return collected
 
     def iterate(iteration: int) -> dict[str, float]:
+        # Each iteration hands the deck-score check it ends with to the next.
+        nonlocal check
         dials = schedule(iteration)
         if arguments.player_rate is not None:
             dials = replace(dials, player_rate=arguments.player_rate)
-        return dict(limited_iteration(setup, learners, dials=dials, other_seats=(), play=play, rng=rng))
+        metrics, after = limited_iteration(
+            setup, learners, check=check, dials=dials, other_seats=(), play=play, rng=rng
+        )
+        _note_switch(iteration, before=check, after=after)
+        check = after
+        return dict(metrics)
 
     clock = functools.partial(datetime.now, UTC)
     if arguments.resume is None:
         folder, curve_file = start_run(arguments, device=device, inputs=inputs, clock=clock)
+        check = FIRST_CHECK
     else:
         folder, curve_file = arguments.resume, arguments.resume.with_name(f"{arguments.resume.name}.curve.json")
+        check = _resumed_check(curve_file, done=done, rule=setup.score_rule)
     try:
         with writing(folder, clock=clock) as run:
             _train(

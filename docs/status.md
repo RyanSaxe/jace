@@ -16,7 +16,8 @@ says what it was measured on.
 | Area        | Shown by the tests                                                  |
 | ----------- | ------------------------------------------------------------------- |
 | Drafting    | Pods draft by the rules, many at once, with one model call per pick |
-| Deck build  | Every deck is legal, and the search escapes a local best            |
+| Deck build  | Every sampled deck is legal, a deck's log-probability is the one training scores, and the search returns distinct decks best first |
+| Deck score check | The search switches to the learning deck score only once its test loss is lower by the margin, and never back |
 | Real games  | The adapter on managym 0.2.3 replays a seed exactly and hides the opponent's decklist |
 | Models      | All six run on a larger card pool than they were built with         |
 | Training    | A player learns the toy game, a round plays exactly its list of games, and a model whose rate is zero does not change |
@@ -81,9 +82,24 @@ card win rates over the held-out decks' games. The deck score's numbers are
 therefore a little too good, as the rows marked Yes above are.
 
 Training the embedding here costs the drafter 8 points of pick accuracy
-and gains the deck models almost nothing. Taking the likeliest card at
-every step builds a worse deck than sampling, because it adds too many
-basic lands: 17.3 on average where the humans play 15.3.
+and gains the deck models almost nothing. The builder of these runs wrote a
+deck one card at a time, and taking its likeliest card at every step built
+a worse deck than sampling, because it added too many basic lands: 17.3 on
+average where the humans play 15.3.
+
+The builder that replaced it samples a few cards a round. It has had one
+short run, on the card encoder's vectors, against the earlier builder's
+longest run on the same vectors and the same 300 held-out pools:
+
+| Builder                                  | Training        | Likeliest deck | One sampled deck |
+| ---------------------------------------- | --------------- | -------------- | ---------------- |
+| One card at a time                       | 3,000 steps of 32 decks | 0.736  | Not measured     |
+| Six cards a round, one run               | 40 steps of 128 decks, 4 seconds | 0.797 | 0.763   |
+
+After 40 steps its land head has not learned yet: the likeliest deck holds
+18 lands, the most the rules allow. Its untrained version's sampled decks
+share 0.611 of the human decks' non-basic cards, near a random legal
+deck's 0.628.
 
 ## Training on real games
 
@@ -116,6 +132,10 @@ On an Apple M3 Max CPU:
 | Random play through the adapter, real decks            | About 2,000 to 4,000 |
 | The untrained player and guess model choosing actions, 16 games in a batch | 366 |
 
+The build step of `train_limited` for 16 pools took 4.2 seconds an
+iteration with 8 proposals and one round of swaps, and 2.5 seconds with
+256 sampled decks a pool. One short run each.
+
 ## Not built yet
 
 | Gap                         | Detail                                                     |
@@ -131,8 +151,7 @@ On an Apple M3 Max CPU:
 
 | Problem                     | Detail                                                     |
 | --------------------------- | ---------------------------------------------------------- |
-| Slow deck search            | About two million deck scores and 24 seconds per pool at 200 proposals and full depth |
 | Library labels              | manabot's batched games report hands but not libraries. The adapter works a library out from the board, and is one card off while the other seat holds a foretold card or controls a permanent that both decks contain |
 | Abandoned games             | A game the engine fails on, cuts short, or whose board outgrows the board arrays is abandoned and replaced. Its decisions teach nothing. With 80 cards and 64 permanents a seat, that was 15 of 5,491 games of a scripted player on human decks |
 | Held-out statistics         | 17Lands statistics cover the held-out drafts too. They inflate the held-out score of the earliest-average-pick baseline, the one picker that still reads them, and of every measurement above marked as reading them |
-| Schedule numbers            | The drafter's rates and the explore share are guesses with no source |
+| Schedule numbers            | The drafter's and the deck models' rates, and the defaults of the deck-score check, are guesses with no measurement behind them |

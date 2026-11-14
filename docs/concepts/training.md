@@ -147,12 +147,20 @@ should learn from self-play, and how, is an open decision.
 | ------------- | ------------------------- | --------------------------------------------- |
 | `guess_loss`  | The guess model           | The opponent's true deck and hand             |
 | `score_loss`  | The deck score            | Games won and played by each deck             |
-| `choice_loss` | The drafter, the builder  | The choices made, and a weight for each       |
+| `choice_loss` | The drafter               | The choices made, and a weight for each       |
 
 `choice_loss` does two jobs. With weights of one it copies the choices,
-which is how the builder learns the decks a search preferred. With weights
-of "result minus the average" it is the policy gradient, which is how the
-drafter learns from its decks' win rates.
+which is how the drafter learns human picks. With weights of "result minus
+the average" it is the policy gradient, which is how the drafter learns
+from its decks' win rates.
+
+The deck builder's loss is written from `build_log_probs`, each build's
+log-probability under the builder's own sampling. Pretraining lowers the
+negative log-probability of the human builds. Self-play weighs each
+build's log-probability by its win rate minus the mean of its pool's
+builds, with an entropy bonus. The deck score that learns from self-play
+adds `kl_to` toward the frozen human-trained score to its `score_loss`.
+[Deck building](deck-building.md) has both, and when each starts.
 
 `apply` takes the step for every optimizer it is given.
 
@@ -174,7 +182,7 @@ A schedule is a function from the iteration number to that iteration's
 dials:
 
 ```python
-schedule = phased_schedule(decks_start=2000, drafter_starts=2000, pull_ends=10000)
+schedule = phased_schedule(drafter_starts=2000, pull_ends=10000)
 dials = schedule(iteration)
 ```
 
@@ -186,4 +194,7 @@ dials = schedule(iteration)
 | 40,000    | 5.0e-6      | 0.002    | 1.0e-5       | 0                     |
 
 The player's rate and `spread` follow the formulas Ataraxos published. The
-drafter's numbers are first guesses with no source.
+learning deck score's rate is 1e-4 and the builder's 1e-5 at every
+iteration. The builder starts learning when the loop's checked switch to
+the learning deck score happens, which is not a phase of the schedule. The
+drafter's and the deck models' numbers are first guesses with no source.

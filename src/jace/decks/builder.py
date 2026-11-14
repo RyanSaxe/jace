@@ -1,48 +1,47 @@
-"""Propose whole decks for a pool, improve them by swaps and rank them.
+"""Sample whole decks from a pool in batches, and give each its log-probability.
 
-A search that starts from one deck and swaps one card at a time cannot leave
-the colours it started in, so the builder starts from many whole decks
-instead. A proposer writes them with no colour rule, `improve` climbs from
-each one against the deck score, and `build_decks` returns every distinct
-result with its score, best first. Deck shape is rules, not learning: the
-proposers and the swap search only ever make decks that `BuildRules` allows.
-Decks travel as float count vectors `[cards]` until `build_decks` turns the
-survivors into tuples of card ids.
+The builder writes a deck in three kinds of choice. A land head picks the
+land total from the range the rules allow. The spells and nonbasic lands are
+then drawn in rounds: one call of the model scores every card of the pool
+given what is already in the deck, a few copies are drawn from those scores
+without replacement, and the next round scores the pool again, so a sixth
+four-drop scores lower than the first. Rounds go on until the spell slots
+are full. Last, a basics head splits the land slots the nonbasic lands left.
+
+Every choice is masked by `BuildRules`, so every sampled deck is legal, and
+every choice's probability is kept, so a deck's log-probability is the sum of
+its land choice, the Plackett-Luce terms of its draws and its basics split.
+`sample_builds` draws decks this way; `build_log_probs` scores recorded
+builds with gradients, which is how both teacher forcing on human decks and
+a policy-gradient step train the model. Each copy of a card carries its
+card's score within a round, so drawing a card is weighed by its copies left.
 """
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Sequence
+from dataclasses import dataclass, fields
 from typing import override
 
 import torch
 from torch import Tensor, nn
+from torch.nn import functional
 
-from jace.cards import CardId, CardVectors, Deck, Pool
-from jace.decks.score import CardSetEncoder, Scorer
+from jace.cards import CardId, CardVectors
+from jace.decks.score import CardSetEncoder
 
 __all__ = (
     "BuildRules",
-    "Candidate",
-    "DeckBuilderModel",
+    "BuildScores",
+    "Builds",
+    "DeckBuilder",
     "InvalidBuildRulesError",
-    "NoLegalDeckError",
-    "Proposer",
-    "build_decks",
-    "improve",
-    "model_proposer",
-    "random_proposer",
-    "rules_for_pool",
-    "writing_steps",
+    "NoBasicLandsError",
+    "build_log_probs",
+    "builds_from_decks",
+    "join_builds",
+    "sample_builds",
 )
 
-# Takes the pool's float [cards] copy counts and a number of decks n.
-# Returns float [n, cards] copy counts, one legal deck per row.
-type Proposer = Callable[[Tensor, int], Tensor]
-
-# Takes (available, partial), both float [n, cards], and returns float [n, cards] logits for the next card.
-type _NextCard = Callable[[Tensor, Tensor], Tensor]
-
-# The builder's model reads two amounts for each card: the copies still available and the copies in the deck.
+# A card's token reads two amounts: its copies in the pool and its copies already in the deck.
 _AMOUNTS_PER_CARD = 2
 # The floor for a uniform draw before its log is taken, so a draw of exactly 0 does not become infinite.
 _SMALLEST_UNIFORM = 1e-20
@@ -53,9 +52,9 @@ class InvalidBuildRulesError(ValueError):
         super().__init__(f"need 0 <= min_lands <= max_lands <= size, got {min_lands}, {max_lands} and size {size}")
 
 
-class NoLegalDeckError(ValueError):
-    def __init__(self, *, fewest: int, most: int) -> None:
-        super().__init__(f"the pool allows no legal deck: it needs at least {fewest} lands and can hold at most {most}")
+class NoBasicLandsError(ValueError):
+    def __init__(self) -> None:
+        super().__init__("deck rules need at least one basic land to fill the land slots other lands leave")
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,10 +62,13 @@ class BuildRules:
     """What makes a deck legal: its size and how many lands it holds.
 
     A deck is exactly `size` cards. It may hold any number of copies of a
-    card in `basics` and no more copies of any other card than the pool
-    does. Its lands are its basics plus its copies of `nonbasic_lands`, and
-    their total must lie in `[min_lands, max_lands]`. Basics always count as
-    lands, so they are not repeated in `nonbasic_lands`.
+    card in `basics`, which names at least one card, and no more copies of
+    any other card than its pool does. Its lands are its basics plus its
+    copies of `nonbasic_lands`, and their total lies in
+    `[min_lands, max_lands]`. A pool with too few other cards, its spells,
+    to fill a deck within that range plays every spell it has and lands in
+    the slots left. Basics always count as lands, so they are not repeated
+    in `nonbasic_lands`.
     """
 
     size: int
@@ -78,22 +80,63 @@ class BuildRules:
     def __post_init__(self) -> None:
         if not 0 <= self.min_lands <= self.max_lands <= self.size:
             raise InvalidBuildRulesError(size=self.size, min_lands=self.min_lands, max_lands=self.max_lands)
+        if not self.basics:
+            raise NoBasicLandsError
 
 
 @dataclass(frozen=True, slots=True)
-class Candidate:
-    deck: Deck
-    score: float
+class BuildScores:
+    # The builder's scores for each row's deck so far. cards: float [n, cards], a score for taking one more copy of
+    # each card, -inf for a card not in the pool and for every basic. lands: float [n, size + 1], a score for each
+    # land total from 0 to the deck size. basics: float [n, basics], a score for each card of `rules.basics`.
+    cards: Tensor
+    lands: Tensor
+    basics: Tensor
 
 
-class DeckBuilderModel(nn.Module):
-    """Choose the next card of a deck that is written one card at a time.
+@dataclass(frozen=True, slots=True)
+class Builds:
+    """Decks with every choice that wrote them, one deck per row.
 
-    The model reads every card that is in the partial deck or still available
-    as one token, and turns the set into a query vector. A card's logit is
-    the dot product of the query with a projection of that card's embedding,
-    so no parameter has a slot per card. It knows nothing about deck rules:
-    the proposer masks the moves that would break them.
+    `pools` is float `[n, cards]`, each deck's pool, and `decks` is float
+    `[n, cards]`, the deck. `lands` is int64 `[n]`, the land total chosen
+    first. `order` is int64 `[n, size]`: the spells and nonbasic lands in the
+    order they were taken, then -1. They are taken in rounds of
+    `spells_per_round`, so the rounds are the consecutive chunks of `order`.
+    `basics` is float `[n, basics]`, the copies of each card of
+    `rules.basics`.
+    """
+
+    pools: Tensor
+    decks: Tensor
+    lands: Tensor
+    order: Tensor
+    basics: Tensor
+
+    def rows(self, index: Tensor) -> "Builds":
+        # The builds `index` selects, in its order.
+        selected = {field.name: getattr(self, field.name)[index] for field in fields(Builds)}
+        return Builds(**selected)
+
+
+def join_builds(parts: Sequence[Builds]) -> Builds:
+    joined = {field.name: torch.cat([getattr(part, field.name) for part in parts]) for field in fields(Builds)}
+    return Builds(**joined)
+
+
+class DeckBuilder(nn.Module):
+    """Score the choices that write a deck from a pool.
+
+    A `CardSetEncoder` reads every card of the pool that is not a basic as
+    one token with two amounts, its copies in the pool and its copies
+    already in the deck, and a card's score comes from its own token's
+    encoding. The mean of the encodings summarises the pool and the deck so
+    far. The land head scores each land total from that summary and the
+    total's share of the deck. The basics head scores each basic by the dot
+    product of a query from the summary with a projection of the basic's
+    embedding. No parameter has a slot per card, and the deck size and the
+    basics arrive with `rules` at every call, so nothing here fixes the size
+    of a pool or a deck.
     """
 
     def __init__(self, embedding: CardVectors, *, width: int, layers: int, heads: int) -> None:
@@ -101,284 +144,282 @@ class DeckBuilderModel(nn.Module):
         self.cards: CardSetEncoder = CardSetEncoder(
             embedding, amounts=_AMOUNTS_PER_CARD, width=width, layers=layers, heads=heads
         )
-        self.query: nn.Linear = nn.Linear(width, width)
-        self.key: nn.Linear = nn.Linear(embedding.width, width)
+        self.card_head: nn.Linear = nn.Linear(width, 1)
+        self.land_head: nn.Sequential = nn.Sequential(nn.Linear(width + 1, width), nn.GELU(), nn.Linear(width, 1))
+        self.basic_query: nn.Linear = nn.Linear(width, width)
+        self.basic_key: nn.Linear = nn.Linear(embedding.width, width)
 
     @override
-    def forward(self, available: Tensor, partial: Tensor) -> Tensor:
-        # available: float [b, cards], copies that can still be added.
-        # partial: float [b, cards], copies already in the deck.
-        # Returns float [b, cards] logits, -inf where no copy is available.
-        query = self.query(self.cards(torch.stack((available, partial), dim=-1)))  # [b, width]
-        every_card = torch.arange(available.shape[1], device=available.device)
-        keys = self.key(self.cards.embedding(every_card))  # [cards, width]
-        return (query @ keys.T).masked_fill(available <= 0, float("-inf"))
-
-
-def model_proposer(
-    model: DeckBuilderModel, *, rules: BuildRules, generator: torch.Generator, greedy: bool = False
-) -> Proposer:
-    """Propose legal decks by asking `model` for one card at a time.
-
-    Each deck may hold any land count the pool and `rules` allow, so the
-    model chooses it. A step samples the next card from the model's odds
-    over the legal cards. With `greedy` it takes the likeliest legal card
-    instead, so every proposal for a pool is the same deck and `generator`
-    is not used. That deck is the model's single best guess.
-    """
-
-    def propose(pool_counts: Tensor, decks: int) -> Tensor:
-        fewest, most = _land_range(pool_counts, rules=rules)
-        lands = torch.full((decks,), fewest, device=pool_counts.device)
-        with torch.no_grad():
-            return _write_decks(
-                model,
-                pool_counts=pool_counts,
-                min_lands=lands,
-                max_lands=lands + (most - fewest),
-                rules=rules,
-                generator=generator,
-                greedy=greedy,
-            )
-
-    return propose
-
-
-def random_proposer(*, rules: BuildRules, generator: torch.Generator) -> Proposer:
-    """Propose legal decks at random, with no model.
-
-    Each deck draws its land count uniformly from the counts the pool allows
-    and its spells as a uniform sample of the pool's spell copies. Each deck
-    also draws its own preference for every land, uniform over all mixes, so
-    the proposals range from one basic to an even split of all of them.
-    """
-
-    def propose(pool_counts: Tensor, decks: int) -> Tensor:
-        fewest, most = _land_range(pool_counts, rules=rules)
-        device = pool_counts.device
-        lands = torch.randint(fewest, most + 1, (decks,), generator=generator, device=device)
-        uniform = torch.rand((decks, pool_counts.shape[0]), generator=generator, device=device)
-        # The log of an exponential draw: sampling by these logits splits the lands by a uniform Dirichlet draw.
-        preferences = uniform.clamp_min(_SMALLEST_UNIFORM).log().neg().log()
-        return _write_decks(
-            lambda _available, _partial: preferences,
-            pool_counts=pool_counts,
-            min_lands=lands,
-            max_lands=lands,
-            rules=rules,
-            generator=generator,
-            greedy=False,
+    def forward(self, pools: Tensor, taken: Tensor, *, rules: BuildRules) -> BuildScores:
+        # pools: float [n, cards], each pool's copies of every card. taken: float [n, cards], the copies already in
+        # each deck, never a basic.
+        basics = torch.tensor(rules.basics, device=pools.device)
+        not_basics = pools.index_fill(1, basics, 0.0)
+        encoded, cards, real = self.cards.encode(torch.stack((not_basics, taken), dim=-1))
+        weights = real.unsqueeze(-1).to(encoded.dtype)
+        summary = (encoded * weights).sum(dim=1) / weights.sum(dim=1)  # [n, width]
+        token_scores = self.card_head(encoded).squeeze(-1).masked_fill(~real, float("-inf"))  # [n, longest]
+        card_scores = torch.full_like(pools, float("-inf")).scatter(1, cards, token_scores)
+        shares = torch.arange(rules.size + 1, device=pools.device).to(summary.dtype) / rules.size  # [size + 1]
+        land_inputs = torch.cat(
+            (
+                summary.unsqueeze(1).expand(-1, len(shares), -1),
+                shares.view(1, -1, 1).expand(len(summary), -1, 1),
+            ),
+            dim=-1,
         )
+        basic_scores = self.basic_query(summary) @ self.basic_key(self.cards.embedding(basics)).T
+        return BuildScores(cards=card_scores, lands=self.land_head(land_inputs).squeeze(-1), basics=basic_scores)
 
-    return propose
+
+@dataclass(frozen=True, slots=True)
+class _Kinds:
+    # bool [cards] each: the basics, the nonbasic lands and every other card, the spells.
+    basic: Tensor
+    nonbasic: Tensor
+    spell: Tensor
 
 
-def writing_steps(
-    decks: Tensor, *, pool_counts: Tensor, rules: BuildRules, generator: torch.Generator
-) -> tuple[Tensor, Tensor, Tensor]:
-    """Lay finished decks out as the steps that would have written them.
+def _kinds(rules: BuildRules, *, cards: int, device: torch.device) -> _Kinds:
+    basic = torch.zeros(cards, dtype=torch.bool, device=device)
+    basic[list(rules.basics)] = True
+    nonbasic = torch.zeros(cards, dtype=torch.bool, device=device)
+    nonbasic[sorted(rules.nonbasic_lands)] = True
+    return _Kinds(basic=basic, nonbasic=nonbasic, spell=~(basic | nonbasic))
 
-    `decks` is `[n, cards]` and `pool_counts` is `[n, cards]`, each deck with
-    the pool it was built from. Each deck's cards are put in a random order,
-    and every step becomes one example: the copies still `available`, the
-    `partial` deck so far, and the card `chosen` next, as `DeckBuilderModel`
-    sees them while proposing. Returns the three as `[n * size, cards]`,
-    `[n * size, cards]` and int64 `[n * size]`. Training the model on these
-    with a cross-entropy loss teaches it to write decks like the ones given.
+
+def _land_log_probs(scores: Tensor, *, pools: Tensor, rules: BuildRules, kinds: _Kinds, temperature: float) -> Tensor:
+    # scores: float [n, size + 1]. Returns the land head's log-probabilities over land totals, -inf outside each row's
+    # range: the rules' range, raised to the slots its pool's spells cannot fill.
+    spells = pools[:, kinds.spell].sum(dim=1)
+    fewest = (rules.size - spells).clamp_min(rules.min_lands)
+    most = (rules.size - spells).clamp_min(rules.max_lands)
+    totals = torch.arange(rules.size + 1, device=pools.device)
+    allowed = (totals >= fewest[:, None]) & (totals <= most[:, None])
+    return (scores / temperature).masked_fill(~allowed, float("-inf")).log_softmax(dim=-1)
+
+
+def _card_log_probs(
+    scores: Tensor, *, pools: Tensor, taken: Tensor, lands: Tensor, rules: BuildRules, kinds: _Kinds, temperature: float
+) -> Tensor:
+    """Return the log-probability of taking one more copy of each card, given each deck so far.
+
+    `scores`, `pools` and `taken` are float `[..., cards]` and `lands` is
+    int64 `[...]`, the land total each deck chose. A spell may be taken
+    while the deck has spell slots left, and a nonbasic land while its
+    lands are fewer than its land total. Once the spell slots are full the
+    deck is finished: its row is -inf everywhere. Each copy left carries its
+    card's score, so a card's odds also weigh its copies left, which is
+    Plackett-Luce over the copies.
     """
-    count, cards = decks.shape
-    _, is_basic = _land_kinds(rules, cards=cards, device=decks.device)
-    every_card = torch.arange(cards, device=decks.device)
-    deck_cards = torch.stack([every_card.repeat_interleave(row) for row in decks.long()])  # [n, size]
-    # The generator lives on the CPU, so the random order is drawn there and moved.
-    random_order = torch.rand(deck_cards.shape, generator=generator).to(decks.device).argsort(dim=1)
-    chosen = deck_cards.gather(1, random_order)
-    counts_after_step = torch.nn.functional.one_hot(chosen, cards).float().cumsum(dim=1)  # [n, size, cards]
-    partial = torch.cat([torch.zeros_like(counts_after_step[:, :1]), counts_after_step[:, :-1]], dim=1)
-    available = (pool_counts[:, None, :] - partial).clamp_min(0)
-    slots_left = rules.size - torch.arange(rules.size, device=decks.device)
-    # As in `_write_decks`, a basic has as many copies available as the deck has slots left.
-    available[:, :, is_basic] = slots_left[None, :, None].float().expand(count, -1, int(is_basic.sum()))
-    return available.reshape(-1, cards), partial.reshape(-1, cards), chosen.reshape(-1)
+    copies_left = pools - taken
+    spells_left = (rules.size - lands) - taken[..., kinds.spell].sum(dim=-1)
+    land_room = lands - taken[..., kinds.nonbasic].sum(dim=-1)
+    may_take = (copies_left > 0) & (spells_left > 0).unsqueeze(-1)
+    may_take &= kinds.spell | (kinds.nonbasic & (land_room > 0).unsqueeze(-1))
+    logits = (scores / temperature + copies_left.clamp_min(1.0).log()).masked_fill(~may_take, float("-inf"))
+    # A finished row has nothing to take, so it is given finite logits before the softmax and masked after it.
+    unfinished = may_take.any(dim=-1, keepdim=True)
+    return logits.masked_fill(~unfinished, 0.0).log_softmax(dim=-1).masked_fill(~may_take, float("-inf"))
 
 
-def improve(decks: Tensor, *, pool_counts: Tensor, score: Scorer, rules: BuildRules, rounds: int) -> Tensor:
-    """Climb from each deck by the best one-card swap, for at most `rounds` rounds.
-
-    A swap takes one copy out and puts one copy of another card in, keeping
-    the deck legal. It may trade a spell for a basic or one basic for
-    another, so land counts and colours can move. Each round scores every
-    swap of every deck that is still improving in one call to `score`, and
-    applies the best swap to each deck it beats. A deck with no better swap
-    is finished, and the search stops when every deck is.
-
-    `decks` is float `[n, cards]` of legal decks and is not modified. Returns
-    float `[n, cards]`, row for row, each scoring at least as well as it did.
-    """
-    is_land, is_basic = _land_kinds(rules, cards=pool_counts.shape[0], device=pool_counts.device)
-    # Only pool cards and basics can enter or leave a deck, so swaps are laid out over those m cards.
-    movable = ((pool_counts > 0) | is_basic).nonzero().squeeze(1)  # int64 [m]
-    decks = decks.clone()
-    with torch.no_grad():
-        scores = score(decks)  # float [n]
-        climbing = torch.arange(decks.shape[0], device=decks.device)  # rows that improved last round
-        for _ in range(rounds):
-            legal = _legal_swaps(
-                decks[climbing][:, movable],
-                in_pool=pool_counts[movable],
-                is_basic=is_basic[movable],
-                is_land=is_land[movable],
-                rules=rules,
-            )
-            if not bool(legal.any()):
-                break
-            swap_scores = _swap_scores(decks[climbing], legal, movable=movable, score=score)
-            # best_score, best_swap: [a]. best_swap indexes a deck's [m out, m in] swaps, flattened.
-            best_score, best_swap = swap_scores.flatten(1).max(dim=1)
-            better = best_score > scores[climbing]
-            # A deck whose best swap does not beat its current score is finished.
-            climbing = climbing[better]
-            if climbing.shape[0] == 0:
-                break
-            out = best_swap[better] // movable.shape[0]
-            into = best_swap[better] % movable.shape[0]
-            decks[climbing, movable[out]] -= 1
-            decks[climbing, movable[into]] += 1
-            scores[climbing] = best_score[better].to(scores.dtype)
-    return decks
+def _basics_log_prob(log_shares: Tensor, counts: Tensor) -> Tensor:
+    # log_shares: float [n, basics], the head's log-probability of each basic. counts: float [n, basics].
+    # Returns float [n]: the multinomial log-probability of the split, the slots drawn one basic at a time.
+    slots = counts.sum(dim=-1)
+    arrangements = torch.lgamma(slots + 1) - torch.lgamma(counts + 1).sum(dim=-1)
+    return arrangements + (counts * log_shares).sum(dim=-1)
 
 
-def _legal_swaps(held: Tensor, *, in_pool: Tensor, is_basic: Tensor, is_land: Tensor, rules: BuildRules) -> Tensor:
-    # held: float [a, m], each deck's copies of the m movable cards. in_pool: float [m], the pool's copies.
-    # is_basic, is_land: bool [m]. Returns bool [a, m out, m in]: true where taking one copy of
-    # card `out` and adding one copy of card `in` leaves a legal deck.
-    land = is_land.int()
-    # Taking out `out` and adding `in` changes the land count by is_land[in] - is_land[out].
-    land_change = land.unsqueeze(0) - land.unsqueeze(1)  # int [m out, m in]
-    lands = (held * land).sum(dim=1).long().view(-1, 1, 1) + land_change  # int64 [a, m, m]
-    removable = held.gt(0).unsqueeze(2)  # bool [a, m, 1]
-    addable = ((held < in_pool) | is_basic).unsqueeze(1)  # bool [a, 1, m]
-    different = ~torch.eye(held.shape[1], dtype=torch.bool, device=held.device)  # bool [m, m]
-    return removable & addable & different & (lands >= rules.min_lands) & (lands <= rules.max_lands)
+def _entropy(log_probs: Tensor) -> Tensor:
+    # log_probs: float [..., options], -inf where an option is not allowed. Returns float [...], 0 for a row with none.
+    return -(log_probs.exp() * log_probs.nan_to_num(neginf=0.0)).sum(dim=-1)
 
 
-def _swap_scores(decks: Tensor, legal: Tensor, *, movable: Tensor, score: Scorer) -> Tensor:
-    # decks: float [a, cards]. legal: bool [a, m, m], as `_legal_swaps` returns it. movable: int64 [m].
-    # Returns float [a, m, m]: each deck's score after each legal swap, and -inf for the others.
-    row, out, into = legal.nonzero().unbind(dim=1)  # int64 [k] each
-    swapped = decks[row]  # float [k, cards]
-    each = torch.arange(row.shape[0], device=decks.device)
-    swapped[each, movable[out]] -= 1
-    swapped[each, movable[into]] += 1
-    swap_scores = torch.full(legal.shape, float("-inf"), device=decks.device)
-    swap_scores[legal] = score(swapped).to(swap_scores.dtype)
-    return swap_scores
+def _draw(log_probs: Tensor, *, generator: torch.Generator, greedy: bool) -> Tensor:
+    # log_probs: float [..., options]. Returns int64 [...]: the likeliest option when greedy, and otherwise one drawn
+    # with the Gumbel-max trick. The generator lives on the CPU, so the noise is drawn there and moved.
+    if greedy:
+        return log_probs.argmax(dim=-1)
+    uniform = torch.rand(log_probs.shape, generator=generator).to(log_probs.device)
+    return (log_probs - uniform.clamp_min(_SMALLEST_UNIFORM).log().neg().log()).argmax(dim=-1)
 
 
-def build_decks(
-    pool: Pool,
+def _draw_basics(
+    log_shares: Tensor, *, slots: Tensor, rules: BuildRules, generator: torch.Generator, greedy: bool
+) -> Tensor:
+    # log_shares: float [n, basics]. slots: int64 [n], the land slots left for basics. Returns float [n, basics]:
+    # each slot drawn from the shares, or when greedy the split nearest slots * shares, by largest remainders.
+    if greedy:
+        exact = slots[:, None] * log_shares.exp()
+        floor = exact.floor()
+        left = slots - floor.sum(dim=-1).long()
+        rank = (exact - floor).argsort(dim=-1, descending=True).argsort(dim=-1)
+        return floor + (rank < left[:, None]).float()
+    draws = _draw(log_shares.unsqueeze(1).expand(-1, rules.size, -1), generator=generator, greedy=False)  # [n, size]
+    counted = torch.arange(rules.size, device=slots.device) < slots[:, None]
+    return (functional.one_hot(draws, log_shares.shape[-1]) * counted.unsqueeze(-1)).sum(dim=1).float()
+
+
+def _draw_cards(
+    builder: DeckBuilder,
+    pools: Tensor,
     *,
-    cards: int,
-    device: torch.device,
-    propose: Proposer,
-    score: Scorer,
+    lands: Tensor,
+    first: Tensor,
     rules: BuildRules,
-    proposals: int,
-    rounds: int,
-) -> tuple[Candidate, ...]:
-    """Propose decks for a pool, improve each and return the distinct results, best first.
-
-    `cards` is the number of cards in the card pool, which is the width of
-    every count vector, and `device` is where `propose` and `score` compute.
-    `propose` writes `proposals` decks, `improve` climbs from each for at
-    most `rounds` rounds, and proposals that end at the same
-    deck are returned once. Choosing which candidate to play is left to the
-    caller. Raises `NoLegalDeckError` when the pool cannot make a legal deck.
-    """
-    # TODO: The builder reads only its own pool. When decks play opponents from their own pod, the cards
-    # passed to them could change a build, such as a main-deck artifact answer after passing three artifact
-    # bombs. That changes a build rarely, so the builder ignores draft history until in-pod play matters.
-    copies = torch.ones(len(pool))
-    pool_counts = torch.zeros(cards).index_add_(0, torch.tensor(pool, dtype=torch.int64), copies).to(device)
-    proposed = propose(pool_counts, proposals)
-    improved = improve(proposed, pool_counts=pool_counts, score=score, rules=rules, rounds=rounds)
-    distinct = improved.cpu().unique(dim=0)  # float [d, cards]
-    with torch.no_grad():
-        scores = score(distinct.to(device)).cpu()
-    every_card = torch.arange(cards)
-    return tuple(
-        Candidate(deck=tuple(every_card.repeat_interleave(distinct[index].long()).tolist()), score=float(scores[index]))
-        for index in scores.argsort(descending=True).tolist()
-    )
-
-
-def _land_kinds(rules: BuildRules, *, cards: int, device: torch.device) -> tuple[Tensor, Tensor]:
-    # Returns (is_land, is_basic), both bool [cards].
-    is_basic = torch.zeros(cards, dtype=torch.bool, device=device)
-    is_basic[list(rules.basics)] = True
-    is_land = is_basic.clone()
-    is_land[sorted(rules.nonbasic_lands)] = True
-    return is_land, is_basic
-
-
-def rules_for_pool(rules: BuildRules, pool: Sequence[CardId]) -> BuildRules:
-    """Return `rules`, with the land limit raised when `pool` cannot fill a deck within it.
-
-    A drafter is free to take so many lands that its pool holds fewer
-    spells than `size - max_lands`. Such a pool has no deck under `rules`,
-    and `build_decks` rejects it. The deck it can still play holds every
-    spell it has and lands for the rest, so the limit becomes exactly that
-    many lands. A pool with enough spells gets `rules` back unchanged.
-    """
-    lands = {*rules.basics, *rules.nonbasic_lands}
-    spells = sum(1 for card in pool if card not in lands)
-    lands_needed = rules.size - spells
-    return rules if lands_needed <= rules.max_lands else replace(rules, max_lands=lands_needed)
-
-
-def _land_range(pool_counts: Tensor, *, rules: BuildRules) -> tuple[int, int]:
-    is_land, is_basic = _land_kinds(rules, cards=pool_counts.shape[0], device=pool_counts.device)
-    spells = int(pool_counts[~is_land].sum())
-    # With basics the deck can be all lands; without them it holds at most the pool's lands.
-    lands = rules.size if rules.basics else int(pool_counts[is_land & ~is_basic].sum())
-    fewest = max(rules.min_lands, rules.size - spells)
-    most = min(rules.max_lands, lands)
-    if fewest > most:
-        raise NoLegalDeckError(fewest=fewest, most=most)
-    return fewest, most
-
-
-def _write_decks(
-    next_card: _NextCard,
-    *,
-    pool_counts: Tensor,
-    min_lands: Tensor,
-    max_lands: Tensor,
-    rules: BuildRules,
+    kinds: _Kinds,
+    spells_per_round: int,
+    temperature: float,
     generator: torch.Generator,
     greedy: bool,
-) -> Tensor:
-    # min_lands, max_lands: int64 [n], each deck's own land bounds, inside the range the pool allows.
-    # Returns float [n, cards]. Every row is a legal deck because a step only offers moves that leave one reachable.
-    is_land, is_basic = _land_kinds(rules, cards=pool_counts.shape[0], device=pool_counts.device)
-    decks = torch.zeros((min_lands.shape[0], pool_counts.shape[0]), device=pool_counts.device)
-    one_copy = torch.ones((min_lands.shape[0], 1), device=pool_counts.device)
-    for cards_added in range(rules.size):
-        available = (pool_counts - decks).clamp_min(0)
-        # Basics are unlimited, so a basic has as many copies available as the deck has slots left.
-        available[:, is_basic] = rules.size - cards_added
-        lands_added = decks[:, is_land].sum(dim=1)
-        spells_added = cards_added - lands_added
-        may_add_land = lands_added < max_lands
-        # A spell fits only while the deck still has room after it for its minimum number of lands.
-        may_add_spell = spells_added < rules.size - min_lands
-        allowed = torch.where(is_land, may_add_land.unsqueeze(1), may_add_spell.unsqueeze(1)) & (available > 0)
-        logits = next_card(available, decks).masked_fill(~allowed, float("-inf"))
-        if greedy:
-            choice = logits.argmax(dim=1, keepdim=True)  # int64 [n, 1]
-        else:
-            # The generator lives on the CPU, so the card is drawn there and moved back.
-            chances = logits.softmax(dim=1).to(generator.device)
-            choice = torch.multinomial(chances, 1, generator=generator).to(logits.device)
-        decks.scatter_add_(1, choice, one_copy)
-    return decks
+) -> tuple[Tensor, Tensor, Tensor]:
+    # first: float [n, cards], the card scores of the empty deck. Returns (taken float [n, cards], order int64
+    # [n, size], log_probs float [n]): the spells and nonbasic lands drawn, their order and their log-probability.
+    taken = torch.zeros_like(pools)
+    order = torch.full((len(pools), rules.size), -1, dtype=torch.int64, device=pools.device)
+    log_probs = torch.zeros(len(pools), device=pools.device)
+    scores = first
+    for step in range(rules.size):
+        unfinished = (rules.size - lands) - taken[:, kinds.spell].sum(dim=1) > 0
+        if not bool(unfinished.any()):
+            break
+        if step > 0 and step % spells_per_round == 0:
+            scores = builder(pools, taken, rules=rules).cards
+        step_log_probs = _card_log_probs(
+            scores, pools=pools, taken=taken, lands=lands, rules=rules, kinds=kinds, temperature=temperature
+        )
+        choice = _draw(step_log_probs, generator=generator, greedy=greedy)
+        chosen = step_log_probs.gather(1, choice[:, None]).squeeze(1)
+        log_probs += torch.where(unfinished, chosen, 0.0)
+        taken.scatter_add_(1, choice[:, None], unfinished[:, None].to(taken.dtype))
+        order[:, step] = torch.where(unfinished, choice, -1)
+    return taken, order, log_probs
+
+
+def sample_builds(
+    builder: DeckBuilder,
+    pools: Tensor,
+    *,
+    rules: BuildRules,
+    spells_per_round: int,
+    temperature: float,
+    generator: torch.Generator,
+    greedy: bool = False,
+) -> tuple[Builds, Tensor]:
+    """Sample one deck from each row of `pools` and return the builds with their log-probabilities.
+
+    `pools` is float `[n, cards]`; repeat one pool's row to sample many
+    decks for it in one batch. Each round draws up to `spells_per_round`
+    spells or nonbasic lands, and every logit is divided by `temperature`
+    first. With `greedy` every choice is the likeliest one and the basics
+    split is the one nearest the head's shares, so `generator` is not used.
+    The log-probabilities, float `[n]`, are those of the tempered sampling,
+    computed without gradients; `build_log_probs` gives the same numbers
+    with them. Every deck obeys `rules`.
+    """
+    kinds = _kinds(rules, cards=pools.shape[1], device=pools.device)
+    with torch.no_grad():
+        first = builder(pools, torch.zeros_like(pools), rules=rules)
+        land_log_probs = _land_log_probs(first.lands, pools=pools, rules=rules, kinds=kinds, temperature=temperature)
+        lands = _draw(land_log_probs, generator=generator, greedy=greedy)
+        taken, order, card_log_probs = _draw_cards(
+            builder,
+            pools,
+            lands=lands,
+            first=first.cards,
+            rules=rules,
+            kinds=kinds,
+            spells_per_round=spells_per_round,
+            temperature=temperature,
+            generator=generator,
+            greedy=greedy,
+        )
+        log_shares = (builder(pools, taken, rules=rules).basics / temperature).log_softmax(dim=-1)
+        slots = lands - taken[:, kinds.nonbasic].sum(dim=1).long()
+        basics = _draw_basics(log_shares, slots=slots, rules=rules, generator=generator, greedy=greedy)
+        log_probs = land_log_probs.gather(1, lands[:, None]).squeeze(1) + card_log_probs
+        log_probs += _basics_log_prob(log_shares, basics)
+    decks = taken.index_add(1, torch.tensor(rules.basics, device=pools.device), basics)
+    return Builds(pools=pools, decks=decks, lands=lands, order=order, basics=basics), log_probs
+
+
+def build_log_probs(
+    builder: DeckBuilder, builds: Builds, *, rules: BuildRules, spells_per_round: int, temperature: float
+) -> tuple[Tensor, Tensor]:
+    """Score recorded builds as `sample_builds` would have, with gradients.
+
+    Returns `(log_probs, entropies)`, both float `[n]`. A build's
+    log-probability is that of its land total, of each card in `order`
+    given the cards before it, and of its basics split, under the sampling
+    at `temperature` with rounds of `spells_per_round`. Its entropy is the
+    sum of the entropies of the choices it made, with the basics split
+    counted as one draw per slot. Every round of every build is encoded in
+    one call of `builder`, because the deck at the start of each round is
+    known from `order`.
+    """
+    count, cards = builds.pools.shape
+    kinds = _kinds(rules, cards=cards, device=builds.pools.device)
+    took = builds.order >= 0  # bool [n, size]
+    steps = int(took.sum(dim=1).max())
+    rounds = -(-steps // spells_per_round)
+    added = functional.one_hot(builds.order.clamp_min(0), cards) * took.unsqueeze(-1)  # [n, size, cards]
+    after = added.cumsum(dim=1).to(builds.pools.dtype)
+    before = torch.cat((torch.zeros_like(after[:, :1]), after[:, :-1]), dim=1)  # [n, size, cards]
+    # The deck at the start of every round, then the finished deck, which the basics head reads.
+    states = torch.cat((before[:, : rounds * spells_per_round : spells_per_round], after[:, -1:]), dim=1)
+    scores = builder(builds.pools.repeat_interleave(rounds + 1, dim=0), states.flatten(0, 1), rules=rules)
+    round_of_step = torch.arange(steps, device=builds.pools.device) // spells_per_round
+    step_log_probs = _card_log_probs(
+        scores.cards.view(count, rounds + 1, cards)[:, round_of_step],
+        pools=builds.pools.unsqueeze(1),
+        taken=before[:, :steps],
+        lands=builds.lands.unsqueeze(1),
+        rules=rules,
+        kinds=kinds,
+        temperature=temperature,
+    )  # [n, steps, cards]
+    chosen = step_log_probs.gather(2, builds.order[:, :steps, None].clamp_min(0)).squeeze(2)
+    land_log_probs = _land_log_probs(
+        scores.lands.view(count, rounds + 1, -1)[:, 0],
+        pools=builds.pools,
+        rules=rules,
+        kinds=kinds,
+        temperature=temperature,
+    )
+    log_shares = (scores.basics.view(count, rounds + 1, -1)[:, -1] / temperature).log_softmax(dim=-1)
+    log_probs = land_log_probs.gather(1, builds.lands[:, None]).squeeze(1) + _basics_log_prob(log_shares, builds.basics)
+    log_probs = log_probs + torch.where(took[:, :steps], chosen, 0.0).sum(dim=1)
+    entropies = _entropy(land_log_probs) + _entropy(step_log_probs).sum(dim=1)
+    entropies = entropies + builds.basics.sum(dim=1) * _entropy(log_shares)
+    return log_probs, entropies
+
+
+def builds_from_decks(decks: Tensor, *, pools: Tensor, rules: BuildRules, generator: torch.Generator) -> Builds:
+    """Lay finished decks out as the builds that would have written them, for teacher forcing.
+
+    `decks` and `pools` are float `[n, cards]`, each deck with the pool it
+    was built from, and the result is on their device. Each deck's spells
+    and nonbasic lands are put in a random order with a spell last, since
+    sampling stops once the spell slots are full. Its land total and its
+    basics split are its own. `generator` draws the orders on the CPU.
+    """
+    kinds = _kinds(rules, cards=decks.shape[1], device=torch.device("cpu"))
+    every_card = torch.arange(decks.shape[1])
+    orders: list[Tensor] = []
+    for deck in decks.cpu().long():
+        drawn = every_card.repeat_interleave(deck * ~kinds.basic)
+        keys = torch.rand(len(drawn), generator=generator)
+        spell = kinds.spell[drawn]
+        # Scaling every nonbasic land's key below the highest spell's makes that spell last and leaves the order
+        # of the rest uniform: given their maximum, the other spells' keys are uniform below it too.
+        keys = torch.where(spell, keys, keys * keys[spell].max())
+        orders.append(functional.pad(drawn[keys.argsort()], (0, rules.size - len(drawn)), value=-1))
+    lands = decks[:, ~kinds.spell.to(decks.device)].sum(dim=1).long()
+    return Builds(
+        pools=pools,
+        decks=decks,
+        lands=lands,
+        order=torch.stack(orders).to(decks.device),
+        basics=decks[:, list(rules.basics)],
+    )

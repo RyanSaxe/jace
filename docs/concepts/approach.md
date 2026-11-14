@@ -24,14 +24,17 @@ results to improve every model at once.
 | Player       | Whether it won the game                                       | Reinforcement    |
 | Drafter      | The win rate of the deck built from its picks                 | Reinforcement    |
 | Deck score   | Which decks won and lost                                      | Supervised       |
-| Deck builder | The best deck a search found for the pool                     | Supervised       |
+| Deck builder | How each of its builds won against its pool's other builds    | Reinforcement    |
 | Guess model  | The opponent's true deck and hand, which self-play knows      | Supervised       |
 | Win chance   | Whether the acting seat won, seen with the opponent's true cards | Supervised    |
 
-Only the player and the drafter learn from reward. The deck models and the
-guess model have exact answers to learn from, which makes them cheaper to
-train. The win chance learns to predict the result, and the player's
-actions are credited by how much they raised it.
+The player, the drafter and the builder learn from reward. The deck score
+and the guess model have exact answers to learn from, which makes them
+cheaper to train. The win chance learns to predict the result, and the
+player's actions are credited by how much they raised it. The builder
+learns only once the deck score that learns from self-play predicts the
+games better than the one trained on human decks, because until then the
+search ranks decks by human results.
 
 ## One card embedding
 
@@ -80,9 +83,10 @@ The drafter and the deck builder start from human data, which puts them
 near how people already play. Without exploring, they stay there.
 So the amount of exploring is explicit:
 
-- The player and the drafter sample their choices.
+- The player, the drafter and the builder sample their choices.
 - A term in each loss keeps their odds from collapsing early.
-- For a share of pools, the loop plays a deck other than the top-scored one.
+- The loop plays several of each pool's top-scored decks, one in each block
+  of games.
 
 A schedule sets these values, and the learning rates, for every iteration.
 [Training](training.md#dials-on-a-schedule) shows one.
