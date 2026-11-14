@@ -16,6 +16,8 @@ __all__ = ("DROPOUT", "FEEDFORWARD_EXPANSION", "encode_real", "transformer")
 FEEDFORWARD_EXPANSION = 4
 # Dropout is off, so a model gives the same output whether or not it is in training mode.
 DROPOUT = 0.0
+# `encode_real` encodes a batch's rows in groups of at least this many, each padded only to its own longest row.
+_GROUP_ROWS = 64
 
 
 def transformer(width: int, *, layers: int, heads: int) -> nn.TransformerEncoder:
@@ -35,14 +37,22 @@ def encode_real(encoder: nn.TransformerEncoder, sequence: Tensor, *, mask: Tenso
 
     `sequence` is float `[b, n, width]` and `mask` is bool `[b, n]`, true for
     a real token. The result is float `[b, n, width]`, zero wherever `mask`
-    is false. Attention costs the square of the sequence length, so the real
-    tokens are moved to the front and the columns no row uses are dropped
-    before the encoder runs. The encoder has no position input, so moving
-    tokens does not change what it computes for them.
+    is false. The encoder's cost follows the length it is given, so the real
+    tokens are moved to the front of each row, and the rows are encoded in
+    groups of similar length, each cut to its own longest row. The encoder
+    has no position input and attends within a row, so neither the order of
+    a row's tokens nor the rows grouped with it change what it computes.
     """
-    longest = int(mask.sum(dim=1).max())
-    order = (~mask).long().argsort(dim=1, stable=True)[:, :longest]  # each row's real tokens first
+    counts = mask.sum(dim=1)
+    rows_by_count = counts.argsort()
+    groups = rows_by_count.tensor_split(max(len(counts) // _GROUP_ROWS, 1))
+    # Each group's longest row is its last. One read from the device gives every group's length.
+    lengths = counts[torch.stack([rows[-1] for rows in groups])].tolist()
+    order = (~mask).long().argsort(dim=1, stable=True)[:, : max(lengths)]  # each row's real tokens first
     index = order[..., None].expand(-1, -1, sequence.shape[-1])
     real = mask.gather(1, order)
-    encoded = encoder.forward(sequence.gather(1, index), src_key_padding_mask=~real)
+    compact = sequence.gather(1, index)
+    encoded = torch.zeros_like(compact)
+    for rows, length in zip(groups, lengths, strict=True):
+        encoded[rows, :length] = encoder.forward(compact[rows, :length], src_key_padding_mask=~real[rows, :length])
     return torch.zeros_like(sequence).scatter(1, index, encoded * real[..., None])
