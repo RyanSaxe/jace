@@ -29,12 +29,11 @@ def _blank_guesser(boards: Boards, _earlier: Earlier) -> Guess:
 
 def _toy_actor(seed: int, *, stall_marker: Path | None) -> Actor:
     # The toy game, four games at once, and a policy whose only weights are one score for each of
-    # the three picks. It reports the first score as its win chance, so a decision shows which
-    # weights made it. With a marker path, the first worker to make a decision creates the file
-    # and never returns.
+    # the three picks, so a decision's scores show which weights made it. With a marker path, the
+    # first worker to make a decision creates the file and never returns.
     scores = nn.Embedding(1, HAND_SIZE)
 
-    def policy(boards: Boards, _guess: Guess) -> tuple[Tensor, Tensor]:
+    def policy(boards: Boards, _guess: Guess) -> Tensor:
         if stall_marker is not None:
             try:
                 os.close(os.open(stall_marker, os.O_CREAT | os.O_EXCL))
@@ -42,8 +41,7 @@ def _toy_actor(seed: int, *, stall_marker: Path | None) -> Actor:
                 pass
             else:
                 time.sleep(600)
-        rows = len(boards["hand"])
-        return scores.weight.expand(rows, -1), scores.weight[0, 0].expand(rows)
+        return scores.weight.expand(len(boards["hand"]), -1)
 
     return Actor(
         start=lambda matchups: ToyBatch(matchups, games=4, seed=seed),
@@ -88,5 +86,5 @@ def test_every_decision_of_a_round_is_made_with_the_weights_sent_for_that_round(
 
     for score, rollout in zip((0.25, 0.75), rounds, strict=True):
         assert len(rollout.games.unique()) == len(matchups)
-        assert bool((rollout.values == score).all())
+        assert bool((rollout.logits[:, 0] == score).all())
         assert bool((rollout.actions == 0).all())

@@ -218,7 +218,7 @@ def model_seat(
         boards = {name: torch.from_numpy(array)[None] for name, array in observation.items()}
         with torch.no_grad():
             guess = guesser(boards, Earlier(guesses=earlier, mask=(torch.arange(history) < guesses_made)[None]))
-            logits, _ = policy(boards, guess)
+            logits = policy(boards, guess)
         earlier = Guess(
             deck=torch.cat((guess.deck[:, None], earlier.deck), dim=1)[:, :history],
             hand=torch.cat((guess.hand[:, None], earlier.hand), dim=1)[:, :history],

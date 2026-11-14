@@ -13,13 +13,13 @@ import torch
 
 from jace.cards import CardPool, CardRecord, CardTable, Deck, Rarity, own_parameters
 from jace.engine.manabot import board_layout, engine_card_ids, engine_cards, start_batch
-from jace.play import BOARD_ARRAYS, GuessModel, PlayerModel
+from jace.play import BOARD_ARRAYS, GuessModel, PlayerModel, WinChanceModel
 from jace.train import PlayerRule, play_games, update_guess, update_player
 
 __all__ = ()
 
 
-def test_real_games_train_the_player_and_the_guess_model_for_one_step() -> None:
+def test_real_games_train_the_player_its_win_chance_and_the_guess_model_for_one_step() -> None:
     torch.manual_seed(0)
     cards = engine_cards()
     pool = CardPool(
@@ -53,10 +53,11 @@ def test_real_games_train_the_player_and_the_guess_model_for_one_step() -> None:
         deck_guess_cards=4,
     )
     guess = GuessModel(embedding, engine_to_card=engine_to_card, layout=layout, width=32, layers=1, heads=2)
+    win_chance = WinChanceModel(embedding, engine_to_card=engine_to_card, layout=layout, width=32, layers=1, heads=2)
 
     own = functools.partial(own_parameters, embedding=embedding)
 
-    before = [parameter.detach().clone() for parameter in (*own(player), *own(guess))]
+    before = [parameter.detach().clone() for parameter in (*own(player), *own(win_chance), *own(guess))]
     generator = torch.Generator().manual_seed(0)
     collected = play_games(
         lambda games: start_batch(games, pool=pool, games=2, seed=0, boards=BOARD_ARRAYS),
@@ -72,14 +73,14 @@ def test_real_games_train_the_player_and_the_guess_model_for_one_step() -> None:
     update_player(
         player.policy,
         rollout,
-        rule=PlayerRule(
-            clip=0.2, stay=0.1, spread=0.05, keep_quantile=0.0, keep_floor=0.0, value_weight=1.0, normalize=False
-        ),
+        win_chance=win_chance.win_chance,
+        rule=PlayerRule(clip=0.2, stay=0.1, spread=0.05, keep_quantile=0.0, keep_floor=0.0, normalize=False),
         lam_advantage=0.5,
         lam_value=0.8,
         slice_rows=64,
         max_grad_norm=1.0,
-        optimizers=[torch.optim.Adam(own(player), lr=1e-3)],
+        policy_optimizers=[torch.optim.Adam(own(player), lr=1e-3)],
+        win_chance_optimizers=[torch.optim.Adam(own(win_chance), lr=1e-3)],
         passes=1,
         generator=generator,
     )
@@ -95,5 +96,5 @@ def test_real_games_train_the_player_and_the_guess_model_for_one_step() -> None:
 
     assert len(collected.games) + collected.abandoned == 2
     assert bool((rollout.hand_truth.sum(dim=-1) > 0).any())
-    after = [*own(player), *own(guess)]
+    after = [*own(player), *own(win_chance), *own(guess)]
     assert any(not torch.equal(old, new) for old, new in zip(before, after, strict=True))

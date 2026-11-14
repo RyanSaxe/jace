@@ -71,7 +71,7 @@ from typing import Literal
 import torch
 from torch import Tensor, nn
 
-type ModelName = Literal["embedding", "drafter", "deck_builder", "deck_score", "guess", "player"]
+type ModelName = Literal["embedding", "drafter", "deck_builder", "deck_score", "guess", "player", "win_chance"]
 type Clock = Callable[[], datetime]
 
 # The version of the file layout, written to `identity.json` so a reader can tell layouts apart.

@@ -35,8 +35,8 @@ class Earlier:
     mask: Tensor
 
 
-# (boards, guess) -> (action logits [n, max_actions] with illegal actions at -inf, win chance [n]).
-type Policy = Callable[[Boards, Guess], tuple[Tensor, Tensor]]
+# (boards, guess) -> action logits [n, max_actions] with illegal actions at -inf.
+type Policy = Callable[[Boards, Guess], Tensor]
 
 # (boards, the game's earlier guesses) -> the new guess, each [n, cards].
 type Guesser = Callable[[Boards, Earlier], Guess]

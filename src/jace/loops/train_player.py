@@ -1,16 +1,16 @@
-"""Train only the player and the guess model, by self-play on a fixed list of human decks.
+"""Train only the player, its win chance and the guess model, by self-play on fixed human decks.
 
 This is the limited loop with the draft and the deck building left out: the
 decks are human decks from the training share of the 17Lands data, so what
 is measured is how well the player learns to play, and nothing else moves.
 Each iteration plays a fixed number of games to the end in worker
-processes, all with that iteration's weights, and then updates the two
-models. Both read cards through the card vectors of `--embedding-run`,
-frozen into a `CardTable`, which is not trained here: a step taken for one
-model would change the other's input. Every few iterations the player is
-scored with the scoring harness on paired deals of held-out human decks,
-which are never played in training, against random play, scripted greedy
-and the heuristic player. Every flag that
+processes, all with that iteration's weights, and then updates the player,
+its win chance and the guess model. All three read cards through the card
+vectors of `--embedding-run`, frozen into a `CardTable`, which is not
+trained here: a step taken for one model would change the others' input.
+Every few iterations the player is scored with the scoring harness on
+paired deals of held-out human decks, which are never played in training,
+against random play, scripted greedy and the heuristic player. Every flag that
 shapes the player's update is on the command line, because this loop exists
 to compare them. Run it with
 `uv run python -m jace.loops.train_player --help`.
@@ -22,7 +22,7 @@ import json
 import random
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -51,7 +51,7 @@ from jace.loops.entry_points import (
     start_run,
 )
 from jace.loops.matches import Harness
-from jace.play import Guess, guesser_on, policy_on
+from jace.play import Guess, guesser_on, policy_on, win_chance_on
 from jace.tracking import (
     CheckpointRef,
     ModelName,
@@ -70,12 +70,11 @@ __all__ = ("main",)
 # The dials of the player's rule that no flag sets, as `train_limited` has them.
 _CLIP = 0.2
 _STAY = 0.1
-_VALUE_WEIGHT = 0.5
 _SLICE_ROWS = 512
 _MAX_GRAD_NORM = 1.0
 # PyTorch seeds a generator with a signed 64-bit integer.
 _SEED_BITS = 63
-_SAVED: tuple[ModelName, ...] = ("embedding", "player", "guess")
+_SAVED: tuple[ModelName, ...] = ("embedding", "player", "win_chance", "guess")
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +94,9 @@ class _Arguments(PlayArguments):
 
 
 def _arguments(argv: Sequence[str]) -> _Arguments:
-    parser = argparse.ArgumentParser(description="Train only the player and the guess model on human decks.")
+    parser = argparse.ArgumentParser(
+        description="Train only the player, its win chance and the guess model on human decks."
+    )
     add_run_flags(parser)
     add_play_flags(parser)
     parser.add_argument("--iterations", type=int, required=True)
@@ -113,7 +114,7 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument(
         "--decks", type=int, default=256, help="human decks, not held out, that the games are dealt from"
     )
-    parser.add_argument("--rate", type=float, default=3e-4, help="the learning rate of both models")
+    parser.add_argument("--rate", type=float, default=3e-4, help="the learning rate of every model")
     parser.add_argument("--spread", type=float, default=0.0, help="the pull toward even odds over legal actions")
     parser.add_argument("--lam-advantage", type=float, default=0.95, help="how far back a result's credit reaches")
     parser.add_argument("--lam-value", type=float, default=0.95)
@@ -125,7 +126,12 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
 def _resume(run_folder: Path, models: PlayModels) -> int:
     # Loads the newest checkpoint of every module of the stopped run at `run_folder` and returns
     # the iteration they were saved after. Optimizer state is not checkpointed, so it starts fresh.
-    modules = {"embedding": models.embedding, "player": models.player, "guess": models.guess}
+    modules = {
+        "embedding": models.embedding,
+        "player": models.player,
+        "win_chance": models.win_chance,
+        "guess": models.guess,
+    }
     updates: set[int] = set()
     for model in _SAVED:
         ref = latest_checkpoint(run_folder, model)
@@ -143,11 +149,10 @@ def _update(
     models: PlayModels,
     *,
     rollout: Rollout,
-    optimizers: Sequence[torch.optim.Optimizer],
+    optimizers: Mapping[ModelName, torch.optim.Optimizer],
     generator: torch.Generator,
 ) -> dict[str, float]:
-    # One update of the player and one of the guess model on a round's games.
-    # optimizers: the player's, then the guess model's.
+    # One update of the player and its win chance and one of the guess model on a round's games.
     device = models.embedding.device
     # The model's inputs go to its device once, so every slice of every pass is cut there.
     on_device = replace(
@@ -161,18 +166,19 @@ def _update(
         spread=arguments.spread,
         keep_quantile=arguments.keep_quantile,
         keep_floor=0.0,
-        value_weight=_VALUE_WEIGHT,
         normalize=arguments.normalize,
     )
     player = update_player(
         policy_on(models.player.policy, device),
         on_device,
+        win_chance=win_chance_on(models.win_chance.win_chance, device),
         rule=rule,
         lam_advantage=arguments.lam_advantage,
         lam_value=arguments.lam_value,
         slice_rows=_SLICE_ROWS,
         max_grad_norm=_MAX_GRAD_NORM,
-        optimizers=optimizers[:1],
+        policy_optimizers=[optimizers["player"]],
+        win_chance_optimizers=[optimizers["win_chance"]],
         passes=arguments.passes,
         generator=generator,
     )
@@ -182,7 +188,7 @@ def _update(
         history=arguments.history,
         slice_rows=_SLICE_ROWS,
         max_grad_norm=_MAX_GRAD_NORM,
-        optimizers=optimizers[1:],
+        optimizers=[optimizers["guess"]],
         generator=generator,
     )
     named = {f"player/{name}": value for name, value in player.items()}
@@ -190,9 +196,10 @@ def _update(
 
 
 def _save(run: Running, models: PlayModels, *, iteration: int) -> CheckpointRef:
-    # Saves the three modules and returns the player's checkpoint. The card table does not change
+    # Saves the four modules and returns the player's checkpoint. The card table does not change
     # in this loop, and is saved so that a checkpoint can be loaded and scored by itself.
     save_checkpoint(run, model="embedding", update=iteration, module=models.embedding)
+    save_checkpoint(run, model="win_chance", update=iteration, module=models.win_chance)
     save_checkpoint(run, model="guess", update=iteration, module=models.guess)
     return save_checkpoint(run, model="player", update=iteration, module=models.player)
 
@@ -211,17 +218,17 @@ def _train(
     """Run every iteration after `done`, saving the curve and the checkpoints on the way.
 
     An iteration plays `--games` games between decks drawn at random from
-    `decks` and updates the two models on them. Every module is saved after
+    `decks` and updates the three models on them. Every module is saved after
     every `checkpoint_every`-th iteration, when that is above zero, after
     the last, and after every `evaluate_every`-th, when the player is also
     scored on the harness's deals. The curve file is rewritten after each
     iteration, so a stopped run still has its curve, and a resumed run
     keeps the curve up to `done`.
     """
-    optimizers = [
-        torch.optim.Adam(own_parameters(module, models.embedding), lr=arguments.rate)
-        for module in (models.player, models.guess)
-    ]
+    optimizers: dict[ModelName, torch.optim.Optimizer] = {
+        name: torch.optim.Adam(own_parameters(module, models.embedding), lr=arguments.rate)
+        for name, module in (("player", models.player), ("win_chance", models.win_chance), ("guess", models.guess))
+    }
     # A resumed run must not replay the games it already played.
     rng = random.Random(arguments.seed + done)
     generator = torch.Generator().manual_seed(rng.getrandbits(_SEED_BITS))
@@ -273,11 +280,12 @@ def _train(
 
 
 def main(argv: Sequence[str]) -> None:
-    """Train the player and the guess model on human decks and save the run's record.
+    """Train the player, its win chance and the guess model on human decks and save the run's record.
 
     The run folder is created under `--run-dir` by `jace.tracking` and gets
-    a checkpoint of the embedding, the player and the guess model at the
-    end, at every evaluation, and every `--checkpoint-every` iterations.
+    a checkpoint of the embedding, the player, the win chance and the guess
+    model at the end, at every evaluation, and every `--checkpoint-every`
+    iterations.
     The curve is written beside it as `<run id>.curve.json`: the metrics of
     every iteration, and at each evaluation the player's win rates against
     the three scripted players with its land and spell rates.
@@ -296,7 +304,7 @@ def main(argv: Sequence[str]) -> None:
     models = build_play_models(arguments, embedding, pool=cards.pool)
     done = 0 if arguments.resume is None else _resume(arguments.resume, models)
     device = device_named(arguments.device)
-    for module in (models.embedding, models.player, models.guess):
+    for module in (models.embedding, models.player, models.win_chance, models.guess):
         module.to(device)
     clock = functools.partial(datetime.now, UTC)
     if arguments.resume is None:

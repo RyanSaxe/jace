@@ -4,8 +4,10 @@ The player reads the board, its own deck and a guess of the opponent's
 cards, and scores each legal action from the action's own features, the
 board objects it names and a summary of the whole board. One head scores
 every kind of decision, so nothing depends on how many actions a decision
-offers. `random_policy` has the same call shape and no weights, which makes
-it the opponent for a first evaluation.
+offers. It has no win chance of its own: training reads that from
+`WinChanceModel`, which sees the opponent's true cards. `random_policy` has
+the same call shape and no weights, which makes it the opponent for a first
+evaluation.
 """
 
 import torch
@@ -22,23 +24,20 @@ __all__ = ("PlayerModel", "as_boards", "random_policy")
 # An action is scored from four vectors of the model's width: its own row, its two focus
 # entities and the board summary.
 _SCORED_VECTORS = 4
-# A policy with no value estimate reports an even chance of winning.
-_EVEN_CHANCE = 0.5
 
 
 def as_boards(decisions: Decisions, *, device: torch.device) -> Boards:
     return {name: torch.as_tensor(array, device=device) for name, array in decisions.boards.items()}
 
 
-def random_policy(boards: Boards, guess: Guess) -> tuple[Tensor, Tensor]:
-    # A `Policy` that gives every legal action the same score and an even chance of winning.
+def random_policy(boards: Boards, _guess: Guess) -> Tensor:
+    # A `Policy` that gives every legal action the same score.
     legal = legal_actions(boards)  # bool [b, max_actions]
-    logits = torch.zeros(legal.shape, device=legal.device).masked_fill(~legal, -torch.inf)
-    return logits, torch.full_like(guess.hand[:, 0], _EVEN_CHANCE)
+    return torch.zeros(legal.shape, device=legal.device).masked_fill(~legal, -torch.inf)
 
 
 class PlayerModel(nn.Module):
-    """Score every legal action and estimate the chance of winning.
+    """Score every legal action.
 
     `policy` satisfies the `Policy` type. The guess enters as tokens:
     `guess_cards` for the cards the opponent is likeliest to hold, and
@@ -86,11 +85,9 @@ class PlayerModel(nn.Module):
         self.action_head: nn.Sequential = nn.Sequential(
             nn.Linear(_SCORED_VECTORS * width, width), nn.GELU(), nn.Linear(width, 1)
         )
-        self.value_head: nn.Sequential = nn.Sequential(nn.Linear(width, width), nn.GELU(), nn.Linear(width, 1))
 
-    def policy(self, boards: Boards, guess: Guess) -> tuple[Tensor, Tensor]:
-        # guess.hand, guess.deck: float [b, cards]. Returns action logits [b, max_actions], illegal ones at -inf,
-        # and the acting seat's chance to win, float [b].
+    def policy(self, boards: Boards, guess: Guess) -> Tensor:
+        # guess.hand, guess.deck: float [b, cards]. Returns action logits [b, max_actions], illegal ones at -inf.
         tokens = board_tokens(boards, layout=self.layout, engine_to_card=self.engine_to_card)
         pool = torch.arange(self.embedding.cards, device=self.embedding.device)
         card_table = self.embedding(pool)  # [cards, card_width]
@@ -124,5 +121,4 @@ class PlayerModel(nn.Module):
         )  # [b, offered, scored vectors * width]
         logits = torch.full_like(tokens.action_mask, -torch.inf, dtype=scored.dtype)
         logits[:, :offered] = self.action_head(scored).squeeze(-1)
-        logits = logits.masked_fill(~tokens.action_mask, -torch.inf)
-        return logits, self.value_head(summary).squeeze(-1).sigmoid()
+        return logits.masked_fill(~tokens.action_mask, -torch.inf)

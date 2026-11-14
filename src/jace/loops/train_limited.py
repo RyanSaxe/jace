@@ -5,8 +5,8 @@ drafted, a deck is built from every pool, and the decks play each other on
 the engine in worker processes, every deck the same number of games and
 every game to its end. Every model reads cards through the card vectors of
 `--embedding-run`, frozen into a `CardTable`. The drafter and the deck
-models can start from checkpoints trained on human data; the player and
-the guess model always start untrained. A model's weights fit only the card
+models can start from checkpoints trained on human data; the player, its
+win chance and the guess model always start untrained. A model's weights fit only the card
 vectors they were trained with, so `--embedding-run` should be the run its
 checkpoint came from or one that read the same vectors. The table is not
 trained here, so a model whose rate is zero does not change. Every few
@@ -56,7 +56,7 @@ from jace.loops.entry_points import (
 from jace.loops.limited import Learners, LimitedSetup, limited_iteration
 from jace.loops.matches import Harness
 from jace.loops.schedules import phased_schedule
-from jace.play import GuessModel, PlayerModel, guesser_on, policy_on
+from jace.play import GuessModel, PlayerModel, WinChanceModel, guesser_on, policy_on, win_chance_on
 from jace.tracking import (
     CheckpointRef,
     ModelName,
@@ -75,9 +75,7 @@ __all__ = ("main",)
 _SEATS_IN_A_POD = 8
 _BOOSTERS_EACH = 3
 # Ataraxos's player rule. Its `keep_quantile`, `normalize` and `spread` are replaced by the arguments and the schedule.
-_PLAYER_RULE = PlayerRule(
-    clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.75, keep_floor=0.0, value_weight=0.5, normalize=True
-)
+_PLAYER_RULE = PlayerRule(clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.75, keep_floor=0.0, normalize=True)
 _SCORE_CHUNK = 1024
 _SLICE_ROWS = 512
 
@@ -162,8 +160,9 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
 
 @dataclass(frozen=True, slots=True)
 class _Models:
-    # Every trained thing of a run. The five models share `embedding`, which is not trained.
+    # Every trained thing of a run. The six models share `embedding`, which is not trained.
     player: PlayerModel
+    win_chance: WinChanceModel
     guess: GuessModel
     drafter: DrafterModel
     builder: DeckBuilderModel
@@ -174,6 +173,7 @@ class _Models:
 def _by_name(models: _Models) -> dict[ModelName, nn.Module]:
     return {
         "player": models.player,
+        "win_chance": models.win_chance,
         "guess": models.guess,
         "drafter": models.drafter,
         "deck_builder": models.builder,
@@ -187,6 +187,7 @@ def _build_models(arguments: _Arguments, embedding: CardTable, *, pool: CardPool
     deck_shape = {"width": arguments.deck_width, "layers": arguments.deck_layers, "heads": arguments.deck_heads}
     return _Models(
         player=play.player,
+        win_chance=play.win_chance,
         guess=play.guess,
         drafter=DrafterModel(
             embedding,
@@ -269,7 +270,9 @@ def _train(
     earlier = json.loads(curve_file.read_text()) if done > 0 else {"iterations": [], "evaluations": []}
     iterations: list[dict[str, float]] = [point for point in earlier["iterations"] if point["iteration"] <= done]
     evaluations: list[dict[str, float]] = [point for point in earlier["evaluations"] if point["iteration"] <= done]
-    play_models = PlayModels(player=models.player, guess=models.guess, embedding=models.embedding)
+    play_models = PlayModels(
+        player=models.player, guess=models.guess, win_chance=models.win_chance, embedding=models.embedding
+    )
     started = time.perf_counter()
     for iteration in range(done + 1, arguments.iterations + 1):
         metrics = iterate(iteration)
@@ -361,6 +364,7 @@ def main(argv: Sequence[str]) -> None:
     device = _move(models, human_drafter, to=device_named(arguments.device))
     learners = Learners(
         policy=policy_on(models.player.policy, device),
+        win_chance=win_chance_on(models.win_chance.win_chance, device),
         guesser=guesser_on(models.guess.guess, device),
         drafter=models.drafter,
         human_drafter=human_drafter,
@@ -376,7 +380,9 @@ def main(argv: Sequence[str]) -> None:
         count=arguments.workers,
         seed=arguments.seed + done,
     )
-    play_models = PlayModels(player=models.player, guess=models.guess, embedding=models.embedding)
+    play_models = PlayModels(
+        player=models.player, guess=models.guess, win_chance=models.win_chance, embedding=models.embedding
+    )
 
     def play(matchups: Sequence[Matchup]) -> Collected:
         # The workers of one round are the ones the round before left, with any stalled one replaced.

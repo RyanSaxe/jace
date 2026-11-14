@@ -16,7 +16,16 @@ from torch.nn import functional
 
 from jace.play import Guess
 
-__all__ = ("PlayerRule", "choice_loss", "entropy", "guess_loss", "kl_to", "player_loss", "score_loss")
+__all__ = (
+    "PlayerRule",
+    "choice_loss",
+    "entropy",
+    "guess_loss",
+    "kl_to",
+    "player_loss",
+    "score_loss",
+    "win_chance_loss",
+)
 
 # The guess's shares and chances are kept this far from 0, and chances this far from 1,
 # before taking a logarithm, so a guess of exactly 0 or 1 costs a large finite amount.
@@ -33,11 +42,11 @@ class PlayerRule:
     `spread` the pull toward even odds over legal actions; a loop lowers
     `spread` as training goes on. Only decisions whose advantage is at least
     the `keep_quantile` of advantage sizes, and at least `keep_floor`, teach
-    the policy. `value_weight` weighs the win-chance error. With
-    `normalize` the advantages of those decisions are shifted and scaled to
-    mean zero and unit spread before the loss, so the size of a step does
-    not depend on how large the advantages happen to be. With `stay`,
-    `spread` and `keep_quantile` at zero this is plain PPO.
+    the policy. With `normalize` the advantages of those decisions are
+    shifted and scaled to mean zero and unit spread before the loss, so the
+    size of a step does not depend on how large the advantages happen to
+    be. With `stay`, `spread` and `keep_quantile` at zero this is plain
+    PPO's policy loss.
     """
 
     clip: float
@@ -45,7 +54,6 @@ class PlayerRule:
     spread: float
     keep_quantile: float
     keep_floor: float
-    value_weight: float
     normalize: bool
 
 
@@ -89,25 +97,20 @@ def choice_loss(logits: Tensor, chosen: Tensor, *, weights: Tensor) -> Tensor:
 
 def player_loss(
     logits: Tensor,
-    values: Tensor,
     *,
     old_logits: Tensor,
     actions: Tensor,
     advantages: Tensor,
-    value_targets: Tensor,
     keep: Tensor,
-    learner: Tensor,
     rule: PlayerRule,
 ) -> Tensor:
-    """Compute the clipped policy loss with its two pulls and the value error.
+    """Compute the clipped policy loss with its two pulls.
 
-    `logits` `[m, k]` and `values` `[m]` are the policy's fresh output on the
-    rows; `old_logits` are what it output when it played them. `actions` is
-    int64 `[m]`, `advantages` and `value_targets` are `[m]`, and `keep` is
-    bool `[m]`, True for the rows that teach the policy. `learner` is bool
-    `[m]`, True for the rows the learner played. Those train the win chance,
-    in or out of `keep`. An opponent's rows do not, because their targets
-    come from the opponent's own predictions.
+    `logits` `[m, k]` are the policy's fresh output on the rows, and
+    `old_logits` are what it output when it played them. `actions` is int64
+    `[m]`, `advantages` is `[m]`, and `keep` is bool `[m]`, True for the
+    rows that teach the policy. The loss is the mean over the kept rows, and
+    zero when none is kept.
     """
     log_probs, available = _masked_log_probs(logits)
     old_log_probs, _ = _masked_log_probs(old_logits)
@@ -122,10 +125,21 @@ def player_loss(
     kl_to_old = (log_probs.exp() * (log_probs - old_log_probs) * available).sum(dim=-1)
     # The log of the number of legal actions minus the entropy is the KL divergence to even odds.
     kl_to_even = available.float().sum(dim=-1).log() - entropy(logits)
-    policy_loss = ((-gain + rule.stay * kl_to_old + rule.spread * kl_to_even) * kept).sum() / kept_count
-    value_rows = learner.float()
-    value_error = ((values - value_targets).pow(2) * value_rows).sum() / value_rows.sum().clamp_min(1.0)
-    return policy_loss + rule.value_weight * value_error
+    return ((-gain + rule.stay * kl_to_old + rule.spread * kl_to_even) * kept).sum() / kept_count
+
+
+def win_chance_loss(win_chance: Tensor, *, targets: Tensor, learner: Tensor) -> Tensor:
+    """Compute the squared error of a win chance to its targets, over the learner's rows.
+
+    `win_chance` and `targets` are `[m]`, and `learner` is bool `[m]`, True
+    for the rows the learner played. The win chance is the acting seat's
+    chance to win when the learner's policy plays that seat, so only the
+    learner's rows teach it: at an opponent's row another policy plays the
+    seat, and the row's result measures that policy. The loss is zero when
+    no row is the learner's.
+    """
+    rows = learner.float()
+    return ((win_chance - targets).pow(2) * rows).sum() / rows.sum().clamp_min(1.0)
 
 
 def guess_loss(guess: Guess, *, deck_truth: Tensor, hand_truth: Tensor) -> Tensor:

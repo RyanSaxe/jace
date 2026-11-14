@@ -15,12 +15,12 @@ __all__ = ("guesser_on", "policy_on", "win_chance_on")
 
 
 def policy_on(policy: Policy, device: torch.device) -> Policy:
-    def moved(boards: Boards, guess: Guess) -> tuple[torch.Tensor, torch.Tensor]:
-        logits, values = policy(
+    def moved(boards: Boards, guess: Guess) -> torch.Tensor:
+        logits = policy(
             {name: board.to(device) for name, board in boards.items()},
             Guess(deck=guess.deck.to(device), hand=guess.hand.to(device)),
         )
-        return logits.cpu(), values.cpu()
+        return logits.cpu()
 
     return moved
 

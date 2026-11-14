@@ -24,9 +24,9 @@ __all__ = ()
 HISTORY = 2
 
 
-def _uniform_policy(boards: Boards, _guess: Guess) -> tuple[Tensor, Tensor]:
+def _uniform_policy(boards: Boards, _guess: Guess) -> Tensor:
     rows = len(boards["hand"])
-    return torch.zeros(rows, HAND_SIZE), torch.full((rows,), 0.5)
+    return torch.zeros(rows, HAND_SIZE)
 
 
 def _blank_guesser(boards: Boards, _earlier: Earlier) -> Guess:
@@ -95,16 +95,20 @@ def test_a_player_learns_to_pick_its_highest_card(*, several_shuffled_passes_on_
     torch.manual_seed(0)
     generator = torch.Generator().manual_seed(0)
     options = several_shuffled_passes_on_normalized_advantages
-    model = nn.Sequential(nn.Linear(HAND_SIZE + 1, 32), nn.Tanh(), nn.Linear(32, HAND_SIZE + 1))
+    model = nn.Sequential(nn.Linear(HAND_SIZE + 1, 32), nn.Tanh(), nn.Linear(32, HAND_SIZE))
+    win_chance_model = nn.Sequential(nn.Linear(HAND_SIZE + 1 + TOY_CARDS, 32), nn.Tanh(), nn.Linear(32, 1))
 
-    def policy(boards: Boards, _guess: Guess) -> tuple[Tensor, Tensor]:
-        output = model(torch.cat([boards["hand"], boards["seen"]], dim=-1))
-        return output[:, :HAND_SIZE], output[:, HAND_SIZE].sigmoid()
+    def policy(boards: Boards, _guess: Guess) -> Tensor:
+        view = torch.cat([boards["hand"], boards["seen"]], dim=-1)
+        return model(view)
+
+    def win_chance(boards: Boards, truth: Guess) -> Tensor:
+        view_and_truth = torch.cat([boards["hand"], boards["seen"], truth.hand], dim=-1)
+        return win_chance_model(view_and_truth).squeeze(-1).sigmoid()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-3)
-    rule = PlayerRule(
-        clip=0.2, stay=0.1, spread=0.01, keep_quantile=0.0, keep_floor=0.0, value_weight=0.5, normalize=options
-    )
+    win_chance_optimizer = torch.optim.Adam(win_chance_model.parameters(), lr=3e-3)
+    rule = PlayerRule(clip=0.2, stay=0.1, spread=0.01, keep_quantile=0.0, keep_floor=0.0, normalize=options)
     best_pick_rates = []
     for iteration in range(40):
         collected = play_games(
@@ -125,12 +129,14 @@ def test_a_player_learns_to_pick_its_highest_card(*, several_shuffled_passes_on_
         update_player(
             policy,
             rollout,
+            win_chance=win_chance,
             rule=rule,
             lam_advantage=0.5,
             lam_value=0.8,
             slice_rows=256,
             max_grad_norm=1.0,
-            optimizers=[optimizer],
+            policy_optimizers=[optimizer],
+            win_chance_optimizers=[win_chance_optimizer],
             passes=2 if options else 1,
             generator=generator,
         )

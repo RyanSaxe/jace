@@ -95,14 +95,13 @@ def test_player_gives_no_probability_to_illegal_actions_on_real_boards() -> None
     player, _ = _models(CARDS)
 
     with torch.no_grad():
-        logits, win_chance = player.policy(boards, _some_guess((3, CARDS), seed=1))
+        logits = player.policy(boards, _some_guess((3, CARDS), seed=1))
 
     legal = boards["actions_valid"] > 0
     probabilities = logits.softmax(dim=-1)
     assert legal.sum(dim=-1).tolist() == [5, 4, 2]
     assert torch.equal(probabilities > 0, legal)
     assert torch.allclose(probabilities.sum(dim=-1), torch.ones(3))
-    assert bool(((win_chance > 0) & (win_chance < 1)).all())
 
 
 def test_player_reads_both_the_hand_guess_and_the_deck_guess() -> None:
@@ -112,9 +111,9 @@ def test_player_reads_both_the_hand_guess_and_the_deck_guess() -> None:
     other = _some_guess((3, CARDS), seed=2)
 
     with torch.no_grad():
-        logits, _ = player.policy(boards, guess)
-        with_other_hand, _ = player.policy(boards, Guess(deck=guess.deck, hand=other.hand))
-        with_other_deck, _ = player.policy(boards, Guess(deck=other.deck, hand=guess.hand))
+        logits = player.policy(boards, guess)
+        with_other_hand = player.policy(boards, Guess(deck=guess.deck, hand=other.hand))
+        with_other_deck = player.policy(boards, Guess(deck=other.deck, hand=guess.hand))
 
     legal = boards["actions_valid"] > 0
     assert not torch.allclose(logits[legal], with_other_hand[legal])
@@ -123,7 +122,7 @@ def test_player_reads_both_the_hand_guess_and_the_deck_guess() -> None:
 
 def _action_odds(player: PlayerModel, boards: Boards) -> Tensor:
     with torch.no_grad():
-        logits, _ = player.policy(boards, _some_guess((3, CARDS), seed=1))
+        logits = player.policy(boards, _some_guess((3, CARDS), seed=1))
     return logits.softmax(dim=-1)
 
 
@@ -158,12 +157,11 @@ def test_player_reads_the_copies_left_unseen_in_its_own_deck(row: int, unseen_af
 
 def test_random_policy_spreads_probability_evenly_over_legal_actions() -> None:
     boards = _real_boards()
-    logits, win_chance = random_policy(boards, _some_guess((3, CARDS), seed=1))
+    logits = random_policy(boards, _some_guess((3, CARDS), seed=1))
 
     probabilities = logits.softmax(dim=-1)
     assert torch.allclose(probabilities[:, 0], torch.tensor([1 / 5, 1 / 4, 1 / 2]))
     assert torch.equal(probabilities > 0, boards["actions_valid"] > 0)
-    assert win_chance.tolist() == [0.5, 0.5, 0.5]
 
 
 def test_win_chance_reads_which_cards_the_opponent_truly_holds_in_hand() -> None:
@@ -196,10 +194,12 @@ def test_guess_is_a_deck_distribution_and_hand_probabilities(earlier_guesses: in
     assert bool(((guess.hand >= 0) & (guess.hand <= 1)).all())
 
 
-def test_padding_rows_do_not_change_the_policy_or_the_guess() -> None:
+def test_padding_rows_do_not_change_the_policy_the_guess_or_the_win_chance() -> None:
     boards = _real_boards()
     padded_boards = _with_padding_overwritten(boards)
     player, guesser = _models(CARDS)
+    win_chance_model = _win_chance_model(CARDS)
+    truth = _hidden_cards(in_hand=range(7))
     guesses = _some_guess((3, 2, CARDS), seed=2)
     junk = _some_guess((3, 1, CARDS), seed=3)
     earlier = Earlier(guesses=guesses, mask=torch.ones(3, 2, dtype=torch.bool))
@@ -213,8 +213,10 @@ def test_padding_rows_do_not_change_the_policy_or_the_guess() -> None:
     with torch.no_grad():
         guess = guesser.guess(boards, earlier)
         padded_guess = guesser.guess(padded_boards, padded_earlier)
-        logits, win_chance = player.policy(boards, guess)
-        padded_logits, padded_win_chance = player.policy(padded_boards, guess)
+        logits = player.policy(boards, guess)
+        padded_logits = player.policy(padded_boards, guess)
+        win_chance = win_chance_model.win_chance(boards, truth)
+        padded_win_chance = win_chance_model.win_chance(padded_boards, truth)
 
     assert torch.allclose(padded_guess.deck, guess.deck, atol=1e-5)
     assert torch.allclose(padded_guess.hand, guess.hand, atol=1e-5)
@@ -227,6 +229,13 @@ def test_models_score_a_larger_pool_and_old_cards_keep_their_scores() -> None:
     player, guesser = _models(CARDS)
     larger_player, larger_guesser = _models(CARDS)
     larger_player.embedding = larger_guesser.embedding = _models(MORE_CARDS)[0].embedding
+    win_chance_model, larger_win_chance_model = _win_chance_model(CARDS), _win_chance_model(CARDS)
+    larger_win_chance_model.embedding = larger_player.embedding
+    truth = _hidden_cards(in_hand=range(7))
+    no_new_cards = Guess(
+        deck=torch.cat((truth.deck, torch.zeros(3, MORE_CARDS - CARDS)), dim=-1),
+        hand=torch.cat((truth.hand, torch.zeros(3, MORE_CARDS - CARDS)), dim=-1),
+    )
     no_mask = torch.ones(3, 0, dtype=torch.bool)
 
     with torch.no_grad():
@@ -238,10 +247,13 @@ def test_models_score_a_larger_pool_and_old_cards_keep_their_scores() -> None:
             deck=torch.cat((guess.deck, torch.zeros(3, MORE_CARDS - CARDS)), dim=-1),
             hand=torch.cat((guess.hand, torch.zeros(3, MORE_CARDS - CARDS)), dim=-1),
         )
-        logits, _ = player.policy(boards, guess)
-        larger_logits, _ = larger_player.policy(boards, new_cards_unlikely)
+        logits = player.policy(boards, guess)
+        larger_logits = larger_player.policy(boards, new_cards_unlikely)
+        win_chance = win_chance_model.win_chance(boards, truth)
+        larger_win_chance = larger_win_chance_model.win_chance(boards, no_new_cards)
 
     assert larger_guess.hand.shape == (3, MORE_CARDS)
     assert torch.allclose(larger_guess.hand[:, :CARDS], guess.hand, atol=1e-5)
     assert torch.allclose(larger_guess.deck.sum(dim=-1), torch.ones(3), atol=1e-5)
     assert torch.allclose(larger_logits, logits, atol=1e-4)
+    assert torch.allclose(larger_win_chance, win_chance, atol=1e-5)

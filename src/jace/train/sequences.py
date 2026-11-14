@@ -57,8 +57,8 @@ def sequences(games: Tensor, seats: Tensor) -> Sequences:
 def advantages(values: Tensor, results: Tensor, *, layout: Sequences, lam: float) -> Tensor:
     """Compute generalized advantage estimates with no discount, as `[n]`.
 
-    `values` is the win chance the actor predicted at each row and `results`
-    is the game's final result from that row's seat (1, 0.5 or 0). The only
+    `values` is the win chance predicted at each row and `results` is the
+    game's final result from that row's seat (1, 0.5 or 0). The only
     reward is the result, so each step's surprise is the change in predicted
     win chance, and the last step's is the result minus the last prediction.
     `lam` in 0..1 sets how far a later surprise reaches back: 0 credits only

@@ -47,21 +47,33 @@ def _toy_loop() -> _Toy:
     ]
     pool = CardPool(records)
     embedding = CardTable(torch.randn(TOY_CARDS, 8))
-    player = nn.Sequential(nn.Linear(HAND_SIZE + 1, 16), nn.Tanh(), nn.Linear(16, HAND_SIZE + 1))
+    player = nn.Sequential(nn.Linear(HAND_SIZE + 1, 16), nn.Tanh(), nn.Linear(16, HAND_SIZE))
+    win_chance_model = nn.Sequential(nn.Linear(HAND_SIZE + 1 + TOY_CARDS, 16), nn.Tanh(), nn.Linear(16, 1))
     guess = nn.Sequential(nn.Linear(HAND_SIZE + 1, 16), nn.Tanh(), nn.Linear(16, 2 * TOY_CARDS))
     drafter = DrafterModel(embedding, width=16, layers=1, heads=2, picks=3)
     builder = DeckBuilderModel(embedding, width=16, layers=1, heads=2)
     score = DeckScore(embedding, width=16, layers=1, heads=2)
 
-    def policy(boards: Boards, _guess: Guess) -> tuple[Tensor, Tensor]:
-        output = player(torch.cat([boards["hand"], boards["seen"]], dim=-1))
-        return output[:, :HAND_SIZE], output[:, HAND_SIZE].sigmoid()
+    def policy(boards: Boards, _guess: Guess) -> Tensor:
+        view = torch.cat([boards["hand"], boards["seen"]], dim=-1)
+        return player(view)
+
+    def win_chance(boards: Boards, truth: Guess) -> Tensor:
+        view_and_truth = torch.cat([boards["hand"], boards["seen"], truth.hand], dim=-1)
+        return win_chance_model(view_and_truth).squeeze(-1).sigmoid()
 
     def guesser(boards: Boards, _earlier: Earlier) -> Guess:
         output = guess(torch.cat([boards["hand"], boards["seen"]], dim=-1))
         return Guess(deck=output[:, :TOY_CARDS].softmax(dim=-1), hand=output[:, TOY_CARDS:].sigmoid())
 
-    trained = {"player": player, "guess": guess, "drafter": drafter, "deck_builder": builder, "deck_score": score}
+    trained = {
+        "player": player,
+        "win_chance": win_chance_model,
+        "guess": guess,
+        "drafter": drafter,
+        "deck_builder": builder,
+        "deck_score": score,
+    }
     setup = LimitedSetup(
         pool=pool,
         draft_format=DraftFormat(seats=2, rounds=1, picks_per_round=3),
@@ -77,15 +89,14 @@ def _toy_loop() -> _Toy:
         history=2,
         slice_rows=64,
         max_grad_norm=1.0,
-        player_rule=PlayerRule(
-            clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.0, keep_floor=0.0, value_weight=0.5, normalize=True
-        ),
+        player_rule=PlayerRule(clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.0, keep_floor=0.0, normalize=True),
         passes=2,
         lam_advantage=0.5,
         lam_value=0.8,
     )
     learners = Learners(
         policy=policy,
+        win_chance=win_chance,
         guesser=guesser,
         drafter=drafter,
         human_drafter=None,
@@ -93,6 +104,7 @@ def _toy_loop() -> _Toy:
         score=score,
         optimizers={
             "player": torch.optim.Adam(own_parameters(player, embedding), lr=1e-2),
+            "win_chance": torch.optim.Adam(own_parameters(win_chance_model, embedding), lr=1e-2),
             "guess": torch.optim.Adam(own_parameters(guess, embedding), lr=1e-2),
             "drafter": torch.optim.Adam(own_parameters(drafter, embedding), lr=1e-2),
             "deck_builder": torch.optim.Adam(own_parameters(builder, embedding), lr=1e-2),

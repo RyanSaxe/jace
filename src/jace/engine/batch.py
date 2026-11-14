@@ -127,7 +127,8 @@ class GameBatch(Protocol):
     for the next one of the list, so the rows of the next `decisions` may
     belong to other games. `hidden_cards` returns both seats' true hands
     and libraries in every game in play as card counts; it exists to label
-    training data for the guess model and must never reach a player.
+    training data for the guess model and to show the win chance what the
+    opponent holds, and must never reach a player.
     """
 
     def decisions(self) -> Decisions: ...

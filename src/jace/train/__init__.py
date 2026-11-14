@@ -18,7 +18,16 @@ from jace.train.collect import (
     play_games,
     select,
 )
-from jace.train.losses import PlayerRule, choice_loss, entropy, guess_loss, kl_to, player_loss, score_loss
+from jace.train.losses import (
+    PlayerRule,
+    choice_loss,
+    entropy,
+    guess_loss,
+    kl_to,
+    player_loss,
+    score_loss,
+    win_chance_loss,
+)
 from jace.train.sequences import Sequences, advantages, earlier_guesses, sequences
 from jace.train.update import Metrics, apply, update_guess, update_player
 
@@ -47,4 +56,5 @@ __all__ = (
     "sequences",
     "update_guess",
     "update_player",
+    "win_chance_loss",
 )

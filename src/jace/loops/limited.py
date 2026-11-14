@@ -52,7 +52,7 @@ from jace.draft import (
 )
 from jace.engine import SEATS
 from jace.loops.schedules import Dials
-from jace.play import Guesser, Policy
+from jace.play import Guesser, Policy, WinChance
 from jace.tracking import ModelName
 from jace.train import (
     GameResult,
@@ -122,16 +122,19 @@ class UnevenDecksError(ValueError):
 class Learners:
     """The models being trained and the optimizer that moves each.
 
-    `policy` and `guesser` are the player's and the guess model's functions,
-    which depend on the engine's board layout. `human_drafter` is the frozen
-    drafter trained on human picks that `Dials.human_pull` pulls toward, or
-    `None` for no pull. `optimizers` holds one optimizer per model, keyed
-    "player", "guess", "drafter", "deck_builder" and "deck_score", over
-    that model's own parameters. None of them may hold the shared card
-    embedding's parameters: build each from `own_parameters`.
+    `policy`, `win_chance` and `guesser` are the player's, the win-chance
+    model's and the guess model's functions, which depend on the engine's
+    board layout. `human_drafter` is the frozen drafter trained on human
+    picks that `Dials.human_pull` pulls toward, or `None` for no pull.
+    `optimizers` holds one optimizer per model, keyed "player",
+    "win_chance", "guess", "drafter", "deck_builder" and "deck_score", over
+    that model's own parameters. The win chance learns at the player's
+    rate. None of them may hold the shared card embedding's parameters:
+    build each from `own_parameters`.
     """
 
     policy: Policy
+    win_chance: WinChance
     guesser: Guesser
     drafter: DrafterModel
     human_drafter: DrafterModel | None
@@ -287,12 +290,14 @@ def _update_play_models(
     player = update_player(
         learners.policy,
         rollout,
+        win_chance=learners.win_chance,
         rule=replace(setup.player_rule, spread=dials.spread),
         lam_advantage=setup.lam_advantage,
         lam_value=setup.lam_value,
         slice_rows=setup.slice_rows,
         max_grad_norm=setup.max_grad_norm,
-        optimizers=[learners.optimizers["player"]],
+        policy_optimizers=[learners.optimizers["player"]],
+        win_chance_optimizers=[learners.optimizers["win_chance"]],
         passes=setup.passes,
         generator=generator,
     )
@@ -419,6 +424,7 @@ def limited_iteration(
     """
     generator = torch.Generator().manual_seed(rng.getrandbits(_SEED_BITS))
     _set_rate(learners.optimizers["player"], dials.player_rate)
+    _set_rate(learners.optimizers["win_chance"], dials.player_rate)
     _set_rate(learners.optimizers["drafter"], dials.drafter_rate)
     _set_rate(learners.optimizers["deck_score"], dials.deck_rate)
     _set_rate(learners.optimizers["deck_builder"], dials.deck_rate)

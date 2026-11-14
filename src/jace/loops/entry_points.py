@@ -49,7 +49,7 @@ from jace.engine.manabot import (
     turn_numbers,
 )
 from jace.loops.matches import Harness, draw_deals, model_player, score_against_scripted
-from jace.play import BOARD_ARRAYS, GuessModel, PlayerModel
+from jace.play import BOARD_ARRAYS, GuessModel, PlayerModel, WinChanceModel
 from jace.tracking import (
     CheckpointRef,
     Clock,
@@ -128,9 +128,9 @@ class PlayArguments(RunArguments):
     `add_play_flags` adds them to a parser. They say how games are played
     (`workers` processes of `games_per_worker` games at once, a stalled one
     replaced after `stall_seconds`), how the player learns from them, the
-    shapes of the player and the guess model, and how often and on how
-    many held-out deals the player is scored. `jace.loops.score` reads the
-    model shapes from a run's config under these names.
+    shapes of the player, the guess model and the win chance, and how often
+    and on how many held-out deals the player is scored. `jace.loops.score`
+    reads the model shapes from a run's config under these names.
     """
 
     workers: int
@@ -153,6 +153,8 @@ class PlayArguments(RunArguments):
 class PlayModels:
     player: PlayerModel
     guess: GuessModel
+    # win_chance: trains the player and never plays, so no worker is sent its weights.
+    win_chance: WinChanceModel
     embedding: CardTable
 
 
@@ -322,6 +324,7 @@ def build_play_models(arguments: PlayArguments, embedding: CardTable, *, pool: C
             **shape,
         ),
         guess=GuessModel(embedding, engine_to_card=engine_to_card, layout=layout, **shape),
+        win_chance=WinChanceModel(embedding, engine_to_card=engine_to_card, layout=layout, **shape),
         embedding=embedding,
     )
 

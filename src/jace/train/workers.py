@@ -273,7 +273,7 @@ def _work(connection: Connection, steps: ctypes.c_int64, *, build: BuildActor, s
     actor = build(seed)
     generator = torch.Generator().manual_seed(seed)
 
-    def counting(boards: Boards, guess: Guess) -> tuple[Tensor, Tensor]:
+    def counting(boards: Boards, guess: Guess) -> Tensor:
         # The policy runs once for each step of the games, so this count is what the training process watches.
         steps.value += 1
         return actor.policy(boards, guess)

@@ -44,13 +44,13 @@ class Rollout:
 
     Every tensor has a leading axis of `n` rows. `boards` and `guesses` are
     what the actor saw. `logits` are the actor's action scores, with illegal
-    actions at `-inf`, and `log_probs` and `values` are its log-probability
-    of the action it took and its predicted win chance. `games` and `seats`
-    identify the row's game and seat, and `learner` is False where the
-    opponent policy acted. `results` is the game's final result from the
-    row's seat: 1 for a win, 0.5 for a draw, 0 for a loss. `deck_truth` and
-    `hand_truth` are the labels for the guess: the opponent's true unseen
-    cards as shares, and 1 where the opponent truly held the card.
+    actions at `-inf`, and `log_probs` is its log-probability of the action
+    it took. `games` and `seats` identify the row's game and seat, and
+    `learner` is False where the opponent policy acted. `results` is the
+    game's final result from the row's seat: 1 for a win, 0.5 for a draw, 0
+    for a loss. `deck_truth` and `hand_truth` are the opponent's true unseen
+    cards as shares, and 1 where the opponent truly held the card: the
+    labels for the guess, and what the win chance reads in place of it.
     """
 
     boards: Boards
@@ -58,7 +58,6 @@ class Rollout:
     logits: Tensor
     actions: Tensor
     log_probs: Tensor
-    values: Tensor
     games: Tensor
     seats: Tensor
     learner: Tensor
@@ -141,22 +140,18 @@ def join(parts: Sequence[Rollout]) -> Rollout:
     )
 
 
-def _decide(
-    boards: Boards, guess: Guess, *, is_learner: Tensor, learner: Policy, opponent: Policy
-) -> tuple[Tensor, Tensor]:
-    # Runs each policy once, on the rows it acts in. Returns (logits [n, k], values [n]) for every row.
+def _decide(boards: Boards, guess: Guess, *, is_learner: Tensor, learner: Policy, opponent: Policy) -> Tensor:
+    # Runs each policy once, on the rows it acts in. Returns the logits [n, k] of every row.
     logits = torch.empty(0)
-    values = torch.zeros(len(is_learner))
     for rows, policy in ((is_learner, learner), (~is_learner, opponent)):
         if not bool(rows.any()):
             continue
         chosen_boards = {name: array[rows] for name, array in boards.items()}
-        policy_logits, policy_values = policy(chosen_boards, Guess(deck=guess.deck[rows], hand=guess.hand[rows]))
+        policy_logits = policy(chosen_boards, Guess(deck=guess.deck[rows], hand=guess.hand[rows]))
         if not logits.numel():
             logits = torch.full((len(is_learner), policy_logits.shape[1]), float("-inf"))
         logits[rows] = policy_logits
-        values[rows] = policy_values
-    return logits, values
+    return logits
 
 
 def _truth(batch: GameBatch, seats: Tensor) -> tuple[Tensor, Tensor]:
@@ -250,7 +245,7 @@ def play_games(
         boards = {name: torch.from_numpy(np.array(array)) for name, array in pending.boards.items()}
         guess = _guess(guesser, boards, games=games, seats=seats, history=guess_history, history_count=history_count)
         is_learner = torch.ones_like(seats, dtype=torch.bool) if self_play else seats == learner_seat[games]
-        logits, values = _decide(boards, guess, is_learner=is_learner, learner=learner, opponent=opponent)
+        logits = _decide(boards, guess, is_learner=is_learner, learner=learner, opponent=opponent)
         log_probs = logits.log_softmax(dim=-1)
         actions = torch.multinomial(log_probs.exp(), 1, generator=generator).squeeze(1)
         deck_truth, hand_truth = _truth(batch, seats)
@@ -261,7 +256,6 @@ def play_games(
                 logits=logits,
                 actions=actions,
                 log_probs=log_probs.gather(1, actions[:, None]).squeeze(1),
-                values=values,
                 games=games,
                 seats=seats,
                 learner=is_learner,
