@@ -73,8 +73,10 @@ over cards: each card's share of the opponent's unseen cards, and the chance
 the opponent holds at least one copy.
 
 **Player**, `PlayerModel.policy(boards, guess)`. It reads the players, cards
-and permanents on the board as tokens, plus the likeliest cards from the
-guess. Illegal actions get no probability.
+and permanents on the board as tokens. A permanent's token also holds the
+object it is attached to and the attacker it blocks. The player adds
+tokens for the likeliest cards from the guess. Illegal actions get no
+probability.
 
 ## The engine's boards
 
@@ -82,3 +84,11 @@ The guess model and the player read manabot's encoded boards directly. That
 knowledge sits in one function, `board_tokens` in
 [`jace/play/tokens.py`](../../src/jace/play/tokens.py), whose comment lists
 every array it assumes.
+
+Most columns of a board are numbers, such as a creature's power. Some name
+something instead: a card definition, another object on the board, or a
+choice such as an ability's number. `board_layout` reads which columns those
+are from the engine's own description of its arrays. A column that names a
+card becomes that card's embedding, one that names an object becomes that
+object's vector, and a choice gets a small learned table. The rest, such as
+an event's raw engine ids, are not read.

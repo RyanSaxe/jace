@@ -2,9 +2,11 @@
 
 The boards in `tests/data/manabot_v10_boards.npz` are three decisions from
 real games, encoded by the engine adapter at input version 10, each with
-permanents and events on the board. The models are built from the layout
-the adapter reports, and the tests call them only through `jace.play`, so
-the token layout and the network can change without touching them.
+permanents and events on the board. No permanent on them blocks or is
+attached to anything, so the test of those links adds one. The models are
+built from the layout the adapter reports, and the tests call them only
+through `jace.play`, so the token layout and the network can change without
+touching them.
 """
 
 from pathlib import Path
@@ -95,6 +97,29 @@ def test_player_reads_both_the_hand_guess_and_the_deck_guess() -> None:
     legal = boards["actions_valid"] > 0
     assert not torch.allclose(logits[legal], with_other_hand[legal])
     assert not torch.allclose(logits[legal], with_other_deck[legal])
+
+
+def _action_odds(player: PlayerModel, boards: Boards) -> Tensor:
+    with torch.no_grad():
+        logits, _ = player.policy(boards, _some_guess((3, CARDS), seed=1))
+    return logits.softmax(dim=-1)
+
+
+def test_player_reads_which_object_a_permanent_blocks_or_is_attached_to() -> None:
+    # A link names an object by its index plus one in the engine's order: both players, the acting
+    # seat's cards, the opponent's cards, then the acting seat's permanents. The acting seat's
+    # permanents 0 and 3 on board 0 are different cards.
+    boards = _real_boards()
+    player, _ = _models(CARDS)
+    first_permanent = 2 + boards["agent_cards"].shape[1] + boards["opponent_cards"].shape[1]
+
+    for link in board_layout().permanent_links:
+        odds = []
+        for linked_permanent in (0, 3):
+            linked = {name: rows.clone() for name, rows in boards.items()}
+            linked["opponent_permanents"][0, 0, link] = first_permanent + linked_permanent + 1
+            odds.append(_action_odds(player, linked)[0])
+        assert not torch.allclose(odds[0], odds[1])
 
 
 def test_random_policy_spreads_probability_evenly_over_legal_actions() -> None:

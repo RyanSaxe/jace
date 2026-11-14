@@ -14,7 +14,7 @@ from torch import Tensor, nn
 from jace.cards import CardVectors
 from jace.engine import BoardLayout, Decisions
 from jace.modules import encode_real, transformer
-from jace.play.tokens import EntityEncoder, board_tokens, legal_actions
+from jace.play.tokens import CategoryEncoder, EntityEncoder, board_tokens, gather_entities, legal_actions
 from jace.play.types import Boards, Guess
 
 __all__ = ("PlayerModel", "as_boards", "random_policy")
@@ -77,7 +77,8 @@ class PlayerModel(nn.Module):
         self.guessed_deck_card: nn.Linear = nn.Linear(card_width, width)
         self.guessed_deck_share: nn.Linear = nn.Linear(1, width)
         self.encoder: nn.TransformerEncoder = transformer(width, layers=layers, heads=heads)
-        self.actions: nn.Linear = nn.Linear(layout.action_features, width)
+        self.actions: nn.Linear = nn.Linear(len(layout.action_features), width)
+        self.action_categories: CategoryEncoder = CategoryEncoder(len(layout.action_categories), width=width)
         self.action_head: nn.Sequential = nn.Sequential(
             nn.Linear(_SCORED_VECTORS * width, width), nn.GELU(), nn.Linear(width, 1)
         )
@@ -108,23 +109,14 @@ class PlayerModel(nn.Module):
 
         # The engine fills action slots from the front, so the slots past the longest list are all empty.
         offered = int(tokens.action_mask.sum(dim=1).max())
-        focused = _focus_vectors(encoded[:, : entities.shape[1]], tokens.action_focus[:, :offered])
+        focused = gather_entities(encoded[:, : entities.shape[1]], tokens.action_focus[:, :offered])
+        actions = self.actions(tokens.actions[:, :offered])
+        actions = actions + self.action_categories(tokens.action_categories[:, :offered])
         scored = torch.cat(
-            (self.actions(tokens.actions[:, :offered]), focused, summary[:, None].expand(-1, offered, -1)),
+            (actions, focused, summary[:, None].expand(-1, offered, -1)),
             dim=-1,
         )  # [b, offered, scored vectors * width]
         logits = torch.full_like(tokens.action_mask, -torch.inf, dtype=scored.dtype)
         logits[:, :offered] = self.action_head(scored).squeeze(-1)
         logits = logits.masked_fill(~tokens.action_mask, -torch.inf)
         return logits, self.value_head(summary).squeeze(-1).sigmoid()
-
-
-def _focus_vectors(entities: Tensor, focus: Tensor) -> Tensor:
-    # entities: float [b, entities, width], the encoded board entities.
-    # focus: int64 [b, max_actions, slots], the entity numbers each action names, or -1 for none.
-    # Returns float [b, max_actions, slots * width]: each action's focus entities side by side,
-    # zeros where a slot names none.
-    batch, max_actions, slots = focus.shape
-    named = (focus >= 0).reshape(batch, max_actions * slots, 1)
-    index = focus.clamp_min(0).reshape(batch, max_actions * slots, 1).expand(-1, -1, entities.shape[-1])
-    return (entities.gather(1, index) * named).reshape(batch, max_actions, -1)

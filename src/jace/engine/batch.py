@@ -45,21 +45,32 @@ type Board = Mapping[str, npt.NDArray[np.generic]]
 class BoardLayout:
     """What a model must know about an engine's boards before it sees one.
 
-    The first five fields are how many columns one row of each kind holds,
-    which size the models' input layers. A player's and a card's count
-    include the columns of their turn state when the engine reports one.
-    `permanent_definition` is the column of a permanent's row that holds
-    its card definition id plus one, with zero for none. An engine adapter
-    builds this from what its engine reports, and `jace.play` takes it as
-    plain data, so the models never import an engine.
+    Every column of a player's and a card's row is a number, so
+    `player_features` and `card_features` are column counts, which include
+    the columns of their turn state when the engine reports one. A
+    permanent's, an action's and an event's row also hold columns that name
+    something, and each of those is listed by what it names. A column in no
+    list is not read. An engine adapter builds this from what its engine
+    reports, and `jace.play` takes it as plain data, so the models never
+    import an engine.
     """
 
     player_features: int
     card_features: int
-    permanent_features: int
-    action_features: int
-    event_features: int
+    # The columns read as numbers: flags, counts, amounts, ranks and kinds.
+    permanent_features: tuple[int, ...]
+    action_features: tuple[int, ...]
+    event_features: tuple[int, ...]
+    # The column of a permanent's row that holds its card definition id plus one, zero for none.
     permanent_definition: int
+    # The columns of a permanent's row that name another board object by its index in the order
+    # that `action_focus` uses, plus one, zero for none: the object it is attached to and the
+    # attacker it blocks.
+    permanent_links: tuple[int, ...]
+    # The columns that hold a small whole number, with -1 or 0 for none: an action's mode and
+    # ability, and the seat that controlled an event.
+    action_categories: tuple[int, ...]
+    event_categories: tuple[int, ...]
 
 
 class Outcome(enum.Enum):
