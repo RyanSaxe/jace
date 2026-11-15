@@ -1,6 +1,6 @@
 """Run the limited loop end to end on the toy engine with tiny models.
 
-The first two tests drive a whole iteration through `limited_iteration`,
+The first three tests drive whole iterations through `limited_iteration`,
 the way a user would. In their toy setup, four pods of two seats draft
 eight pools, and each of the two blocks of games has one deck from every
 pool. The player, the win chance and the guess are small networks over the
@@ -19,6 +19,7 @@ import collections
 import copy
 import functools
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 import torch
@@ -27,6 +28,7 @@ from torch import Tensor, nn
 from jace.cards import CardPool, CardRecord, CardTable, Rarity, own_parameters
 from jace.decks import BuildRules, DeckBuilder, DeckScore
 from jace.draft import DrafterModel, DraftFormat
+from jace.engine import Matchup
 from jace.engine.toy import HAND_SIZE, TOY_CARDS, ToyBatch
 from jace.loops import (
     FIRST_CHECK,
@@ -40,7 +42,7 @@ from jace.loops import (
     phased_schedule,
 )
 from jace.play import Boards, Earlier, Guess
-from jace.train import PlayerRule, PlayGames, play_games
+from jace.train import Collected, PlayerRule, PlayGames, play_games, select
 
 __all__ = ()
 
@@ -171,7 +173,7 @@ def test_an_iteration_after_the_switch_updates_every_model_but_the_human_trained
     watched = {**toy.trained, "human_score": toy.learners.human_score}
     before = _snapshot(watched, embedding=toy.embedding)
 
-    metrics, check = limited_iteration(
+    metrics, check, _ = limited_iteration(
         toy.setup,
         toy.learners,
         check=replace(FIRST_CHECK, reads_learning=True),
@@ -201,7 +203,7 @@ def test_before_the_switch_the_builder_and_a_drafter_whose_rate_is_zero_stay_as_
     with torch.no_grad():
         picked_before = drafter.forward(seen, picks, pack=pack)
 
-    _, check = limited_iteration(
+    _, check, _ = limited_iteration(
         toy.setup,
         toy.learners,
         check=FIRST_CHECK,
@@ -215,6 +217,27 @@ def test_before_the_switch_the_builder_and_a_drafter_whose_rate_is_zero_stay_as_
         assert torch.equal(drafter.forward(seen, picks, pack=pack), picked_before)
     assert _moved(toy.trained, before, embedding=toy.embedding) == {"player", "win_chance", "guess", "deck_score"}
     assert not check.reads_learning
+
+
+def test_an_iteration_whose_games_are_all_lost_returns_no_played_decks() -> None:
+    toy = _toy_loop()
+    dials = phased_schedule(drafter_starts=100, pull_ends=200)(5)
+    _, check, _ = limited_iteration(
+        toy.setup, toy.learners, check=FIRST_CHECK, dials=dials, other_seats=[], play=toy.play, rng=random.Random(0)
+    )
+
+    # As when every worker is killed, the games are played but none of them is returned.
+    def lose_every_game(matchups: Sequence[Matchup]) -> Collected:
+        collected = toy.play(matchups)
+        no_rows = torch.zeros(len(collected.rollout.results), dtype=torch.bool)
+        return Collected(rollout=select(collected.rollout, no_rows), games=(), abandoned=0, lost=len(matchups))
+
+    _, after, played = limited_iteration(
+        toy.setup, toy.learners, check=check, dials=dials, other_seats=[], play=lose_every_game, rng=random.Random(1)
+    )
+
+    assert len(played.decks) == 0
+    assert after == check
 
 
 def test_each_pool_plays_each_build_once_and_every_block_mixes_every_rank() -> None:
