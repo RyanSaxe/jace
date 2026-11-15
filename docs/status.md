@@ -222,6 +222,19 @@ The build step of `train_limited` for 16 pools took 4.2 seconds an
 iteration with 8 proposals and one round of swaps, and 2.5 seconds with
 256 sampled decks a pool. One short run each.
 
+The play models' update on the M3 Max's GPU, before and after the
+transformers ran on packed real tokens with Metal attention kernels. The
+same block of 39,398 decisions and the same weights served every
+measurement, and the losses agreed to five digits. Single runs on a Mac
+shared with other work, so each pair was measured side by side.
+
+| Measure                                                        | Before (ea08bbe) | After |
+| -------------------------------------------------------------- | ---------------- | ----- |
+| Forward and backward of a 512-row slice: player, win chance, guess | 123, 115, 114 ms | 82, 75, 69 ms |
+| One block's update, warm                                        | 32.9 s           | 21.5 s |
+| One block's update in a new process                             | 38.9 s           | 28.6 s |
+| Update seconds per 1,000 decisions, two iterations of `train_limited` at the overnight run's settings | 1.21 | 0.82 |
+
 ## Not built yet
 
 | Gap                         | Detail                                                     |
