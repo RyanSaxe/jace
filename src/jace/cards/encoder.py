@@ -1,20 +1,24 @@
 """The card vectors every model reads: an encoder of each card's content, or a fixed table of its output.
 
-`CardEncoder` makes a card's vector from three things known before anyone
-plays the card: its printed text as a language model embeds it, its engine
-program and a few printed facts. A card's vector depends on that card's
-inputs alone, so a card the encoder was not trained on gets a vector from
-its own content. The drafter's pretraining trains the encoder. Every later
-model reads `frozen_table(encoder)`, a `CardTable` that holds the vectors
-and has nothing to train, so deck building and play cannot move what the
+`CardEncoder` makes a card's vector from three inputs, all known before
+anyone plays the card. They are the card's printed text as a language model
+embeds it, its engine program, and a few facts printed on it. A card's
+vector depends on that card's inputs alone, so a card the encoder was not
+trained on still gets a vector from its own content.
+
+The drafter's pretraining trains the encoder. Every later model reads
+`frozen_table(encoder)`, a `CardTable` that contains the vectors and has
+nothing to train, so deck building and play cannot change the vectors the
 drafter learned. Models take either one as `CardVectors`.
 
-A program is read as tokens. The ids below are the ones an engine pair
-cannot take: a row is padded with `PADDING_TOKEN`, a card the engine cannot
-play has the single token `NO_PROGRAM_TOKEN`, and a pair the vocabulary
-lacks becomes `UNKNOWN_TOKEN`. The vocabulary's pairs take the ids from
-`FIRST_PROGRAM_TOKEN` on. The encoder learns one position for each of the
-first `MAX_PROGRAM_TOKENS` pairs, and the engine's longest program has 149.
+The encoder reads a program as token ids, one for each (kind, value) pair.
+The pairs of the engine's vocabulary take the ids from
+`FIRST_PROGRAM_TOKEN` on, and the lower ids have special uses.
+`PADDING_TOKEN` pads a row, `NO_PROGRAM_TOKEN` is the single token of a
+card the engine cannot play, and `UNKNOWN_TOKEN` replaces a pair the
+vocabulary lacks. The encoder learns a position for each of the first
+`MAX_PROGRAM_TOKENS` tokens, so the engine's longest program, at 149 pairs,
+fits.
 """
 
 from dataclasses import dataclass
@@ -45,7 +49,7 @@ UNKNOWN_TOKEN = 2
 FIRST_PROGRAM_TOKEN = 3
 MAX_PROGRAM_TOKENS = 256
 
-# The encoder joins three vectors of its width: the text's, the program's and the printed facts'.
+# The encoder joins three vectors of its width, one each for the text, the program and the printed facts.
 _PARTS = 3
 
 
@@ -53,10 +57,12 @@ _PARTS = 3
 class CardInputs:
     """What the encoder reads about each card, one row per card in card id order.
 
-    `text` is float32 `[cards, text width]`, the card's printed text as a
-    language model embeds it. `program` is int64 `[cards, longest]`, the
-    engine program as token ids padded with `PADDING_TOKEN`. `printed` is
-    float32 `[cards, printed facts]`.
+    `text` is float32 `[cards, text width]`, each card's printed text
+    embedded by a language model, as `jace.data.text_vectors` returns it.
+    `program` is int64 `[cards, longest]`, the engine program as token ids
+    padded with `PADDING_TOKEN`, as `jace.data.program_tokens` returns it.
+    `printed` is float32 `[cards, printed facts]`, the `printed` tensor of
+    `jace.data.SetCards`.
     """
 
     text: Tensor
@@ -65,7 +71,7 @@ class CardInputs:
 
 
 class CardVectors(Protocol):
-    # What a model needs from its card vectors: a `CardEncoder` or a `CardTable`.
+    # The interface through which a model reads its card vectors. `CardEncoder` and `CardTable` both provide it.
     # Calling it with int64 card ids of any shape [...] returns float [..., width].
 
     @property
@@ -83,15 +89,16 @@ class CardVectors(Protocol):
 class CardEncoder(nn.Module):
     """Encode each card's text, program and printed facts as one vector of `width` numbers.
 
-    The text and the printed facts each pass through a linear map. The
-    program's tokens get a learned embedding and a learned position, pass
-    through a transformer encoder of `program_layers` layers and are
-    averaged over the real tokens. A small network joins the three vectors
-    and a layer norm ends it. `program_vocabulary` is the number of token
-    ids, `FIRST_PROGRAM_TOKEN` plus the engine vocabulary's size.
+    `program_vocabulary` is the number of program token ids, which is
+    `FIRST_PROGRAM_TOKEN` plus the size of the engine's vocabulary. A
+    transformer encoder of `program_layers` layers, with `heads` attention
+    heads, reads the program. Each token gets a learned position as well as
+    its learned embedding, so a card's vector depends on the order of its
+    program's pairs and not only on which pairs it contains.
 
-    The inputs are buffers that are not saved in a checkpoint: they are
-    rebuilt from data in every run, so a checkpoint holds weights only.
+    The inputs are buffers that are not saved in a checkpoint, because every
+    run rebuilds them from data. A checkpoint therefore contains the weights
+    only.
     """
 
     def __init__(
@@ -123,7 +130,8 @@ class CardEncoder(nn.Module):
 
     def table(self) -> Tensor:
         # Returns float [cards, width], every card's vector.
-        real = self.program != PADDING_TOKEN  # bool [cards, longest]; every row has at least one real token
+        # `program_tokens` gives every row at least one real token, so the mean over real tokens never divides by zero.
+        real = self.program != PADDING_TOKEN  # bool [cards, longest]
         positions = torch.arange(self.program.shape[1], device=self.device)
         tokens = self.program_tokens(self.program) + self.program_positions(positions)
         encoded = encode_real(self.program_encoder, tokens, mask=real)  # [cards, longest, width], zero at padding
@@ -133,7 +141,7 @@ class CardEncoder(nn.Module):
 
     @override
     def forward(self, cards: Tensor) -> Tensor:
-        # cards: int64 card ids of any shape [...]. Returns [..., width].
+        # `cards` is int64 card ids of any shape [...]. Returns float [..., width].
         return self.table()[cards]
 
 
@@ -164,7 +172,7 @@ class CardTable(nn.Module):
 
     @override
     def forward(self, cards: Tensor) -> Tensor:
-        # cards: int64 card ids of any shape [...]. Returns [..., width].
+        # `cards` is int64 card ids of any shape [...]. Returns float [..., width].
         return self.table[cards]
 
 
@@ -174,14 +182,16 @@ def frozen_table(encoder: CardEncoder) -> CardTable:
 
 
 def own_parameters(model: nn.Module, embedding: nn.Module) -> tuple[nn.Parameter, ...]:
-    """Return the parameters of `model` that are not the shared embedding's.
+    """Return the parameters of `model` that are not those of `embedding`, the card vectors it shares.
 
-    A model that reads cards holds its card vectors as a submodule, so
-    `model.parameters()` includes the embedding's parameters. A trained
-    embedding has its own optimizer, and a parameter held by two optimizers
-    is stepped twice for one loss. Build a model's optimizer from this. The
-    embedding is recognised by identity, so it may sit at any depth and
-    under any attribute name.
+    A model that reads cards has its card vectors as a submodule, so
+    `model.parameters()` includes the embedding's parameters. An embedding
+    in training has its own optimizer, and a parameter in two optimizers is
+    stepped twice for one loss. Build a model's optimizer from this function
+    instead.
+
+    The embedding's parameters are recognised by identity, so the embedding
+    may sit at any depth in `model` and under any attribute name.
     """
     shared = {id(parameter) for parameter in embedding.parameters()}
     return tuple(parameter for parameter in model.parameters() if id(parameter) not in shared)

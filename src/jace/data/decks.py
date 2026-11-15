@@ -1,11 +1,13 @@
 """Human decks from 17Lands game rows: one deck and pool per draft, with the event's result.
 
-17Lands publishes one row per game, and a player may rebuild between games,
-so a draft can have several decks. This module keeps the build that played
-the most games, and the earliest of those on a tie, so each draft gives one
-example. The wins and losses count every game of the event, whichever build
-played it. They are meant for training the deck score and the deck builder
-later, and nothing here trains a model.
+17Lands publishes one row per game, and a player may rebuild the deck
+between games, so a draft can have several decks. `load_decks` keeps the
+build the player used in the most games, and on a tie the one with the
+lowest `build_index`, so each draft gives one example. The wins and losses
+include every game of the event, whichever build the player used in it.
+
+The deck score and the deck builder train on these decks in
+`jace.loops.pretrain_decks`. Nothing in this module trains a model.
 """
 
 from dataclasses import dataclass
@@ -28,10 +30,12 @@ class HumanDecks:
     """One human deck per draft that has game data, ordered by draft id.
 
     `decks` is uint8 `[drafts, cards]`, the copies of each card in the main
-    deck, basic lands included. `pools` is uint8 `[drafts, cards]`, the
-    deck plus its sideboard, which is what the player could build from.
-    `wins` and `losses` are int16 `[drafts]`, the games the event won and
-    lost. `held_out` is bool `[drafts]`, the same split the pick data uses.
+    deck, basic lands included. `pools` is uint8 `[drafts, cards]`, the deck
+    plus its sideboard, which are the cards the player could build from.
+
+    `wins` and `losses` are int16 `[drafts]`, the games the player won and
+    lost in the event. `held_out` is bool `[drafts]`, split the same way as
+    the pick data in `HumanDrafts`.
     """
 
     decks: Tensor
@@ -44,11 +48,15 @@ class HumanDecks:
 def load_decks(games: pl.LazyFrame, *, pool: CardPool, cache_dir: Path, held_out_share: float) -> HumanDecks:
     """Turn 17Lands game rows into tensors, reading `games` only when `cache_dir` has no copy.
 
-    `games` needs the columns `draft_id`, `build_index` and `won`, plus
-    `deck_<name>` and `sideboard_<name>` for every card of `pool`. The
-    first call saves `decks.pt` in `cache_dir` and later calls load it, so
-    use one directory per card set. A draft is held out when a checksum of
-    its id falls in the lowest `held_out_share` of values, as in `load_drafts`.
+    `games` must have the columns `draft_id`, `build_index` and `won`, plus
+    `deck_<name>` and `sideboard_<name>` for every card of `pool`. The first
+    call saves `decks.pt` in `cache_dir` and later calls load it, so use one
+    directory per card set. A draft is held out when a checksum of its id
+    falls in the lowest `held_out_share` of values, as in `load_drafts`.
+
+    Raises `StaleCacheError` when `decks.pt` was saved for a pool with other
+    card names, and `CardColumnsError` when the card columns of `games` do
+    not match the cards of `pool`.
     """
     saved = cached(cache_dir / _CACHE_FILE, lambda: _read(games, pool=pool), pool=pool)
     return HumanDecks(

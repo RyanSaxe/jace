@@ -1,12 +1,15 @@
-"""Helpers the modules of `jace.data` share: the on-disk cache, card columns, the split and one constant.
+"""Helpers the modules of `jace.data` share: the on-disk cache, the card columns, the split and a floor on spreads.
 
-The 17Lands files hold one column per card, so reading them takes seconds
-and gigabytes. Each loader therefore reads once and saves plain tensors,
-and later runs load those. A cache file records the card names it was built
-for, and loading it for a pool with other names raises `StaleCacheError`
-instead of returning tensors whose card ids mean something else. The split
-key depends only on the draft id, so a draft lands on the same side of the
-split in the pick data, in the deck data and in every run.
+The 17Lands files have one column per card, so reading them takes seconds
+and gigabytes of memory. Each loader therefore reads the files once and
+saves plain tensors, and later runs load the tensors. A cache file also
+contains the names of the cards it was built for. Loading it for a pool
+with other names raises `StaleCacheError`, because its card ids would refer
+to other cards.
+
+A draft's split key depends only on its id. A draft is therefore on the
+same side of the held-out split in the pick data, in the deck data and in
+every run.
 """
 
 import zlib
@@ -28,9 +31,11 @@ __all__ = (
     "split_keys",
 )
 
-# A draft's split key is in [0, SPLIT_KEYS). Drafts with a key below `share * SPLIT_KEYS` are held out.
+# A draft's split key is in [0, SPLIT_KEYS). A draft is held out when its key is below
+# `round(held_out_share * SPLIT_KEYS)`.
 SPLIT_KEYS = 1000
-# A column whose values are all equal has a spread of zero. Dividing by this instead leaves it at zero.
+# Standardising divides a column by its spread, which is zero when all its values are equal. Dividing by this
+# floor instead turns such a column into zeros rather than NaN.
 SMALLEST_SPREAD = 1e-6
 
 type Tensors = Mapping[str, Tensor]
@@ -52,14 +57,17 @@ class CardColumnsError(ValueError):
 def cached(path: Path, build: Callable[[], Tensors], *, pool: CardPool) -> Tensors:
     """Load the tensors saved at `path`, or call `build` and save what it returns.
 
-    The file holds the tensors and the names of the pool's cards in id
-    order. `build` runs only when the file is missing. Raises
-    `StaleCacheError` when the file was saved for a pool with other names,
-    because its card ids would point at the wrong cards.
+    The file contains the tensors and the names of the pool's cards in id
+    order. `build` runs only when the file is missing.
+
+    Raises `StaleCacheError` when the file was saved for a pool with other
+    names, because its card ids would refer to the wrong cards.
     """
     names = [pool[card].name for card in range(len(pool))]
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
+        # The tensors are saved to a .partial file, which is renamed once the save is complete. An interrupted save
+        # therefore leaves nothing at `path`, and the next call builds again.
         unfinished = path.with_suffix(".partial")
         torch.save({"names": names, "tensors": dict(build())}, unfinished)
         unfinished.rename(path)
@@ -82,6 +90,7 @@ def card_columns(columns: Sequence[str], prefix: str, *, pool: CardPool) -> list
 
 
 def split_keys(draft_ids: Sequence[str]) -> Tensor:
-    # Returns int16 [drafts]: each draft's key in [0, SPLIT_KEYS), a checksum of its id.
+    # Returns int16 [drafts], each draft's key in [0, SPLIT_KEYS). The key comes from a CRC-32 checksum of the id,
+    # which is the same in every process. Python's `hash` of a string changes from one process to the next.
     keys = [zlib.crc32(draft_id.encode()) % SPLIT_KEYS for draft_id in draft_ids]
     return torch.tensor(keys, dtype=torch.int16)

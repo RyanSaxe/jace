@@ -1,15 +1,22 @@
 """Human data: the real card pool, human drafts and human decks, as tensors.
 
-Everything comes from the free 17Lands public datasets, read through the
-`spells` package by `read_set`, except the card encoder's other inputs:
-the vectors `text_vectors` makes from printed text with a language model
-and the token ids `program_tokens` makes from the engine programs stored in
-the pool. The other functions take the tables `read_set` returns, so they
-also work on a small hand-made table. Nothing here knows about the drafter
-or the game engine: a loop in `jace.loops` passes these tensors to a model,
-and passes in the engine's card programs by name and its vocabulary. The encoder that runs a Hugging Face
-model lives in `jace.data.hugging_face` and is not imported here, so
-importing this package does not load `transformers`.
+`read_set` reads one card set through the `spells` package. The card
+attributes come from MTGJSON, and the card statistics, human picks and
+games come from the free 17Lands public datasets. The other functions take
+the tables `read_set` returns rather than a set code, so they also work on
+a small table made by hand.
+
+This package also makes the card encoder's inputs. `card_table` reads each
+card's printed facts, `text_vectors` embeds each card's printed text with a
+language model, and `program_tokens` turns each card's engine program into
+token ids. This package does not import the drafter or the game engine.
+Instead, a loop in `jace.loops` passes in the engine's card programs, keyed
+by card name, and the engine's vocabulary. The loop then gives the
+resulting tensors to a model.
+
+The encoder that runs a Hugging Face model is in `jace.data.hugging_face`.
+This package does not import that module, so importing `jace.data` does not
+load `transformers`.
 """
 
 from jace.data.cards import SetCards, card_table
