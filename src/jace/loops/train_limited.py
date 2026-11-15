@@ -173,7 +173,7 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument("--drafter-layers", type=int, default=6)
     parser.add_argument("--drafter-heads", type=int, default=8)
     parser.add_argument("--deck-width", type=int, default=128)
-    parser.add_argument("--deck-layers", type=int, default=2)
+    parser.add_argument("--deck-layers", type=int, default=3, help="the depth pretrain_decks trains the deck models at")
     parser.add_argument("--deck-heads", type=int, default=4)
     parser.add_argument("--rate", type=float, default=1e-4, help="the learning rate of the models with no schedule")
     parser.add_argument("--player-rate", type=float, help="a fixed player learning rate in place of the schedule's")
