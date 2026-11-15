@@ -8,16 +8,16 @@ instead, so the loop also trains a copy of the score, the learning copy,
 on the decks it plays. The learning copy trains from the first iteration,
 and the human-trained score stays frozen.
 
-The loop tests both scores on an iteration's decks before the learning
-copy trains on them, so the learning copy is tested on decks it has not
-seen. A score's test loss is the log loss of its predictions against each
-deck's record of wins and losses. Self-play decks play only each other, so
-an iteration's decks win half their games on average, while the human
-decks that the frozen score was fit to won more often. Each score's logits
-are therefore shifted to a mean of zero over the decks before the test.
-The test then compares how the two scores rank the decks, which is all the
-search uses. With the mean removed, the learning copy cannot earn the
-switch by learning the average win rate alone.
+The loop tests both scores on an iteration's decks before the learning copy
+trains on them, so the learning copy is tested on decks it has not seen. A
+score's test loss is the log loss of its predictions against each deck's record
+of wins and losses. Self-play decks play only each other, so an iteration's
+decks win half their games on average, while the human decks that the frozen
+score was fit to won more often. Each score's logits are therefore shifted to a
+mean of zero over the decks before the test. The test then compares how the two
+scores rank the decks, which is all the search uses. With the mean removed,
+learning the average win rate alone cannot make the learning copy pass the
+test.
 
 The search reads the human-trained score until the learning copy's mean
 test loss over the last `switch_iterations` iterations is lower by at
@@ -85,8 +85,8 @@ class ScoreCheck:
     over the last `ScoreRule.switch_iterations` iterations, oldest first.
 
     `reads_learning` is whether the deck search reads the learning copy. It
-    starts false and turns true once the learning copy earns the switch. It
-    never turns back.
+    starts false and becomes true once the learning copy passes the test.
+    It never becomes false again.
     """
 
     recent: tuple[PlayedDecks, ...]

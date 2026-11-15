@@ -1,4 +1,4 @@
-"""Models that play a game, the model that judges a position for training, and their types.
+"""Models that play a game, the model that estimates the chance to win for training, and their types.
 
 The guess model predicts the opponent's deck and hand. It reads the board,
 the cards the opponent has shown or revealed, and the meta, which describes

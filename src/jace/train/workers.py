@@ -1,11 +1,11 @@
-"""Play a round's games in worker processes, and replace a worker whose games stop moving.
+"""Play a round's games in worker processes, and replace a worker whose games stop advancing.
 
 On a rare board, one step of the game engine can take a very long time, and
 Python cannot interrupt a call into the engine. When games are played in the
-training process, that one step freezes the run. Here each worker process
-has its own copy of the models and plays its share of a round's matchups
-with `jace.train.play_games`. The training process sends each worker the
-round's weights and its share, and takes back the decisions.
+training process, that one step stops the whole run until it returns. Here each
+worker process has its own copy of the models and plays its share of a round's
+matchups with `jace.train.play_games`. The training process sends each worker
+the round's weights and its share, and receives the decisions.
 
 When a worker completes no step of its games within a time limit, the training
 process kills it. That worker's games are lost, and the result counts them, but

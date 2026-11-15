@@ -181,7 +181,7 @@ def score_against_scripted(
     """Score each of `players` against each scripted player, and record the results under `checkpoint`.
 
     `players` maps each way of choosing an action to a player that chooses
-    that way. Each player meets every scripted opponent on all of the
+    that way. Each player plays every scripted opponent on all of the
     harness's deals, four games a deal. All the games of all the matches
     are played in one `play_matches` call, so the worker processes start
     only once and share out the games.
