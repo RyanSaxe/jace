@@ -1,12 +1,14 @@
 """A tiny game that implements `GameBatch` without any engine.
 
-In High Card each seat holds three cards with distinct values, picks one, and
-the higher pick wins. Seat 0 picks first and seat 1 sees that pick. Equal
-picks deal both seats again and the game goes on, so games differ in length
-and the games of a batch drift out of step, as real games do. It exists
-so that collection, training and evaluation can be exercised in tests and
-examples with a game whose best play is obvious: always pick the highest
-card. It is not a model of Magic.
+In High Card, each seat holds three cards with distinct values and picks
+one, and the higher pick wins. Seat 0 picks first, and seat 1 sees that pick
+before it picks. When the two picks are equal, both seats are dealt new
+hands and the game goes on. Games therefore differ in length, and the games
+of a batch drift out of step, as real games do.
+
+Tests and examples use High Card to exercise collection, training and
+evaluation on a game whose best play is obvious: always pick the highest
+card. High Card is not a model of Magic.
 """
 
 import random
@@ -26,18 +28,22 @@ TOY_CARDS = 10
 class ToyBatch:
     """The games of `matchups` at High Card, at most `games` of them at once.
 
-    A board has two arrays: `hand`, float32 `[n, 3]`, the acting seat's card
-    values scaled to 0..1, and `seen`, float32 `[n, 1]`, the value seat 0
-    picked, or -1 while seat 0 has not picked. A card's id is its value,
-    0 to 9. The decks of a matchup are reported with its finished game; the
-    toy does not use them to play.
+    A board has two arrays. `hand`, float32 `[n, 3]`, contains the acting
+    seat's card values scaled to 0..1. `seen`, float32 `[n, 1]`, contains
+    the value seat 0 picked, scaled the same way, or -1 while seat 0 has not
+    picked. A card's id is its value, 0 to 9.
+
+    The toy does not use a matchup's decks to play. It only reports them
+    with the finished game. High Card has no library, so `hidden_cards`
+    reports every library as empty.
     """
 
     def __init__(self, matchups: Sequence[Matchup], *, games: int, seed: int) -> None:
         self._matchups: Sequence[Matchup] = matchups
         self._rng: random.Random = random.Random(seed)
         slots = min(games, len(matchups))
-        # game: int64 [slots], the position in `matchups` of the game each slot plays, or -1 for none.
+        # A slot is a place for one game in play. For each slot, this is the position in `matchups` of
+        # its game, or -1 once no matchup is left for it, int64 [slots].
         self._game: npt.NDArray[np.int64] = np.arange(slots, dtype=np.int64)
         self._started: int = slots
         self._hands: npt.NDArray[np.int64] = np.zeros((slots, SEATS, HAND_SIZE), dtype=np.int64)

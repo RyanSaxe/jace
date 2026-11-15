@@ -1,9 +1,10 @@
 """Games, behind an interface that hides the engine.
 
-`GameBatch` and its records are all that training uses. The adapter that
-implements them on manabot lives in `jace.engine.manabot`. Scoring plays one
-game at a time between any two players, in `jace.engine.scoring`. Those two
-files are the only ones in the package allowed to import manabot.
+`GameBatch` and its records are all that training uses. The adapter in
+`jace.engine.manabot` implements `GameBatch` on manabot's engine. For
+scoring, `jace.engine.scoring` plays one game at a time between any two
+players. Those two modules are the only ones in jace allowed to import
+manabot or its engine, managym.
 """
 
 from jace.engine.batch import (
