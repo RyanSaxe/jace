@@ -1,21 +1,26 @@
 """Turn the engine's board arrays into the tokens the play models read.
 
-`board_tokens`, `legal_actions` and `opponent_cards` are the only code in
-this package that names the engine's arrays. What they cannot know from
-the names alone, which columns of each kind of row are numbers and which
-name a card, another board object or a small category, comes in a
-`BoardLayout` that the engine adapter builds from the engine's own
-description of its arrays. The guess model and the player model read
-`BoardTokens`, and the guess model also reads `OpponentCards`, its counts
-of the opponent's cards. They read nothing else, so a change of engine or
-of encoder version stops here. The engine pads every kind of row to a
-fixed capacity, and in a real game most rows are padding, so the tokens
-keep each kind only up to its last real row in the batch and no layer
-reads the rest. `EntityEncoder` is the first layer both
-models share: it projects each kind of token to the model's width, adds
-the shared card embedding to the tokens that are a card, and adds to each
-permanent the object it is attached to or blocks. `CategoryEncoder` embeds
-the categories of actions and events.
+`board_tokens`, `legal_actions` and `opponent_cards` are the only code in this
+package that names the engine's arrays. Which columns of each kind of row are
+numbers, and which name a card, another board object or a small category, is
+not in the array names. A `BoardLayout` lists them, and the engine adapter
+builds the layout from the engine's own description of its arrays.
+
+All three play models read `BoardTokens`: the guess model, the player and
+the win chance. The guess model also reads `OpponentCards`, its counts of
+the opponent's cards. The models read nothing else from the engine, so
+after a change of engine, or of how the engine encodes boards, only this
+module has to change.
+
+The engine pads every kind of row to a fixed capacity, and in a real game most
+rows are padding. The tokens therefore contain each kind of row only up to its
+last real row in the batch, and no layer reads the rest.
+
+Each play model builds its own `EntityEncoder` as its first layer. The
+encoder projects each kind of token to the model's width, and adds a
+projection of the shared card embedding to each card and permanent. It
+also adds to each permanent a projection of the object it is attached to
+or blocks. `CategoryEncoder` embeds the categories of actions and events.
 """
 
 from dataclasses import dataclass
@@ -41,8 +46,7 @@ __all__ = (
 )
 
 
-# Every engine array `board_tokens` and `opponent_cards` read. Whatever plays or stores boards for
-# these models needs these and no others, which is less than half of what the engine encodes.
+# The arrays of board objects, in the order in which the engine numbers objects in `action_focus`.
 _ENTITY_ARRAYS = (
     "agent_player",
     "opponent_player",
@@ -51,6 +55,9 @@ _ENTITY_ARRAYS = (
     "agent_permanents",
     "opponent_permanents",
 )
+# Every engine array that `board_tokens`, `legal_actions` and `opponent_cards` read. Code that plays or stores
+# games for these models can ask the engine for these arrays alone, which are less than half of a decision's
+# bytes.
 BOARD_ARRAYS = (
     *_ENTITY_ARRAYS,
     *(f"{name}_valid" for name in _ENTITY_ARRAYS),
@@ -69,48 +76,52 @@ BOARD_ARRAYS = (
 # The arrays whose rows `board_tokens` trims to the last real row of the batch. Each has a `_valid` array.
 _TRIMMED_ARRAYS = (*_ENTITY_ARRAYS, "actions", "events")
 
-# A category's value plus one, so that -1 for none is row 0, is clamped to the rows of its table,
-# and larger values share the last row. Mode and ability selectors are the largest categories: in
-# 7,000 decisions of random games, ability selectors stayed below 3 and mode selectors reached 17.
+# The number of rows in each category column's table. A category's row is its value plus one, so that -1
+# for none is row 0, and every value too large for the table shares the last row. Mode and ability
+# selectors are the largest categories. In 7,000 decisions of random games, ability selectors stayed
+# below 3 and mode selectors reached 17.
 _CATEGORY_ROWS = 16
 
 
 @dataclass(frozen=True, slots=True)
 class BoardTokens:
     # The engine pads every kind of row to a fixed capacity, and most rows are padding. Each kind
-    # here keeps its rows only up to the last real one in any board of the batch, so the rows of
-    # a kind can still hold padding, which the masks mark.
+    # here contains its rows only up to the last real row of any board in the batch. A board with fewer
+    # real rows still has padding among the kept rows, and the masks mark which rows are real. The
+    # float features are squashed by a signed log1p, so they stay near unit scale.
     #
-    # players: float [b, 2, player features]. Row 0 is the acting seat, row 1 its opponent.
+    # players: float [b, 2, player features]. Row 0 is the acting seat and row 1 its opponent.
     players: Tensor
-    # cards: float [b, cards, card features], the acting seat's visible cards, then the opponent's.
+    # cards: float [b, card rows, card features], the acting seat's visible cards, then the opponent's.
     cards: Tensor
     # permanents: float [b, permanents, permanent features], the acting seat's, then the opponent's.
     permanents: Tensor
-    # permanent_links: int64 [b, permanents, links], the entity number of the object each of a
-    # permanent's links names, in the order of `BoardLayout.permanent_links`, or -1 for none.
+    # permanent_links: int64 [b, permanents, links]. A permanent has one link for each column of
+    # `BoardLayout.permanent_links`: the object it is attached to and the attacker it blocks. Each link
+    # is that object's entity number, or -1 for none.
     permanent_links: Tensor
-    # entity_mask: bool [b, 2 + cards + permanents], true for real rows. Entities are
-    # numbered in the order players, cards, permanents.
+    # entity_mask: bool [b, 2 + card rows + permanents], true for real rows. An entity's number is its
+    # place in the order players, cards, permanents.
     entity_mask: Tensor
-    # card_ids: int64 [b, cards + permanents], the `CardId` of each card and permanent, or -1 for none.
+    # card_ids: int64 [b, card rows + permanents], the `CardId` of each card and permanent, or -1 for none.
     card_ids: Tensor
-    # actions: float [b, max_actions, action features].
+    # actions: float [b, kept actions, action features]. The kept actions are the leading action slots, up
+    # to the last legal action of any board in the batch.
     actions: Tensor
-    # action_categories: int64 [b, max_actions, action categories], each a row of its column's table.
+    # action_categories: int64 [b, kept actions, action categories], each a row of its column's table.
     action_categories: Tensor
-    # action_mask: bool [b, max_actions], true for legal actions.
+    # action_mask: bool [b, kept actions], true for legal actions.
     action_mask: Tensor
-    # action_focus: int64 [b, max_actions, 2], the entity numbers an action names, or -1 for none.
+    # action_focus: int64 [b, kept actions, 2], the entity numbers an action names, or -1 for none.
     action_focus: Tensor
-    # action_slots: the board's own number of action slots, of which the action fields keep the
-    # first max_actions. A policy scores every slot, so its logits keep the board's width.
+    # action_slots is max_actions, the board's own number of action slots. The action fields may contain
+    # fewer, but a policy scores every slot, so its logits have the board's width.
     action_slots: int
     # events: float [b, events, event features], oldest first.
     events: Tensor
     # event_categories: int64 [b, events, event categories], each a row of its column's table.
     event_categories: Tensor
-    # event_mask: bool [b, events].
+    # event_mask: bool [b, events], true for real events.
     event_mask: Tensor
     # deck_card_ids: int64 [b, decklist rows], the `CardId` of each card in the acting seat's
     # deck, or -1 for none.
@@ -123,15 +134,16 @@ class BoardTokens:
 
 @dataclass(frozen=True, slots=True)
 class OpponentCards:
-    # shown: float [b, cards], copies of each card the acting seat sees on the opponent's side of the
-    # board: on the battlefield, in the graveyard, in exile or on the stack. The board files a card
-    # under its controller, so a card that changed control counts on its controller's side.
+    # shown: float [b, cards], how many copies of each card the acting seat sees on the opponent's side
+    # of the board: on the battlefield, in the graveyard, in exile or on the stack. The board lists a
+    # card under its controller, so a card that changed control counts for the side that controls it.
     shown: Tensor
-    # known_in_hand: float [b, cards], copies of each card the acting seat knows the opponent holds
-    # because they were revealed. They are among the cards that `hand` counts.
+    # known_in_hand: float [b, cards], how many copies of each card were revealed in the opponent's
+    # hand, so the acting seat knows the opponent holds them. `hand` counts these cards too.
     known_in_hand: Tensor
-    # hand: float [b], cards in the opponent's hand. hidden: float [b], cards in its hand and library.
+    # hand: float [b], the number of cards in the opponent's hand.
     hand: Tensor
+    # hidden: float [b], the number of cards in the opponent's hand and library.
     hidden: Tensor
 
 
@@ -141,8 +153,9 @@ def legal_actions(boards: Boards) -> Tensor:
 
 
 def opponent_cards(boards: Boards, *, layout: BoardLayout, engine_to_card: Tensor, cards: int) -> OpponentCards:
-    # The opponent's cards are row 1 of `semantic_cards` and `known_hand`. Its permanents are also its
-    # card rows on the battlefield, so the permanent rows are not counted again. `cards` is the pool size.
+    # The opponent's rows are row 1 of `semantic_cards` and of `known_hand`. Each of its permanents is also
+    # one of its card rows, on the battlefield, so counting the card rows counts each permanent once.
+    # `cards` is the size of the card pool.
     rows = boards["opponent_cards"]
     unshown = (rows[..., list(layout.card_unshown_flags)] > 0).any(dim=-1)
     shown_rows = (boards["opponent_cards_valid"] > 0) & ~unshown
@@ -150,7 +163,8 @@ def opponent_cards(boards: Boards, *, layout: BoardLayout, engine_to_card: Tenso
     known = boards["known_hand"][:, 1]
     known_ids = _card_ids(known[..., layout.known_hand_definition], engine_to_card)
     known_in_hand = _copies(known_ids, known[..., layout.known_hand_copies], cards=cards)
-    # The counts are whole numbers stored divided by the scale, so rounding undoes the float error.
+    # The engine stores each zone count divided by `zone_count_scale`. Scaled back, a count is a whole
+    # number up to float error, and rounding removes that error.
     player = (boards["opponent_player"][:, 0] * layout.zone_count_scale).round()
     hand = player[:, layout.hand_count]
     return OpponentCards(
@@ -159,13 +173,15 @@ def opponent_cards(boards: Boards, *, layout: BoardLayout, engine_to_card: Tenso
 
 
 def _copies(card_ids: Tensor, copies: Tensor, *, cards: int) -> Tensor:
-    # card_ids: int64 [b, rows], -1 for none. copies: float [b, rows]. Returns float [b, cards], each card's copies.
+    # card_ids is int64 [b, rows], -1 for none, and copies is float [b, rows]. Returns float [b, cards], each
+    # card's copies summed over its rows. A row whose id is -1 adds nothing.
     counted = torch.where(card_ids >= 0, copies, 0.0)
     return torch.zeros(len(card_ids), cards, device=copies.device).scatter_add_(1, card_ids.clamp_min(0), counted)
 
 
 def _squash(features: Tensor) -> Tensor:
-    # Some columns hold unscaled counts, amounts and ranks; this keeps every input near unit scale.
+    # Some columns contain raw counts, amounts and ranks, which can be large. After a signed log1p, every
+    # input is near unit scale.
     return features.sign() * features.abs().log1p()
 
 
@@ -177,9 +193,10 @@ def _card_ids(definitions: Tensor, engine_to_card: Tensor) -> Tensor:
 
 
 def _kept_rows(boards: Boards, *, layout: BoardLayout) -> dict[str, int]:
-    # How many leading rows of each trimmed array, and of the acting seat's decklist, every board of
-    # the batch fits in: up to the last real row. They are read from the device in one go, because
-    # each read waits for the device to finish its work.
+    # Returns how many leading rows to keep of each trimmed array and of the acting seat's decklist: enough
+    # to reach the last real row of any board in the batch. A decklist row is real while the deck has copies
+    # of its card that the acting seat has not seen. Every count comes from one read of the device, because
+    # each read waits for the device to finish its queued work.
     real = {name: boards[f"{name}_valid"] > 0 for name in _TRIMMED_ARRAYS}
     unseen, _ = layout.decklist_copies
     real["decklists"] = boards["decklists"][:, 0, :, unseen] > 0
@@ -188,8 +205,8 @@ def _kept_rows(boards: Boards, *, layout: BoardLayout) -> dict[str, int]:
 
 
 def _entity_numbers(boards: Boards, kept: dict[str, int]) -> Tensor:
-    # int64 [padded entities]: the entity number of each object of the engine's padded order once
-    # each kind keeps only its leading rows, -1 for a row that was dropped. Nothing names a dropped
+    # Returns int64 [padded entities], which maps a place in the engine's padded order to the entity number
+    # of the same object among the kept rows, or to -1 for a dropped row. No focus or link names a dropped
     # row, because every row after a kind's last real one is padding.
     numbers: list[int] = []
     first = 0
@@ -201,31 +218,32 @@ def _entity_numbers(boards: Boards, kept: dict[str, int]) -> Tensor:
 
 
 def _categories(values: Tensor) -> Tensor:
-    # values: float [..., columns], each -1 or 0 for none. Returns int64 rows of the category tables.
+    # values is float [..., columns] of small whole numbers, where none is -1 or 0 depending on the column.
+    # Returns the int64 row of each value in its column's table.
     rows = values.long() + 1
     return rows.clamp(0, _CATEGORY_ROWS - 1)
 
 
 def board_tokens(boards: Boards, *, layout: BoardLayout, engine_to_card: Tensor) -> BoardTokens:
-    # This is the only code in jace.play that names the engine's arrays. Each has a leading
-    # batch axis. The engine adapter checks what the engine reports about them before it
-    # builds `layout`, so these hold whenever a layout exists:
-    #   - each kind of row comes as an array for the acting seat ("agent") and one for the
-    #     opponent, with the same columns, and a `_valid` array marks the real rows;
-    #   - `action_focus` numbers objects as agent player, opponent player, agent cards,
-    #     opponent cards, agent permanents, opponent permanents, each kind padded to its
-    #     capacity, so concatenating the arrays in that order puts each object at its focus
-    #     index. A permanent's link columns hold the same index plus one. The tokens keep fewer
-    #     rows of each kind, so `_entity_numbers` maps each index to its object's token;
-    #   - `semantic_cards` holds the definition id + 1 of each card row, acting seat first,
-    #     and a permanent's row and a decklist's row hold the same in the columns `layout` names;
-    #   - `player_turn_state` has one row for each seat and `card_turn_state` one value for
-    #     each card row, acting seat first, and `decklists` has the acting seat's rows first.
-    # A column that names something, such as a definition or a link, is read only as what it
-    # names, never as a number.
+    # Each of the engine's arrays has a leading batch axis. The engine adapter checks what the engine
+    # reports about the arrays before it builds `layout`, so these facts hold whenever a layout exists:
+    #   - Each kind of row comes as one array for the acting seat ("agent") and one for the opponent,
+    #     with the same columns. A `_valid` array marks the real rows.
+    #   - Each entry of `action_focus` is an object's index in one padded order: agent player, opponent
+    #     player, agent cards, opponent cards, agent permanents, opponent permanents, with each kind
+    #     padded to its capacity. Concatenating the arrays in that order puts each object at its focus
+    #     index. A permanent's link columns contain the same index plus one. The tokens keep fewer rows of
+    #     each kind, so `_entity_numbers` maps each index to the object's token.
+    #   - `semantic_cards` contains the definition id plus one of each card row, with the acting seat's
+    #     rows first. A permanent's row and a decklist row contain the same in the columns that `layout`
+    #     names.
+    #   - `player_turn_state` has one row for each seat, and `card_turn_state` has one value for each
+    #     card row. Both put the acting seat first, and so does `decklists`.
+    # A column that names something, such as a definition or a link, is read only as what it names,
+    # never as a number.
     #
-    # engine_to_card: int64 [engine definition ids], the `CardId` of each engine definition,
-    # or -1 for a definition the card pool lacks.
+    # engine_to_card: int64 [engine definition ids], the `CardId` of each engine definition, or -1 for
+    # a definition the card pool lacks.
     kept = _kept_rows(boards, layout=layout)
     rows = {name: boards[name][:, : kept[name]] for name in _TRIMMED_ARRAYS}
     valid = {name: boards[f"{name}_valid"][:, : kept[name]] for name in _TRIMMED_ARRAYS}
@@ -244,7 +262,8 @@ def board_tokens(boards: Boards, *, layout: BoardLayout, engine_to_card: Tensor)
     )
     entity_valid = torch.cat([valid[name] for name in _ENTITY_ARRAYS], dim=1)
     entity_numbers = _entity_numbers(boards, kept)
-    # Both hold positions in the engine's padded order, -1 for none. A link holds its object's position plus one.
+    # Links and focus are both places in the engine's padded order, with -1 for none. A link column contains
+    # the place plus one, so one is subtracted.
     links = permanents[..., list(layout.permanent_links)].long() - 1
     focus = boards["action_focus"][:, : kept["actions"]].long()
     actions, events = rows["actions"], rows["events"]
@@ -290,13 +309,13 @@ def gather_entities(entities: Tensor, numbers: Tensor) -> Tensor:
 class EntityEncoder(nn.Module):
     """Project players, cards and permanents to one width, in entity order.
 
-    Each kind has its own projection. A card or permanent with a known card
-    also gets the projection of that card's shared embedding, which is how a
-    model tells one card from another. A permanent that is attached to an
+    Each kind has its own projection. A card or permanent whose card is known
+    also gets a projection of that card's shared embedding, which is how one
+    card's token differs from another's. A permanent that is attached to an
     object or blocks an attacker also gets a projection of that object's
-    vector, with one projection for each kind of link, so the transformer
-    sees which attacker a blocker blocks. `embed` returns
-    `[b, entities, width]` in the order that `BoardTokens.action_focus`
+    vector, with one projection for each kind of link, so the transformer's
+    input shows which attacker a blocker blocks. `embed` returns float
+    `[b, entities, width]`, in the order that `BoardTokens.action_focus`
     indexes.
     """
 
@@ -316,7 +335,8 @@ class EntityEncoder(nn.Module):
         objects = torch.cat((self.cards(tokens.cards), self.permanents(tokens.permanents)), dim=1)
         objects = objects + self.card_vectors(card_vectors(card_table, tokens.card_ids))
         entities = torch.cat((self.players(tokens.players) + self.seats, objects), dim=1)
-        # A link reads its object's vector from before any link is added, so it reaches one object away.
+        # A link reads its object's vector from before any link is added, so a permanent gets the vector of the
+        # object it links to, but nothing from that object's own links.
         linked = self.links(gather_entities(entities, tokens.permanent_links))  # [b, permanents, width]
         first_permanent = entities.shape[1] - linked.shape[1]
         return torch.cat((entities[:, :first_permanent], entities[:, first_permanent:] + linked), dim=1)
@@ -326,8 +346,9 @@ class CategoryEncoder(nn.Module):
     """Embed the category columns of one kind of row and sum the embeddings.
 
     Each column has its own table, so an action's mode 2 and its ability 2
-    get different vectors. `forward` takes the int64 `[..., columns]` that
-    `BoardTokens` holds for the kind and returns float `[..., width]`.
+    get different vectors. `forward` takes the int64 `[..., columns]`
+    categories that `BoardTokens` contains for the kind, and returns float
+    `[..., width]`.
     """
 
     def __init__(self, columns: int, *, width: int) -> None:

@@ -2,14 +2,17 @@
 
 `jace.modules.encode_real` packs the real tokens of many rows into one
 matrix, and each token attends only to the tokens of its own row. On MPS,
-`scaled_dot_product_attention` needs those rows padded to one length and
-builds a graph for every new length, so `attend_within_rows` does the work
-itself: one SIMD group of 32 lanes computes the attention of one token and
-head with an online softmax over the keys of its row, and the backward
-pass recomputes the attention weights from the log-sum-exp the forward pass
-kept. Nothing is padded and no shape is special, so every batch runs the
-same three kernels. It runs on MPS only; `encode_real` uses
-`scaled_dot_product_attention` on every other device.
+`scaled_dot_product_attention` would need those rows padded to one length,
+and MPS builds a graph for every new length. `attend_within_rows` avoids
+both by working on the packed tokens directly. One SIMD group of 32 lanes
+computes the attention of one token and one head, with an online softmax
+over the keys of that token's row. The backward pass recomputes the
+attention weights from the log-sum-exp that the forward pass saved.
+Nothing is padded and no shape is special, so every batch runs the same
+three kernels.
+
+The kernels run on MPS only. On every other device, `encode_real` uses
+`scaled_dot_product_attention`.
 """
 
 import functools
@@ -21,8 +24,9 @@ from torch import Tensor
 
 __all__ = ("attend_within_rows",)
 
-# A SIMD group on Apple GPUs has 32 lanes. Lane l holds dimensions l, l + 32, ... of a head, so a dot product
-# of two head vectors is one simd_sum, and a key's or value's head is read by the group at once.
+# A SIMD group on Apple GPUs has 32 lanes. Lane l works on dimensions l, l + 32, ... of a head. A dot product
+# of two heads is then one simd_sum over the lanes' partial sums, and the group reads a key's or value's head
+# together.
 _SOURCE = """
 #include <metal_stdlib>
 using namespace metal;
@@ -163,21 +167,23 @@ kernel void attend_backward_keys_values(
 }}
 """
 
-# Lanes in a SIMD group, and threads in a threadgroup: a multiple of the lanes, so no group is split.
+# _LANES is the number of lanes in a SIMD group. _THREADGROUP, the number of threads in a threadgroup, is a
+# multiple of _LANES, so no SIMD group is split between two threadgroups.
 _LANES = 32
 _THREADGROUP = 256
 
 
 class _Kernels(Protocol):
-    # The kernels of `_SOURCE` as torch.mps.compile_shader exposes them, which its library leaves untyped.
-    # Each takes the kernel's buffers in order and the threads to run on.
+    # The kernels of `_SOURCE`, as the library from torch.mps.compile_shader exposes them. That library is
+    # untyped, so this protocol gives the type checker their signatures. Each kernel takes its buffers in
+    # order, then the number of threads and the threadgroup size.
     def attend_forward(self, *buffers: Tensor, threads: int, group_size: int) -> None: ...
     def attend_backward_queries(self, *buffers: Tensor, threads: int, group_size: int) -> None: ...
     def attend_backward_keys_values(self, *buffers: Tensor, threads: int, group_size: int) -> None: ...
 
 
 class _Saved(Protocol):
-    # What the backward pass uses of the context torch.library hands it.
+    # The part of torch.library's context object that the backward pass uses.
     saved_tensors: tuple[Tensor, ...]
 
     def save_for_backward(self, *tensors: Tensor) -> None: ...
@@ -199,15 +205,18 @@ def _launch(projected: Tensor) -> tuple[Tensor, int]:
 
 @torch.library.custom_op("jace::attend_within_rows", mutates_args=())
 def attend_within_rows(projected: Tensor, bounds: Tensor) -> tuple[Tensor, Tensor]:
-    """Return each packed token's attention over the tokens of its own row, and the log-sum-exp it kept.
+    """Return each packed token's attention over the tokens of its own row, and the log-sum-exp of its scores.
 
-    `projected` is float `[tokens, 3, heads, depth]` on MPS, each token's
-    query, key and value heads, as `nn.MultiheadAttention` splits its
-    in-projection. `bounds` is int32 `[tokens, 2]`, the first packed token
-    of each token's row and the token after its last; a row's tokens are
-    consecutive. Returns float `[tokens, heads, depth]`, and float
-    `[tokens, heads]`, the log-sum-exp of each query's scaled scores,
-    which the backward pass reads.
+    `projected` is float `[tokens, 3, heads, depth]` on MPS: each token's
+    query, key and value heads, split the way `nn.MultiheadAttention`
+    splits its in-projection. `bounds` is int32 `[tokens, 2]`: for each
+    token, the packed index of the first token of its row and of the token
+    just after the row's last. A row's tokens must therefore be consecutive.
+
+    Returns the attention, float `[tokens, heads, depth]`, and the
+    log-sum-exp of each query's scaled scores, float `[tokens, heads]`. The
+    backward pass reads the log-sum-exp to recompute the attention weights,
+    and no gradient flows through it.
     """
     tokens, _, heads, depth = projected.shape
     mixed = projected.new_empty(tokens, heads, depth)

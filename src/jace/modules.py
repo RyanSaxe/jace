@@ -1,9 +1,10 @@
-"""Helpers every model shares: the standard transformer and encoding without padding.
+"""Helpers the models share: the standard transformer, and encoding without padding.
 
-`transformer` builds the one encoder shape the models use, so its settings
-live in one place. `encode_real` runs an encoder on the real tokens only,
-which matters because the engine pads every board to a fixed size and most
-of its rows are empty.
+`transformer` builds the encoder that most of the models use. The deck
+models' `CardSetEncoder` builds its own from the same constants, so the
+encoder's settings are chosen in one place. `encode_real` runs an encoder
+on the real tokens only. That matters because the engine pads every board
+to a fixed size, and most of a board's rows are padding.
 """
 
 from dataclasses import dataclass
@@ -22,10 +23,10 @@ FEEDFORWARD_EXPANSION = 4
 # Dropout is off unless a model is built with its own, so a model gives the same output whether or not it is
 # in training mode. The drafter's pretraining on human picks builds it with dropout and measures it in eval mode.
 DROPOUT = 0.0
-# encode_real adds dummy tokens to its packed tokens, at most 1 / 2 ** _PADDING_SHARE_BITS of their number, to
-# round their count up to a multiple of a power of two, so the counts of later batches repeat earlier ones. MPS
-# builds a graph for every new shape of an op such as a linear layer or a layer norm, and with the counts rounded
-# a training block's update on MPS took about a tenth less time.
+# encode_real adds dummy tokens to round its count of packed tokens up to a multiple of a power of two. The rounded
+# counts repeat from batch to batch, which matters on MPS, because MPS builds a graph for every new shape of an op such
+# as a linear layer or a layer norm. With the counts rounded, a training block's update on MPS took about a tenth less
+# time. The dummy tokens add at most 1 / 2 ** _PADDING_SHARE_BITS of the count.
 _PADDING_SHARE_BITS = 4
 
 
@@ -49,19 +50,25 @@ class DropoutInEncodeRealError(ValueError):
 def encode_real(encoder: nn.TransformerEncoder, sequence: Tensor, *, mask: Tensor) -> Tensor:
     """Encode each row's real tokens and return them at their original positions.
 
-    `encoder` is one that `transformer` built, without dropout. `sequence`
-    is float `[b, n, width]` and `mask` is bool `[b, n]`, true for a real
-    token, with at least one in every row. The result is float
-    `[b, n, width]`, what `encoder.forward(sequence, src_key_padding_mask=~mask)`
-    gives at the real tokens and zero wherever `mask` is false. Most of an
-    encoder's work is per token, so the real tokens of every row are packed
-    into one `[tokens, width]` matrix, padded by a few dummy tokens to a
-    rounder count, and the projections, feed-forward blocks and norms run on
-    that alone. Only attention mixes the tokens of a row: on MPS it runs on
-    the packed tokens as `jace.metal_attention` kernels, and elsewhere it
-    reads each row padded to the longest row's length. The encoder has no
-    position input, so the place of a token in its row changes nothing.
-    Raises `DropoutInEncodeRealError` for an encoder with dropout in
+    `encoder` must be one that `transformer` built, and its dropout must be
+    off: either it was built without dropout, or it is in eval mode.
+    `sequence` is float `[b, n, width]`, and `mask` is bool `[b, n]`, true
+    for a real token. Every row of `mask` must have at least one real token.
+
+    The result is float `[b, n, width]`. At the real tokens it is what
+    `encoder.forward(sequence, src_key_padding_mask=~mask)` gives, and
+    wherever `mask` is false it is zero.
+
+    Most of an encoder's work is done one token at a time, so the real
+    tokens of every row are packed into one `[tokens, width]` matrix, with a
+    few dummy tokens to round the count up. The projections, feed-forward
+    blocks and norms run on that matrix alone. Only attention mixes the
+    tokens of a row. On MPS, attention runs on the packed tokens with the
+    `jace.metal_attention` kernels. On other devices, each row is padded to
+    the longest row's length for attention. Packing changes nothing in the
+    result, because the encoder has no position input.
+
+    Raises `DropoutInEncodeRealError` for an encoder with dropout that is in
     training mode.
     """
     if encoder.training and any(layer.dropout.p > 0 for layer in encoder.layers):
@@ -71,7 +78,8 @@ def encode_real(encoder: nn.TransformerEncoder, sequence: Tensor, *, mask: Tenso
     # One read from the device gives both sizes the packed layout needs.
     longest, total = torch.stack((counts.max(), counts.sum())).tolist()
     packing = _packing(mask, counts=counts, longest=longest, tokens=_rounded_up(total))
-    # The dummy tokens read a zero row added after the last, and their outputs land there.
+    # The dummy tokens take their input from a zero row appended after the batch's b * n rows. Their outputs
+    # are written back to that row, which is then dropped.
     with_zero_row = torch.cat((sequence.reshape(batch * length, width), sequence.new_zeros(1, width)))
     encoded = _encode_packed(encoder, with_zero_row[packing.sources], packing=packing)
     unpacked = sequence.new_zeros(batch * length + 1, width).index_put((packing.sources,), encoded)
@@ -80,21 +88,23 @@ def encode_real(encoder: nn.TransformerEncoder, sequence: Tensor, *, mask: Tenso
 
 @dataclass(frozen=True, slots=True)
 class _Packing:
-    # sources: int64 [tokens], each packed token's place among the batch's flattened tokens, row after row,
-    # and for a dummy token the place after the last. real: bool [tokens], false for a dummy token.
+    # sources: int64 [tokens], where each packed token comes from among the batch's tokens, flattened row
+    # after row into b * n rows. Every dummy token comes from row b * n, the zero row appended after them.
     sources: Tensor
+    # real: bool [tokens], false for a dummy token.
     real: Tensor
-    # rows: int64 [tokens], each token's row, the last row for a dummy. bounds: int32 [tokens, 2], the
-    # packed index of the first token of each token's row and of the token after its last; a dummy token
-    # makes a row of its own.
+    # rows: int64 [tokens], the row of each token, and the last row for a dummy token.
     rows: Tensor
+    # bounds: int32 [tokens, 2]. For each token, the packed index of the first token of its row and of the
+    # token just after the row's last. A dummy token forms a row of its own.
     bounds: Tensor
-    # filled: bool [b, longest], true for as many of a row's first places as it has real tokens.
+    # filled: bool [b, longest], true at a row's first k places when the row has k real tokens.
     filled: Tensor
 
 
 def _rounded_up(count: int) -> int:
-    # The least multiple of a power of two that is at least `count` and at most 1 / 2 ** _PADDING_SHARE_BITS above it.
+    # Rounds `count` up to a multiple of `step`, the largest power of two that is at most
+    # count / 2 ** _PADDING_SHARE_BITS, or 1 for a small count. So rounding adds at most that many.
     step = 1 << max(count.bit_length() - 1 - _PADDING_SHARE_BITS, 0)
     return -(-count // step) * step
 
@@ -118,8 +128,8 @@ def _packing(mask: Tensor, *, counts: Tensor, longest: int, tokens: int) -> _Pac
 
 
 def _encode_packed(encoder: nn.TransformerEncoder, packed: Tensor, *, packing: _Packing) -> Tensor:
-    # packed: float [tokens, width]. Each step is the one in `nn.TransformerEncoder.forward` with pre-norm
-    # layers and no dropout, which `transformer` builds.
+    # packed: float [tokens, width]. The loop computes what `nn.TransformerEncoder.forward` would for the
+    # pre-norm layers that `transformer` builds, with dropout off, but on the packed tokens.
     encoded = packed
     for layer in encoder.layers:
         encoded = encoded + _attention(layer.self_attn, layer.norm1(encoded), packing=packing)
@@ -149,8 +159,8 @@ def _padded_attention(projected: Tensor, *, packing: _Packing) -> Tensor:
     block = batch * heads * longest
     packed = torch.arange(tokens, device=projected.device)
     ranks = packed - packing.bounds[:, 0]
-    # places: int64 [tokens, heads], where each of a token's heads goes in its block. A dummy token's go to a
-    # spare place after the block, which attention never reads.
+    # places: int64 [tokens, heads], where each of a token's heads goes in its block. A dummy token's heads go
+    # to a spare place after the block, which attention never reads.
     places = ((packing.rows * heads)[:, None] + torch.arange(heads, device=projected.device)) * longest
     places = torch.where(packing.real[:, None], places + ranks[:, None], block)
     parts = torch.arange(3, device=projected.device)[None, :, None]

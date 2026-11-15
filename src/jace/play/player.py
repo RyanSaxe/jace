@@ -1,13 +1,13 @@
 """The model that chooses actions, and a random baseline to play against.
 
 The player reads the board, its own deck and a guess of the opponent's
-cards, and scores each legal action from the action's own features, the
-board objects it names and a summary of the whole board. One head scores
-every kind of decision, so nothing depends on how many actions a decision
-offers. It has no win chance of its own: training reads that from
-`WinChanceModel`, which sees the opponent's true cards. `random_policy` has
-the same call shape and no weights, which makes it the opponent for a first
-evaluation.
+cards. It scores each legal action from the action's own features, the
+board objects the action names and a summary of the whole board. One head
+scores every kind of decision, so nothing depends on how many actions a
+decision offers. The player has no win chance of its own. Training reads
+that from `WinChanceModel`, which reads the opponent's true cards.
+`random_policy` has the same call shape and no weights, so it can serve as
+the opponent in a first evaluation.
 """
 
 import torch
@@ -22,8 +22,8 @@ from jace.play.types import Boards, Guess
 
 __all__ = ("PlayerModel", "as_boards", "random_policy")
 
-# An action is scored from four vectors of the model's width: its own row, its two focus
-# entities and the board summary.
+# An action is scored from four vectors of the model's width: its own row, the two board objects it
+# names and the board summary.
 _SCORED_VECTORS = 4
 
 
@@ -40,16 +40,21 @@ def random_policy(boards: Boards, _guess: Guess) -> Tensor:
 class PlayerModel(nn.Module):
     """Score every legal action.
 
-    `policy` satisfies the `Policy` type. The guess enters as tokens:
-    `guess_cards` for the cards the opponent is likeliest to hold, and
-    `deck_guess_cards` for the cards guessed to make up the largest shares
-    of the opponent's unseen cards. The player's own deck enters as one
-    token for each card with copies it has not yet seen, made from the card
-    and its counts of unseen copies and copies in the deck. No
-    weight is sized by the card pool, so the model plays with a larger pool
-    once `embedding` and `engine_to_card` are replaced by ones that cover it.
-    The card vectors are shared with the other models and are not this
-    model's to train: build its optimizer from `own_parameters`.
+    `policy` satisfies the `Policy` type. The guess is read as two sets of
+    tokens. There are `guess_cards` tokens for the cards the opponent is
+    likeliest to hold in hand, and `deck_guess_cards` tokens for the cards with
+    the largest shares of the opponent's unseen cards. Each token is made from
+    the card and its chance or share.
+
+    The player's own deck is read as one token for each card with copies it
+    has not yet seen. The token is made from the card and its counts of
+    unseen copies and of copies in the deck.
+
+    No weight is sized by the card pool, so the model plays with a larger
+    pool once `embedding` and `engine_to_card` are replaced by ones that
+    cover it. The card vectors are shared with the other models and are not
+    this model's to train, so build its optimizer from
+    `jace.cards.own_parameters`, which leaves them out.
     """
 
     def __init__(
@@ -69,7 +74,8 @@ class PlayerModel(nn.Module):
         self.embedding: CardVectors = embedding
         self.guess_cards: int = guess_cards
         self.deck_guess_cards: int = deck_guess_cards
-        # engine_to_card: int64 [engine definition ids] -> CardId, -1 for a definition the pool lacks.
+        # engine_to_card: int64 [engine definition ids], the `CardId` of each engine definition, or -1 for a
+        # definition the pool lacks.
         self.engine_to_card: Tensor
         self.register_buffer("engine_to_card", engine_to_card.detach().clone(), persistent=False)
         self.layout: BoardLayout = layout
@@ -88,7 +94,8 @@ class PlayerModel(nn.Module):
         )
 
     def policy(self, boards: Boards, guess: Guess) -> Tensor:
-        # guess.hand, guess.deck: float [b, cards]. Returns action logits [b, max_actions], illegal ones at -inf.
+        # guess.hand and guess.deck are float [b, cards]. Returns float [b, max_actions] action logits, with
+        # -inf for each illegal action.
         tokens = board_tokens(boards, layout=self.layout, engine_to_card=self.engine_to_card)
         pool = torch.arange(self.embedding.cards, device=self.embedding.device)
         card_table = self.embedding(pool)  # [cards, card_width]
@@ -96,9 +103,10 @@ class PlayerModel(nn.Module):
         entities = self.entities.embed(tokens, card_table)
         own_deck = self.own_deck_card(card_vectors(card_table, tokens.deck_card_ids))
         own_deck = own_deck + self.own_deck_copies(tokens.deck_copies)
-        # TODO: The player reads only the likeliest cards of each guess, so most of an early-game guess is dropped.
-        # Revisit adding every card's chance as one token each for hand and deck, `guess.hand @ card_table`: it works
-        # on any set, but it blurs the cards into one average vector.
+        # TODO: The player reads only the top cards of each guess. Early in a game the guess gives small chances to many
+        # cards, so the player ignores most of it. Revisit reading the whole guess as one token for the hand and one for
+        # the deck, such as `guess.hand @ card_table`. That works for any set, but it averages the cards into one
+        # vector.
         chances, likeliest = guess.hand.topk(min(self.guess_cards, guess.hand.shape[-1]), dim=-1)
         guessed = self.guessed_card(card_table[likeliest]) + self.guessed_chance(chances[..., None])
         shares, largest = guess.deck.topk(min(self.deck_guess_cards, guess.deck.shape[-1]), dim=-1)
@@ -119,5 +127,6 @@ class PlayerModel(nn.Module):
             dim=-1,
         )  # [b, offered, scored vectors * width]
         logits = self.action_head(scored).squeeze(-1).masked_fill(~tokens.action_mask, -torch.inf)
-        # The tokens keep only the leading action slots, and the slots past them hold no legal action.
+        # The tokens contain only the leading action slots, up to the last legal action in the batch, so every slot
+        # past them is illegal.
         return functional.pad(logits, (0, tokens.action_slots - offered), value=-torch.inf)
