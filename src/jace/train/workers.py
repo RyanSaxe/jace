@@ -1,21 +1,27 @@
 """Play a round's games in worker processes, and replace a worker whose games stop moving.
 
-A step of a game engine can take very long on a rare board, and a call
-into it cannot be interrupted from Python. When games are played in the
+On a rare board, one step of the game engine can take a very long time, and
+Python cannot interrupt a call into the engine. When games are played in the
 training process, that one step freezes the run. Here each worker process
 has its own copy of the models and plays its share of a round's matchups
-with `jace.train.play_games`. The training process sends every worker the
-round's weights and its share, takes back the decisions, and kills a
-worker that completes no step for a time limit. The games of that worker's
-share are lost and counted, the other workers' are not, and a new process
-takes its place for the next round. Nothing carries over from one round to
-the next, so every decision of a round was made with that round's weights.
+with `jace.train.play_games`. The training process sends each worker the
+round's weights and its share, and takes back the decisions.
 
-A worker's life is explicit: it is `Starting` while its process builds the
-models, `Ready` between rounds and `Playing` during one. Each change of
-state is one function below. Workers are started with the spawn method, so
-a builder must be a module-level function or a `functools.partial` of one
-over plain values.
+When a worker completes no step of its games within a time limit, the training
+process kills it. That worker's games are lost, and the result counts them, but
+the other workers' games are kept. A new process takes the killed worker's
+place for the next round. No game continues from one round into the next, so
+every decision of a round was made with that round's weights. A worker does
+keep its actor and its random generator from one round to the next.
+
+Each worker is in one of three states. It is `Starting` while its process
+builds the models, `Ready` between rounds and `Playing` during one. Each
+change of state is one function below.
+
+Workers are started with the spawn method, so multiprocessing pickles a
+worker's `BuildActor` to send it to the new process. A `BuildActor` must
+therefore be a module-level function, or a `functools.partial` of one over
+plain values.
 """
 
 import ctypes
@@ -49,12 +55,13 @@ __all__ = (
     "stop_workers",
 )
 
-# The state dict of each module a worker plays with, by the name the worker's `Actor` gives it.
+# The state dict of each module a worker plays with, keyed by the module's name in `Actor.modules`.
 type Weights = Mapping[str, Mapping[str, Tensor]]
 
 # How often the training process looks at the workers' step counters while it waits for games.
 _WATCH_SECONDS = 0.5
-# A worker's seed has this many bits, the most a PyTorch generator takes.
+# A worker seeds a PyTorch generator with its seed. A PyTorch generator accepts any seed from
+# -2**63 to 2**64 - 1, so a seed of this many bits fits.
 _SEED_BITS = 63
 
 
@@ -62,12 +69,12 @@ _SEED_BITS = 63
 class Actor:
     """What a worker plays with, built inside its own process.
 
-    `start` makes a batch for the matchups of one round. `policy` and
-    `guesser` play both seats of every game. `modules` are the modules
-    behind them, by name: at the start of each round the worker loads the
-    state dict sent under each name into the module of that name. `cards`
-    is the number of cards in the pool and `history` how many earlier
-    guesses the guesser is shown.
+    `start` makes a batch for the matchups of one round. `policy` plays both
+    seats of every game, and `guesser` makes both seats' guesses. `modules`
+    are the modules that they call, by name. At the start of each round, the
+    worker loads the state dict sent under each name into the module of that
+    name. `cards` is the number of cards in the pool, and `history` is how
+    many earlier guesses the guesser is shown.
     """
 
     start: StartBatch
@@ -78,7 +85,7 @@ class Actor:
     history: int
 
 
-# (seed) -> the actor of one worker. It runs in the worker's process.
+# Builds one worker's actor from the worker's seed. It runs in the worker's process.
 type BuildActor = Callable[[int], Actor]
 
 
@@ -86,7 +93,8 @@ type BuildActor = Callable[[int], Actor]
 class _Child:
     process: BaseProcess
     connection: Connection
-    # steps: how many steps of its games the child has completed, which the child raises itself.
+    # How many steps of its games the child has completed. The child raises this count itself, in
+    # shared memory, so the training process can read it while the child is inside the engine.
     steps: ctypes.c_int64
     build: BuildActor
     seed: int
@@ -94,7 +102,8 @@ class _Child:
 
 @dataclass(frozen=True, slots=True)
 class Starting:
-    # The process is building its actor. since: when it was started, in `time.monotonic` seconds.
+    # The process is building its actor. `since` is when the process was started, in
+    # `time.monotonic` seconds.
     child: _Child
     since: float
 
@@ -107,11 +116,13 @@ class Ready:
 
 @dataclass(frozen=True, slots=True)
 class Playing:
-    # The worker is playing its share of a round. share: the position in the round's list of each
-    # matchup it was given. steps: its step count when last looked at. since: when that count last rose.
+    # The worker is playing its share of a round.
     child: _Child
+    # The position in the round's list of each matchup the worker was given.
     share: tuple[int, ...]
+    # The worker's step count when the training process last read it.
     steps: int
+    # When that count last rose, or when the round began, in `time.monotonic` seconds.
     since: float
 
 
@@ -144,21 +155,24 @@ def play_on_workers(
     """Play every game of `matchups` on the workers and return the decisions and the workers.
 
     The matchups are dealt out to the workers in turn. Each worker loads
-    `weights` and plays its share to the end in self-play. A game in the
-    result is known by its position in `matchups`, and the decisions are on
-    `device`: each worker's are moved there as soon as they arrive, while
-    the other workers still play. The workers that come back are the ones
-    to pass to the next round.
+    `weights` and plays its share to the end in self-play. Each game in the
+    result is identified by its position in `matchups`. The decisions are
+    on `device`. Each worker's decisions are moved there as soon as they
+    arrive, while the other workers are still playing. Pass the returned
+    workers to the next round.
 
     A worker that completes no step of its games for `stall_seconds` is
     killed, and a new process is started in its place for the next round.
-    The games of its share are not in the result and `Collected.lost`
-    counts them. A new process has the same `stall_seconds` to build its
-    actor. Raises `WorkerFailedError` when a process exits by itself, does
-    not finish building in time, or when every worker was killed.
+    The killed worker's games are not in the result, and `Collected.lost`
+    counts them. The new process has the same `stall_seconds` to build its
+    actor.
+
+    Raises `WorkerFailedError` when a process exits by itself or does not
+    finish building its actor in time, and when every worker given a share
+    was killed.
     """
-    # A tensor sent through a connection travels as a handle to shared memory, which every worker
-    # maps, so the main process sends a handle to each worker and not a copy of every weight.
+    # Sending a tensor through a connection sends a handle to shared memory, and each worker maps
+    # that memory. The main process therefore sends each worker a handle, not a copy of every weight.
     shared = {name: dict(state) for name, state in weights.items()}
     ready = [_await_ready(worker, stall_seconds=stall_seconds) for worker in workers]
     # Matchup i goes to worker i % workers.
@@ -197,7 +211,7 @@ def _spawn(build: BuildActor, *, seed: int) -> Starting:
 
 
 def _await_ready(worker: Worker, *, stall_seconds: float) -> Ready:
-    # Starting -> Ready, once the process says its actor is built. A ready worker is returned as it is.
+    # Starting -> Ready, once the process reports that its actor is built. A ready worker is returned as it is.
     if isinstance(worker, Ready):
         return worker
     if isinstance(worker, Playing):
@@ -219,9 +233,9 @@ def _assign(worker: Ready, *, weights: Weights, matchups: Sequence[Matchup], sha
 
 
 def _advance(worker: Playing, *, played: list[Collected], stall_seconds: float, device: torch.device) -> Worker:
-    # Playing -> Ready once the worker sends its games, which are added to `played` as games of
-    # the round on `device`. Playing -> Playing while its step count rises. Playing -> Starting,
-    # as a new process, once the count has not risen for `stall_seconds`.
+    # Playing -> Ready once the worker has sent its games, which are added to `played` as games of
+    # the round, on `device`. Playing -> Starting, as a new process, once the step count has not
+    # risen for `stall_seconds`. Otherwise the worker stays Playing.
     if worker.child.connection.poll():
         collected = _receive(worker.child.connection)
         if collected is None:
@@ -236,7 +250,8 @@ def _advance(worker: Playing, *, played: list[Collected], stall_seconds: float, 
     if now - worker.since < stall_seconds:
         return worker
     _kill(worker.child)
-    # The new seed is drawn from the stalled one's, so a run's seeds depend only on its own seed.
+    # The new process's seed is drawn from the stalled worker's seed, so a run's seeds depend only on
+    # the run's own seed.
     return _spawn(worker.child.build, seed=random.Random(worker.child.seed).getrandbits(_SEED_BITS))
 
 
@@ -247,7 +262,8 @@ def _kill(child: _Child) -> None:
 
 
 def _receive(connection: Connection) -> Collected | None:
-    # The next message of a child: the games of its share, or None when it has built its actor.
+    # The child's next message: the games of its share, or None, which the child sends once it has
+    # built its actor.
     try:
         message = connection.recv()
     except EOFError as error:
@@ -260,8 +276,8 @@ def _receive(connection: Connection) -> Collected | None:
 
 
 def _in_round(collected: Collected, *, share: tuple[int, ...], device: torch.device) -> Collected:
-    # One worker's games on `device`, each game known by its position in the round's list in place
-    # of its position in the worker's share.
+    # Moves one worker's games to `device`, and renumbers each game from its position in the
+    # worker's share to its position in the round's list.
     rollout = replace(collected.rollout, games=torch.tensor(share)[collected.rollout.games])
     return replace(
         collected,
@@ -272,7 +288,7 @@ def _in_round(collected: Collected, *, share: tuple[int, ...], device: torch.dev
 
 def _combined(played: Sequence[Collected], *, games: int) -> Collected:
     # Joins the workers' games. A worker plays every game of its share to an end, finished or
-    # abandoned, so whatever no worker returned is counted as lost.
+    # abandoned, so every game that no worker returned is counted as lost.
     returned = sum(len(collected.games) + collected.abandoned for collected in played)
     return Collected(
         rollout=join([collected.rollout for collected in played]),
@@ -283,15 +299,16 @@ def _combined(played: Sequence[Collected], *, games: int) -> Collected:
 
 
 def _work(connection: Connection, steps: ctypes.c_int64, *, build: BuildActor, seed: int) -> None:
-    # Runs in the worker's process. It says None once the actor is built. For each round it gets
-    # the weights and its matchups, and sends back the `Collected` of playing them.
-    # One thread, because every worker would otherwise start a thread for each core.
+    # Runs in the worker's process. It sends None once the actor is built. Then, for each round, it
+    # receives the weights and its matchups and sends back the `Collected` from playing them.
+    # One thread, because PyTorch would otherwise start a thread for each core in every worker.
     torch.set_num_threads(1)
     actor = build(seed)
     generator = torch.Generator().manual_seed(seed)
 
     def counting(boards: Boards, guess: Guess) -> Tensor:
-        # The policy runs once for each step of the games, so this count is what the training process watches.
+        # The policy runs once for each step of the games, so this counts steps. The training process
+        # reads the count to find a worker whose games have stopped advancing.
         steps.value += 1
         return actor.policy(boards, guess)
 

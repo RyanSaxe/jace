@@ -1,17 +1,21 @@
 """Play a list of games to the end and record every decision.
 
-A round of training is a list of matchups. `play_games` plays every game of
-the list from its first decision to its last with the policies it is given,
-and returns the decisions as a `Rollout`. No game is cut off for being long
-and none carries over to a later call, so every row of a rollout was played
-by one version of the weights, and long games count as much as short ones.
-A game the engine abandons is counted and its decisions are left out.
+A round of training is a list of matchups. `play_games` plays every game of the
+list from its first decision to its last with the policies it is given, and
+returns the decisions as a `Rollout`. No game is cut off for being long, and
+none continues into a later call. A rollout therefore never mixes in decisions
+made with an earlier version of the weights, and long games count as much as
+short ones. When the engine abandons a game, the game is counted and its
+decisions are left out.
 
-A training loop depends on `PlayGames`, the one-argument form: matchups in,
-`Collected` out. `play_games` with its other arguments bound is one, on a
-single batch in this process. `jace.train.workers` builds another on worker
-processes. Each model runs once per step over every game in play; the only
-Python loop over games visits the few that ended on a step.
+A training loop plays its games through a `PlayGames`, a function that takes
+a round's matchups and returns a `Collected`. Binding every argument of
+`play_games` except the matchups gives one that plays on a single batch in
+this process. `jace.train.workers` builds one that plays on worker processes.
+
+Within a step, the guesser runs once over every game in play, and each
+policy runs once over the games where it acts. The only Python loop over
+games within a step visits the few games that ended on it.
 """
 
 from collections.abc import Callable, Sequence
@@ -43,14 +47,22 @@ class Rollout:
     """Decisions in the order they were made, one row each.
 
     Every tensor has a leading axis of `n` rows. `boards` and `guesses` are
-    what the actor saw. `logits` are the actor's action scores, with illegal
-    actions at `-inf`, and `log_probs` is its log-probability of the action
-    it took. `games` and `seats` identify the row's game and seat, and
-    `learner` is False where the opponent policy acted. `results` is the
-    game's final result from the row's seat: 1 for a win, 0.5 for a draw, 0
-    for a loss. `deck_truth` and `hand_truth` are the opponent's true unseen
-    cards as shares, and 1 where the opponent truly held the card: the
-    labels for the guess, and what the win chance reads in place of it.
+    the inputs the acting policy read. `logits` are that policy's action
+    scores, with illegal actions at `-inf`. `actions` is the int64 index of
+    the action it took, and `log_probs` is the log-probability it gave that
+    action.
+
+    `games` is each row's game, as its position in the list of matchups, and
+    `seats` is the seat that acted. `learner` is False where the opponent
+    policy acted. `results` is the game's final result from the acting seat:
+    1 for a win, 0.5 for a draw and 0 for a loss.
+
+    `deck_truth` and `hand_truth` are the opponent's true unseen cards, in
+    the form of a `Guess`. `deck_truth` is each card's share of the
+    opponent's hand and library, and `hand_truth` is 1 where the opponent's
+    hand contains at least one copy of the card. They are the labels the
+    guess model learns from, and the win chance reads them in place of a
+    guess.
     """
 
     boards: Boards
@@ -68,7 +80,7 @@ class Rollout:
 
 @dataclass(frozen=True, slots=True)
 class GameResult:
-    # game: the game's position in the list of matchups that was played.
+    # The game's position in the list of matchups that was played.
     game: int
     decks: tuple[Deck, Deck]
     learner_seat: int
@@ -78,14 +90,15 @@ class GameResult:
 
 @dataclass(frozen=True, slots=True)
 class Collected:
-    # rollout: the decisions of the games that finished, each row's game being its position in
-    # the list of matchups. games: one entry per finished game.
+    # The decisions of the games that finished. A row's `games` entry is its game's position in the
+    # list of matchups.
     rollout: Rollout
+    # One result for each finished game.
     games: tuple[GameResult, ...]
-    # abandoned: how many games the engine could not finish. Their decisions are not in the rollout.
+    # How many games the engine could not finish. Their decisions are not in the rollout.
     abandoned: int
-    # lost: how many games of the list were not played to the end because the process playing
-    # them was stopped. It is zero for games played in this process.
+    # How many games of the list were not played to the end because the process playing them was
+    # stopped. It is zero for games played in this process.
     lost: int
 
 
@@ -102,8 +115,9 @@ class NoGamesError(ValueError):
 
 
 def select(rollout: Rollout, rows: Tensor) -> Rollout:
-    # rows: int64 [m] row indices, or bool [n]. Returns those rows as a rollout. A field on a GPU
-    # is indexed with indices on that GPU: indexing it with CPU indices copies through the CPU.
+    # `rows` is either int64 row indices [m] or a bool mask [n]. Indexing a tensor on a GPU with
+    # indices on the CPU makes PyTorch copy the indices to the GPU on every call. So `rows` is
+    # copied to each device once, and every field on that device is indexed with that copy.
     on_device: dict[torch.device, Tensor] = {}
 
     def rows_of(values: Tensor) -> Tensor:
@@ -124,8 +138,8 @@ def select(rollout: Rollout, rows: Tensor) -> Rollout:
 
 
 def to_device(rollout: Rollout, device: torch.device) -> Rollout:
-    # Every field of `rollout` on `device`. An update on a GPU moves its rollout there once, so each
-    # slice of every pass is cut on the GPU and no model input crosses from the CPU again.
+    # A loop moves a rollout to the update's device once, before the update. Every slice of every
+    # pass is then cut on that device, and no model input is copied from the CPU again.
     plain = {
         field.name: getattr(rollout, field.name).to(device)
         for field in fields(Rollout)
@@ -139,7 +153,8 @@ def to_device(rollout: Rollout, device: torch.device) -> Rollout:
 
 
 def join(parts: Sequence[Rollout]) -> Rollout:
-    # The rows of every part, in the order given. `parts` must not be empty.
+    # The result has the rows of every part, in the order the parts are given. `parts` must not be
+    # empty.
     plain = {
         field.name: torch.cat([getattr(part, field.name) for part in parts])
         for field in fields(Rollout)
@@ -156,8 +171,9 @@ def join(parts: Sequence[Rollout]) -> Rollout:
 
 
 def _decide(boards: Boards, guess: Guess, *, is_learner: Tensor, learner: Policy, opponent: Policy) -> Tensor:
-    # Runs each policy once, on the rows it acts in. Returns the logits [n, k] of every row. When the
-    # learner acts in every row, as in self-play, its rows are the whole batch and no board is copied.
+    # Runs each policy once, on the rows where it acts, and returns the logits [n, k] of every row.
+    # When the learner acts in every row, as in self-play, it reads the boards whole and no board
+    # is copied.
     if bool(is_learner.all()):
         return learner(boards, guess)
     logits = torch.empty(0)
@@ -173,7 +189,7 @@ def _decide(boards: Boards, guess: Guess, *, is_learner: Tensor, learner: Policy
 
 
 def _truth(batch: GameBatch, seats: Tensor) -> tuple[Tensor, Tensor]:
-    # Returns (deck_truth, hand_truth), each [n, cards], for the opponent of the seat acting in each game in play.
+    # Returns `deck_truth` and `hand_truth`, each [n, cards], for the opponent of the acting seat in each game in play.
     hidden = batch.hidden_cards()
     in_play = torch.arange(len(seats))
     # `1 - seats` is the opponent of the seat acting in each game.
@@ -183,7 +199,8 @@ def _truth(batch: GameBatch, seats: Tensor) -> tuple[Tensor, Tensor]:
 
 
 def _finished_rows(parts: Sequence[Rollout], finished: Sequence[GameResult], *, abandoned: set[int]) -> Rollout:
-    # Joins the steps of a round, drops the rows of abandoned games and fills in every row's result.
+    # Joins the rows of every step of the round, leaving out the abandoned games, and fills in each
+    # row's result from its game's result.
     joined = join(parts)
     kept = select(joined, ~torch.isin(joined.games, torch.tensor(sorted(abandoned), dtype=torch.int64)))
     seat_0_result = torch.zeros(int(joined.games.max()) + 1)
@@ -197,8 +214,10 @@ def _guess(
     guesser: Guesser, boards: Boards, *, games: Tensor, seats: Tensor, history: Guess, history_count: Tensor
 ) -> Guess:
     # Makes the acting seat's guess in every game in play and puts it at the front of that seat's
-    # history, in place. games, seats: int64 [n]. history: [games of the round, 2, h, cards]
-    # each; history_count: int64 [games of the round, 2].
+    # history, changing `history` and `history_count` in place. `games` and `seats` are int64 [n].
+    # The two tensors of `history` are [matchups, 2, h, cards], one row per matchup of the round,
+    # with each seat's guesses newest first. `history_count` is int64 [matchups, 2], how many of a
+    # seat's h places contain a guess.
     history_length = history.deck.shape[2]
     earlier = Guess(deck=history.deck[games, seats], hand=history.hand[games, seats])
     mask = torch.arange(history_length) < history_count[games, seats][:, None]
@@ -235,12 +254,17 @@ def play_games(
     """Play every game of `matchups` to its end on one batch and return their decisions.
 
     `start` makes the batch for the list. `cards` is the number of cards in
-    the pool and `history` is how many earlier guesses the guesser is
-    shown. The learner takes seat 0 in every second game of the list and
-    seat 1 in the others, starting from a seat drawn at random. When
-    `opponent` is the same policy as `learner`, which is self-play, the
-    decisions of both seats are marked as the learner's in the rollout, and
-    `GameResult.learner_result` is still the result of the learner's seat.
+    the pool, and `history` is how many earlier guesses the guesser is
+    shown. The learner's first seat and every action are drawn from
+    `generator`.
+
+    The learner's seat alternates down the list. It takes a seat drawn at
+    random in the first game, the other seat in the second game, and so on.
+    When `opponent` is the same policy as `learner`, which is self-play,
+    `Rollout.learner` is True for the decisions of both seats.
+    `GameResult.learner_result` is still the result of the seat the learner
+    was given.
+
     Raises `NoGamesError` when `matchups` is empty.
     """
     if not matchups:
@@ -251,7 +275,8 @@ def play_games(
     history_count = torch.zeros(len(matchups), SEATS, dtype=torch.long)
     first_seat = int(torch.randint(0, SEATS, (1,), generator=generator))
     learner_seat = (torch.arange(len(matchups)) + first_seat) % SEATS
-    # `==`, not `is`: a bound method is a new object each time it is read from its model.
+    # This compares with `==`, not `is`, because a bound method is a new object each time it is
+    # read from its model.
     self_play = opponent == learner
     parts: list[Rollout] = []
     finished: list[GameResult] = []

@@ -1,10 +1,11 @@
 """The pieces a training loop is written from.
 
-`play_games` plays a list of games and returns their decisions, the loss functions score
-a model's output, and `apply` takes the gradient step. A loop is a short
-function that calls these in the order it wants, so nothing here decides
-what is trained when, where decks come from, or how a dial changes over
-training.
+`play_games` plays a list of games and returns their decisions. The loss
+functions score a model's output, and `apply` takes a gradient step on the
+loss. A loop is a short function that calls these pieces in the order it
+chooses. Which model trains when, and where the decks come from, are up to
+the loop, not this package. So is how learning rates and other settings
+change over training.
 """
 
 from jace.train.collect import (

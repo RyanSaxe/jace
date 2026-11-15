@@ -1,8 +1,8 @@
 """Keep each training run's record as plain files, and be the only code that writes them.
 
-There is no tracking service. A run is a folder that any program can read,
-and the layout below is a public contract: the frontend reads these files
-directly, so a change to a name or a field here is a breaking change.
+There is no tracking service. A run is a folder of plain files that any
+program can read directly. The layout below is therefore a public contract,
+and renaming a file or a field breaks the programs that read them.
 
     <root>/<run id>/
       identity.json        what the run is, written once
@@ -20,9 +20,9 @@ The run id is the creation time in UTC to the second, a dash, and the first
 Creating two runs with the same identity in the same second raises
 `RunExistsError` instead of sharing a folder.
 
-Every `.jsonl` file holds one JSON object per line, each written whole with
-a single append, and each file exists from creation. No value is ever NaN
-or infinite: logging one raises `ValueError`. The fields are:
+Each line of a `.jsonl` file is one JSON object, written whole with a single
+append. Every file exists from creation. No value is ever NaN or infinite,
+because writing one raises `ValueError`. The fields are:
 
     identity.json      format (1), run_id, created, config, seed, jace_commit,
                        manabot_commit, inputs (a list of checkpoint objects)
@@ -34,22 +34,26 @@ or infinite: logging one raises `ValueError`. The fields are:
     checkpoint object  run_id, model, update, sha256
 
 Times are ISO 8601 in UTC. `sha256` is the hex digest of the `.pt` file. A
-`.pt` file with no line in `index.jsonl` was cut off while being saved.
-A model's checkpoint also holds the card vectors the model was saved with,
-because the model holds them as a submodule. `load_checkpoint` never lets
-that copy replace the shared card vectors.
+save that is cut off can leave a `.partial` file, or a complete `.pt` file
+that `index.jsonl` does not list yet. Only the checkpoints the index lists
+are finished. Every model that reads cards has its card vectors, the
+`jace.cards` encoder or table that gives each card a vector, as a submodule.
+A model's checkpoint therefore also contains the card vectors it was saved
+with. When the shared card vectors are passed to `load_checkpoint` as
+`keeping`, that copy does not replace them.
 
 A run moves created -> running -> completed | failed | interrupted, and
 interrupted -> running. The last line of `state.jsonl` is the state, with
-one exception: a killed process cannot record its own end, so "running"
-with nobody holding the lock means interrupted. `read_state` and `writing`
-resolve that and append the "interrupted" line. A reader that does not call
-them can test the lock itself.
+one exception. A killed process cannot record its own end, so "running"
+with no process holding the lock means interrupted. `read_state` and
+`writing` detect that case and append the "interrupted" line. A reader that
+does not call them can test the lock itself.
 
-The lock is an OS lock that dies with its process, so there is never a
-stale lock to clean up. A child forked inside a `writing` block inherits
-it, and the run reads as running until that child exits too. Nothing is
-fsynced: the record survives a killed process but not a power loss.
+The lock is an OS lock, which the system releases when its process exits.
+There is never a stale lock to clean up. A child forked inside a `writing`
+block inherits the lock, and the run is read as running until that child
+exits too. Nothing is fsynced, so the record survives a killed process but
+may not survive a power loss.
 
 Every function that writes a time takes a `clock`, a callable that returns
 the current time as a timezone-aware `datetime`. This module never reads
@@ -78,7 +82,7 @@ type Clock = Callable[[], datetime]
 _FORMAT = 1
 # Checkpoint file names pad the update to this many digits, so they sort by update as text.
 _UPDATE_DIGITS = 8
-# Hex digits of the identity's SHA-256 kept in a run id: enough to tell apart runs created in the same second.
+# A run id contains this many hex digits of the identity's SHA-256, enough to tell apart runs of the same second.
 _ID_DIGEST_DIGITS = 8
 # Permissions of a record file this module creates: its owner reads and writes, everyone else reads.
 _RECORD_FILE_MODE = 0o644
@@ -113,10 +117,10 @@ class RunState(enum.Enum):
 class Running:
     """Proof that this process holds the run's writer lock.
 
-    Only `writing` makes one, and it is valid until that block ends. Every
-    function that writes to a run takes it, so a write outside a `writing`
-    block does not type-check. `lock` is the file descriptor of the held
-    lock file.
+    Only `writing` and `evaluating` make one, and it is valid until that
+    block ends. `log_update`, `save_checkpoint` and `record_evaluation` each
+    take one, so calling them outside such a block does not type-check.
+    `lock` is the file descriptor of the held lock file.
     """
 
     folder: Path
@@ -170,9 +174,12 @@ def create_run(root: Path, identity: Identity, *, clock: Clock) -> Path:
     """Make a new run folder under `root` in the state CREATED and return it.
 
     The folder's name is the run id, described in the module docstring.
-    `root` is created when it is missing. Raises `TypeError` before anything
-    is written when the config holds a value JSON cannot represent, and
-    `RunExistsError` when the folder already exists.
+    `root` is created when it is missing.
+
+    Raises `TypeError` when the config contains a value JSON cannot
+    represent, and `ValueError` when it contains NaN or an infinite number,
+    both before anything is written. Raises `RunExistsError` when the folder
+    already exists.
     """
     created = clock().astimezone(UTC)
     described = _described(identity)
@@ -199,9 +206,9 @@ def read_state(folder: Path, *, clock: Clock) -> RunState:
     """Return the run's state, recording INTERRUPTED first when its writer died.
 
     A run whose last recorded state is RUNNING is still running only while a
-    live process holds its lock. When nobody does, this appends INTERRUPTED
-    to `state.jsonl` and returns that. It is safe to call while another
-    process, or this one, is writing the run.
+    live process holds its lock. When no process does, `read_state` appends
+    INTERRUPTED to `state.jsonl` and returns that. It is safe to call while
+    another process, or this one, is writing the run.
     """
     state = _last_recorded_state(folder)
     if state is not RunState.RUNNING:
@@ -224,10 +231,11 @@ def writing(folder: Path, *, clock: Clock) -> Generator[Running]:
     message on any other exception. The exception is re-raised and the lock
     is released in every case.
 
-    Raises `RunLockedError` when another live process (or another `writing`
-    block in this one) holds the run, and `RunNotResumableError` when the
-    run is completed or failed. A run left RUNNING by a dead writer counts
-    as interrupted, so it can be resumed without calling `read_state` first.
+    Raises `RunLockedError` when another live process, or another `writing`
+    or `evaluating` block in this one, holds the run's lock. Raises
+    `RunNotResumableError` when the run is completed or failed. A run left
+    RUNNING by a dead writer counts as interrupted, so it can be resumed
+    without calling `read_state` first.
     """
     lock = _try_lock(folder)
     if lock is None:
@@ -251,11 +259,12 @@ def writing(folder: Path, *, clock: Clock) -> Generator[Running]:
 def evaluating(folder: Path) -> Generator[Running]:
     """Take the writer lock of a run in any state, to add evaluations to it.
 
-    A checkpoint is scored after its run has ended, and `writing` refuses a
-    completed or failed run. This block holds the same lock and leaves the
-    run's state as it found it, so the `Running` it yields is for
-    `record_evaluation` only. Raises `RunLockedError` when a live process is
-    writing the run.
+    A checkpoint can also be scored after its run has ended, when `writing`
+    refuses the run because it is completed or failed. This block takes the
+    same lock as `writing` but leaves the run's state unchanged, so the
+    `Running` it yields is for `record_evaluation` only.
+
+    Raises `RunLockedError` when the lock is already held, as `writing` does.
     """
     lock = _try_lock(folder)
     if lock is None:
@@ -275,9 +284,9 @@ def save_checkpoint(run: Running, *, model: ModelName, update: int, module: nn.M
     """Save the module's state dict as this run's checkpoint for `model` at `update`.
 
     The file is written under a temporary name and renamed once complete, so
-    a file with the final name is never half written. It is then added to
-    `checkpoints/index.jsonl`. Raises `CheckpointExistsError` when the run
-    already has a checkpoint for this model and update.
+    a file with the final name is never half written. Its line is then
+    added to `checkpoints/index.jsonl`. Raises `CheckpointExistsError` when
+    the run already has a checkpoint file for this model and update.
     """
     path = _checkpoint_path(run.folder, model=model, update=update)
     if path.exists():
@@ -304,11 +313,13 @@ def record_evaluation(
 ) -> None:
     """Append one evaluation of `checkpoint` against `opponent` to the run's record.
 
-    `rate`, `low` and `high` are the checkpoint's win rate and the ends of
-    its range over `deals` deals. `details` holds whatever else the
-    evaluation measured, such as the games with no result or the guess
-    model's loss, as JSON values, and the line has no `details` field when
-    it is None. Raises `ValueError` when a number is NaN or infinite.
+    `rate` is the checkpoint's win rate over `deals` deals, and `low` and
+    `high` are the ends of the evaluation's range around it. `details`
+    contains whatever else the evaluation measured, such as the games with
+    no result or the guess model's loss, as JSON values. The line has no
+    `details` field when `details` is None.
+
+    Raises `ValueError` when any number, even in `details`, is NaN or infinite.
     """
     record: dict[str, object] = {
         "checkpoint": asdict(checkpoint),
@@ -327,10 +338,10 @@ def latest_checkpoint(run_folder: Path, model: ModelName) -> CheckpointRef:
     """Return the reference of the newest checkpoint of `model` in the run at `run_folder`.
 
     Newest means the highest update listed in `checkpoints/index.jsonl`, so
-    a file cut off while being saved is never returned. The reference's run
-    id is the folder's name, and `load_checkpoint` takes the folder's parent
-    as its `root`. Raises `NoCheckpointError` when the run lists no
-    checkpoint of `model`.
+    the checkpoint of a save that was cut off is never returned. The
+    reference's run id is the folder's name, and `load_checkpoint` takes the
+    folder's parent as its `root`. Raises `NoCheckpointError` when the index
+    lists no checkpoint of `model`.
     """
     lines = (run_folder / "checkpoints" / "index.jsonl").read_text().splitlines()
     records = [record for record in map(json.loads, lines) if record["model"] == model]
@@ -341,12 +352,14 @@ def latest_checkpoint(run_folder: Path, model: ModelName) -> CheckpointRef:
 
 
 def read_checkpoint(root: Path, ref: CheckpointRef) -> dict[str, Tensor]:
-    """Return the state dict the referenced checkpoint holds, on the CPU.
+    """Return the referenced checkpoint's state dict, on the CPU.
 
-    `root` is the folder that holds the run folders, and the reference names
-    the run. The file is hashed first and `CheckpointMismatchError` is raised
-    when the digest differs from the reference, before anything is read.
-    A missing file raises `FileNotFoundError`.
+    `root` is the folder that contains the run folders, and the reference
+    names the run. The file is hashed before it is loaded, so a file whose
+    digest differs from the reference is never unpickled.
+
+    Raises `CheckpointMismatchError` when the digest differs from the
+    reference, and `FileNotFoundError` when the file is missing.
     """
     path = _checkpoint_path(root / ref.run_id, model=ref.model, update=ref.update)
     actual = _sha256(path)
@@ -359,18 +372,19 @@ def load_checkpoint(root: Path, ref: CheckpointRef, *, into: nn.Module, keeping:
     """Load the referenced checkpoint's weights into `into`, leaving `keeping` as it was.
 
     The checkpoint is read and checked as `read_checkpoint` does. A model's
-    state dict includes every module the model holds, so a model checkpoint
-    carries a copy of the card vectors it was saved with. Pass the shared
-    card vectors as `keeping` when loading a model: `keeping` is found in
+    state dict includes all of the model's submodules, so a model checkpoint
+    contains a copy of the card vectors it was saved with. Pass the shared
+    card vectors as `keeping` when loading a model. `keeping` is found in
     `into` by identity, and the checkpoint's keys under its place there are
-    left out of the load. The card vectors therefore change only when they
-    are loaded themselves, with `keeping=None`, and a model saved with one
-    kind of card vectors loads into a model that reads another kind.
+    left out of the load. Passed this way, the card vectors change only when
+    they are loaded themselves, with `keeping=None`. A model saved with one
+    kind of card vectors, such as an encoder, then loads into a model that
+    reads another kind, such as a fixed table.
 
-    Raises `KeepingNotHeldError` when `into` does not hold `keeping`, and
-    `CheckpointKeysError` when any other key that `into` needs is missing
-    from the checkpoint or the checkpoint holds one `into` does not, before
-    anything is loaded.
+    Raises `KeepingNotHeldError` when `keeping` is not a submodule of
+    `into`. Raises `CheckpointKeysError` when, outside `keeping`'s place,
+    the checkpoint lacks a key that `into` has or has a key that `into`
+    lacks. Both are raised before anything is loaded.
     """
     held_at = () if keeping is None else _places_of(keeping, within=into)
     saved = {key: value for key, value in read_checkpoint(root, ref).items() if not key.startswith(held_at)}
@@ -381,7 +395,7 @@ def load_checkpoint(root: Path, ref: CheckpointRef, *, into: nn.Module, keeping:
 
 
 def _places_of(module: nn.Module, *, within: nn.Module) -> tuple[str, ...]:
-    # The state dict key prefix of every place `within` holds `module`, each ending in a dot.
+    # The state dict key prefix, ending in a dot, of every place where `module` is inside `within`.
     places = tuple(f"{name}." for name, held in within.named_modules(remove_duplicate=False) if held is module)
     if not places:
         raise KeepingNotHeldError
@@ -389,7 +403,7 @@ def _places_of(module: nn.Module, *, within: nn.Module) -> tuple[str, ...]:
 
 
 def _described(identity: Identity) -> dict[str, object]:
-    # The identity as JSON values. The run id hashes exactly this, and `identity.json` holds it.
+    # The identity as JSON values. The run id's digest is a hash of exactly this, and `identity.json` contains it.
     return {
         "config": dict(identity.config),
         "seed": identity.seed,
@@ -417,7 +431,7 @@ def _sha256(path: Path) -> str:
 
 
 def _append(path: Path, record: Mapping[str, object]) -> None:
-    # One write call to a file opened for append lands as one whole line, even when the process is killed.
+    # One write call to a file opened for append adds the whole line at the end, even when the process is killed.
     line = (json.dumps(record, allow_nan=False) + "\n").encode()
     descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, _RECORD_FILE_MODE)
     try:
