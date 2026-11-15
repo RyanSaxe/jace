@@ -1,10 +1,12 @@
 """Check pretraining on human decks through `jace.loops.pretrain_decks`.
 
-The decks here are made up. Every pool is six random spells out of ten, the
-"human" plays the four with the lowest ids plus two copies of one basic, and
-a deck wins most of its games only when it holds the lowest spell of all.
-Tiny models learn both rules in a few seconds on the CPU. The tests use a
-real run folder in a temporary directory, real models and real optimizers.
+The decks here are made up. Every pool has six random spells out of ten and
+two copies of one basic. The "human" deck contains the pool's four spells
+with the lowest card ids and both copies of the basic. A deck wins most of
+its games only when it contains card 2, the spell with the lowest id of
+all. A tiny deck builder learns the first rule and a tiny deck score the
+second, each in a few seconds on the CPU. The tests use a real run folder
+in a temporary directory, real models and real optimizers.
 """
 
 import functools

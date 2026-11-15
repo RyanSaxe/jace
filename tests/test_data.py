@@ -1,9 +1,11 @@
 """Check the human-data loaders through `jace.data`, on small hand-made tables.
 
-No test downloads anything or calls spells. Each one builds the few rows it
-needs in the shape 17Lands publishes, one column per card, and passes them
-to the same functions that read the real files. The cache files go to a
-temporary folder that pytest removes.
+No test downloads anything or reads a set through the `spells` package.
+Most tests build the few pick or game rows they need in the shape 17Lands
+publishes them, with one column per card, and pass them to the same
+functions that read the real files. The card-table test builds a small
+table of card attributes and one of card statistics instead. The cache
+files go to pytest's temporary folder.
 """
 
 from pathlib import Path
@@ -44,7 +46,8 @@ def _pick_row(
 
 
 def _two_round_drafts() -> pl.LazyFrame:
-    # Two rounds of two picks. Draft "full" lacks only its first pick; draft "cut" also lacks its last.
+    # Two rounds of two picks each. Draft "full" has a row for every pick except its first. Draft "cut" also has
+    # no row for its last pick.
     rows = [
         _pick_row("full", pack_number=0, pick_number=1, pick="Bat", pack=(0, 1, 0), held=(0, 0, 1)),
         _pick_row("full", pack_number=1, pick_number=0, pick="Ant", pack=(1, 0, 1), held=(0, 1, 1)),

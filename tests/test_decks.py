@@ -1,9 +1,12 @@
 """Check deck building through the public interface of `jace.decks`.
 
-The tests use a twelve-card set with two basics, one non-basic land, a red
-group, a blue group and one colourless spell. Legality is judged by a helper
-written here from the rules' wording, not by the builder's own code, so a
-mistake in the builder's masks cannot hide itself. Models are tiny and real.
+Most tests use a set of twelve cards. Cards 0 and 1 are the red and blue
+basics, card 2 is a nonbasic land, cards 3 to 6 are red spells, cards 7 to 10
+are blue spells, and card 11 is a colourless spell. The test of a growing card
+pool starts from six cards of its own. A helper written here from the rules'
+wording checks which decks are legal. It shares no code with the builder's
+masks, so a mistake in those masks cannot also be in the check. The models are
+tiny and real.
 """
 
 import pytest
@@ -38,12 +41,14 @@ def _counts(pool: Pool) -> Tensor:
 
 
 def _legal(decks: Tensor, *, pool: Pool, rules: BuildRules) -> Tensor:
-    # decks: float [n, cards]. Returns bool [n].
+    # `decks` is float [n, cards], each deck's copies of each card. The result is bool [n], true for each
+    # legal deck.
     limit = _counts(pool)
     limit[list(rules.basics)] = rules.size
     lands = decks[:, [*rules.basics, *rules.nonbasic_lands]].sum(dim=1)
     spells_in_pool = sum(1 for card in pool if card not in {*rules.basics, *rules.nonbasic_lands})
-    # A pool that cannot fill a deck within the land range plays every spell it has and lands for the rest.
+    # When a pool has too few spells to fill a deck within the land range, a legal deck contains every spell in
+    # the pool, and lands in the other slots.
     fewest = max(rules.min_lands, rules.size - spells_in_pool)
     most = max(rules.max_lands, rules.size - spells_in_pool)
     return (
@@ -56,7 +61,7 @@ def _legal(decks: Tensor, *, pool: Pool, rules: BuildRules) -> Tensor:
 
 
 def _colour_scorer(decks: Tensor) -> Tensor:
-    # Rewards a deck for being one colour, blue above red, with exactly four lands.
+    # Rewards a deck for staying in one colour, blue more than red, and for having exactly four lands.
     red = decks[:, [RED_BASIC, *set(RED_SPELLS)]].sum(dim=1)
     blue = decks[:, [BLUE_BASIC, *set(BLUE_SPELLS)]].sum(dim=1)
     lands = decks[:, [RED_BASIC, BLUE_BASIC, NONBASIC_LAND]].sum(dim=1)

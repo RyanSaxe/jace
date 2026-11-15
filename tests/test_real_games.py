@@ -55,7 +55,8 @@ def test_real_games_train_the_player_its_win_chance_and_the_guess_model_for_one_
     guess = GuessModel(embedding, engine_to_card=engine_to_card, layout=layout, width=32, layers=1, heads=2)
     win_chance = WinChanceModel(embedding, engine_to_card=engine_to_card, layout=layout, width=32, layers=1, heads=2)
     matchups = [matchup(), matchup()]
-    # A format whose boosters hold every card of the pool equally often, before any of its decks is known.
+    # No deck is known yet, so the guess model gets the day-0 meta, which is built from the boosters alone.
+    # Here the boosters contain every card of the pool equally often.
     guess.set_meta(day_zero_meta(torch.ones(len(pool)), deck_size=40))
 
     own = functools.partial(own_parameters, embedding=embedding)

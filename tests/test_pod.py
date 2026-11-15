@@ -1,8 +1,10 @@
 """Check the draft pod's transitions through its public states.
 
 The tests drive whole small drafts and single picks through `open_pod` and
-`advance` only. They never look at private helpers, so the pod's internals
-can change without touching them.
+`advance` only. They never call private helpers, so the pod's internals can
+change without any edit to these tests. The boosters are numbered cards
+written by hand, so the pack each seat holds after a pick shows which way
+the packs passed.
 """
 
 import pytest

@@ -1,7 +1,11 @@
 """Check that the evaluation numbers mean what a reader takes them to mean.
 
-A win rate's range must tighten as games are added, and an honest guess must
-read as honest. Both are checked on results with a known answer.
+Both tests use results whose answer is known. The win-rate test scores 20
+games and then 2,000 games, half of them won each time, so only the number
+of games differs. The guess test states each card's true chance, one of
+0.05, 0.35 and 0.85, and draws whether the card is in hand at that chance.
+Each of the three chances falls in its own range of stated chance, and in
+each of those ranges the report's stated and observed chances must match.
 """
 
 import torch
@@ -27,7 +31,9 @@ def test_the_range_around_a_win_rate_narrows_as_games_are_added() -> None:
 
 def test_a_guess_that_states_true_frequencies_reads_as_honest_and_beats_the_base_rate() -> None:
     generator = torch.Generator().manual_seed(0)
-    # Each card's chance changes from one decision to the next, as it does when a guess reads the board.
+    # Each card's chance changes from one decision to the next, as it does when the guess model reads the board. The
+    # base rate gives each card its frequency over all the decisions, and it would guess as well as the true
+    # chances if those never changed.
     chance = torch.tensor([[0.05, 0.35, 0.85], [0.85, 0.05, 0.35]]).repeat(10000, 1)
     truth = (torch.rand(chance.shape, generator=generator) < chance).float()
 

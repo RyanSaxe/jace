@@ -1,10 +1,10 @@
-"""Check that a round played in worker processes survives a worker that stops moving.
+"""Check rounds of games played in worker processes, through `jace.train.workers`.
 
-Both tests run real worker processes on the toy game. One makes a worker
-stall for good in its first round and checks that the round still returns
-the other workers' games, counts the stalled worker's as lost, and that the
-next round is whole again. The other checks that every decision of a round
-was made with the weights sent for that round.
+Both tests start real worker processes that play the toy game. The workers
+share no memory, so the stalling test uses a marker file to choose which
+worker stalls. The first worker to create the file stalls. Every other
+worker, including the one started to replace it, finds the file already
+there and plays on.
 """
 
 import functools
@@ -30,9 +30,9 @@ def _blank_guesser(boards: Boards, _earlier: Earlier) -> Guess:
 
 
 def _toy_actor(seed: int, *, stall_marker: Path | None) -> Actor:
-    # The toy game, four games at once, and a policy whose only weights are one score for each of
-    # the three picks, so a decision's scores show which weights made it. With a marker path, the
-    # first worker to make a decision creates the file and never returns.
+    # An actor that plays the toy game, four games at once. Its policy's only weights are one score for each
+    # of the three picks, so a decision's logits show which weights made it. With a marker path, the first
+    # worker to make a decision creates the file and then sleeps for ten minutes instead of returning.
     scores = nn.Embedding(1, HAND_SIZE)
 
     def policy(boards: Boards, _guess: Guess) -> Tensor:

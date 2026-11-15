@@ -1,9 +1,11 @@
 """Check the manabot adapter by playing real games through `GameBatch`.
 
-Every test runs the real engine on two 40-card decks, 17 basic lands and 23
-creatures of one colour each. The tests read only the adapter's public names
-and the arrays a caller receives. Two tests name board arrays, `decklists` and
-`semantic_cards`, because what a seat may see is the behaviour under test.
+The tests play real games on the engine with 40-card decks, each made of 17
+basic lands and 23 creatures of one colour. Only the last test plays no
+game, because `start_batch` rejects its deck before any game starts. The
+tests read only the adapter's public names and the arrays a caller
+receives. Two tests name board arrays, `decklists` and `semantic_cards`,
+because what a seat may see is the behaviour under test.
 """
 
 import random
@@ -27,7 +29,7 @@ _DECK_SIZE = 40
 
 
 def _engine_pool() -> CardPool:
-    # The engine has no rarity. Nothing here reads it, so every card is filed as common.
+    # The engine reports no rarity for its cards. No test here reads rarity, so every card is given common rarity.
     records = [
         CardRecord(name=card.name, set_code=card.set_code, rarity=Rarity.COMMON, text=card.text, program=card.program)
         for card in engine_cards()
@@ -70,12 +72,14 @@ def test_two_batches_with_one_seed_and_the_same_actions_play_identically() -> No
         assert finished == second.act(actions)
         finished_games += len(finished)
 
-    # The comparison must reach past a game's end, where the next game of the list starts on a new seed.
+    # The two batches must also give the same arrays after a game ends, when the next game of the list starts in its
+    # place on a new seed. So at least one game must have ended.
     assert finished_games > 0
 
 
 def test_the_arrays_of_a_decision_keep_their_values_after_later_steps() -> None:
-    # Play keeps every step's arrays without copying them, so no later step may write into them.
+    # `jace.train.play_games` keeps every step's arrays without copying them, so no later step may write into
+    # them.
     pool = _engine_pool()
     batch = start_batch([_matchup(pool)] * 2, pool=pool, games=2, seed=3, boards=BOARD_ARRAYS)
     rng = random.Random(2)
@@ -110,7 +114,9 @@ def test_a_batch_plays_exactly_its_matchups_each_with_its_own_decks_and_then_hol
         ended = batch.act(_random_actions(decisions, rng))
         decisions = batch.decisions()
         if ended and not finished and len(decisions.games) == 2:
-            # The game that took the first free place was dealt from its own decks.
+            # When a game ends, the engine first deals a new game from the old decks in its place, and the batch
+            # then deals the next matchup over it. The first game to end makes room for game 2, whose hands and
+            # libraries must together be exactly the decks of `matchups[2]`.
             row = int(decisions.games.argmax())
             hidden = batch.hidden_cards()
             for seat in (0, 1):
@@ -120,7 +126,7 @@ def test_a_batch_plays_exactly_its_matchups_each_with_its_own_decks_and_then_hol
 
     assert sorted(game.game for game in finished) == list(range(len(matchups)))
     for game in finished:
-        # A game of random play ends with a winner: the engine failed nothing and cut nothing short.
+        # Every game must end with a winner. A game the engine failed on or cut short would end as abandoned.
         assert game.outcome in {Outcome.SEAT_0_WON, Outcome.SEAT_1_WON}
         assert game.decks == matchups[game.game]
 
@@ -135,7 +141,8 @@ def test_hidden_hand_equals_the_hand_the_acting_seat_sees_at_its_first_decision(
     assert not np.array_equal(hidden.hands[0], hidden.hands[1])
 
     for slot, seat in enumerate(decisions.seats.tolist()):
-        # Before any card leaves a hand, the acting seat's own card rows are exactly its hand.
+        # At a game's first decision no card has left a hand, so the acting seat's own rows of
+        # `semantic_cards` list exactly its hand.
         definitions = torch.from_numpy(decisions.boards["semantic_cards"][slot, 0]).long()
         seen = card_ids[definitions[definitions > 0] - 1]
         assert np.array_equal(np.bincount(seen.numpy(), minlength=len(pool)), hidden.hands[slot, seat])
@@ -156,7 +163,8 @@ def test_hand_plus_library_never_exceeds_the_deck_during_random_play() -> None:
         assert (hidden.libraries >= 0).all()
         cards_out_of_library = max(cards_out_of_library, _DECK_SIZE - int(hidden.libraries[0, 0].sum()))
 
-    # Cards were drawn and played, so the bound was tested on more than the opening deal.
+    # More cards left seat 0's library in the first game than the opening hand takes, so the bound was checked
+    # after cards were drawn and played, not only on the opening deal.
     assert cards_out_of_library > _OPENING_HAND
 
 

@@ -1,14 +1,18 @@
 """Run the limited loop end to end on the toy engine with tiny models.
 
-The tests drive a whole iteration through `limited_iteration`, the way a
-user would. One checks that, once the search reads the learning deck
-score, every model was updated and the human-trained score was not. One
-checks that before that switch the builder does not learn and a drafter
-whose rate is zero does not change, which fails if any other model's update
-moves something the drafter reads. One checks the schedule of games: every
-deck plays the same number, none against itself. They prove the pieces fit
-together; they say nothing about how well anything learns, which the tests
-of each piece cover.
+The first two tests drive a whole iteration through `limited_iteration`,
+the way a user would. In their toy setup, four pods of two seats draft
+eight pools, and each of the two blocks of games has one deck from every
+pool. The player, the win chance and the guess are small networks over the
+toy boards, and the drafter, the deck builder and the deck scores are the
+real models at a tiny size.
+
+The deck search uses the human-trained deck score until `check_scores` finds
+the learning deck score better, and from then on it uses the learning one. The
+second test runs an iteration before the switch. It compares the drafter's
+logits as well as its weights, so it also fails if another model's update
+changes something the drafter reads. These tests show that the pieces fit
+together. How well each piece learns is left to its own tests.
 """
 
 import collections
@@ -46,7 +50,7 @@ class _Toy:
     setup: LimitedSetup
     learners: Learners
     play: PlayGames
-    # trained: every model the loop updates once the search reads the learning deck score, by name.
+    # Every model the loop updates once the search uses the learning deck score, keyed by name.
     trained: dict[str, nn.Module]
     embedding: CardTable
 
@@ -177,7 +181,9 @@ def test_an_iteration_after_the_switch_updates_every_model_but_the_human_trained
         rng=random.Random(0),
     )
 
-    # Eight decks play two blocks of three games each, and every game was played to its end.
+    # In each of the two blocks, eight decks play three games each, and every game seats two of them, so the
+    # blocks have 24 games in all. `games` counts only the games that finished with a result, so every game
+    # was played to its end.
     assert metrics["games"] == 24
     assert _moved(watched, before, embedding=toy.embedding) == set(toy.trained)
     assert check.reads_learning

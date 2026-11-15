@@ -1,9 +1,12 @@
 """Check pretraining on human picks through `jace.loops.pretrain` and the drafter.
 
-The drafts here are made up: every pack is random and the "human" always
-takes the pack's lowest card id, a rule a tiny model can learn in a few
-seconds on the CPU. The tests use a real run folder in a temporary
-directory, a real model and real optimizers.
+The pretraining test makes up its drafts. Every pack is random, and the
+"human" always takes the card with the lowest id in the pack. A tiny model
+learns that rule in a few seconds on the CPU. The test uses a real run
+folder in a temporary directory, a real model and real optimizers. The
+whole-draft test scores random packs and picks with an untrained model.
+Every one of its packs contains card 0, because the model reads a pack
+with no cards as padding.
 """
 
 import functools
