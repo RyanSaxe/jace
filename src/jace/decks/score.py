@@ -1,12 +1,15 @@
 """Score a deck by its chance of winning a game.
 
 `DeckScore` reads a deck as a set of distinct cards with copy counts, so the
-order of the cards cannot matter and a deck of any size fits. Its only
-knowledge of the cards comes through the shared `CardVectors`, and none of
-its own parameters has a slot per card, so it scores decks that hold cards
-from a set it was not trained on. `CardSetEncoder` is the part it shares with
-the deck builder: the score reads the mean of its card encodings, and the
-builder reads each card's encoding to score that card.
+order of the cards cannot matter and a deck of any size fits. It reads
+cards only through the shared `CardVectors`, and none of its own parameters
+has a slot per card, so it can score decks that contain cards from a set it
+was not trained on.
+
+The deck builder reads its pool with a `CardSetEncoder` too, but each model
+builds its own encoder, so they share no weights. The deck score reads the
+mean of the card encodings, and the builder reads each card's encoding to
+score that card.
 """
 
 from collections.abc import Callable
@@ -20,7 +23,7 @@ from jace.modules import DROPOUT, FEEDFORWARD_EXPANSION
 
 __all__ = ("CardSetEncoder", "DeckScore", "EmptyCardSetError", "Scorer")
 
-# Takes float [b, cards] copy counts and returns float [b], higher is better.
+# A scorer takes float [b, cards] copy counts and returns float [b], where higher is better.
 type Scorer = Callable[[Tensor], Tensor]
 
 
@@ -32,12 +35,16 @@ class EmptyCardSetError(ValueError):
 class CardSetEncoder(nn.Module):
     """Encode a set of cards, each with a few amounts, as one vector per row.
 
-    A card is in a row's set when any of its amounts is above zero. Each such
-    card becomes one token: its projected embedding plus a learned encoding
-    of its amounts. A transformer encoder reads the tokens. `encode` returns
-    each card's encoding and calling the module returns their mean. Amounts
-    enter through `log1p`, so a count of 17 basic lands stays in the range
-    the encoding saw for small counts.
+    `amounts` is how many amounts each card has. A card is in a row's set
+    when any of its amounts is above zero. Each card in the set becomes one
+    token, its projected embedding plus a learned encoding of its amounts,
+    and a transformer encoder reads the tokens. `encode` returns each card's
+    encoding, and calling the module returns their mean.
+
+    Each amount is encoded as its `log1p`, so a count of 17 basic lands becomes
+    2.9, close to the 0.7 to 1.6 of one to four copies. Both `encode` and
+    calling the module raise `EmptyCardSetError` for a row with no card in its
+    set.
     """
 
     def __init__(self, embedding: CardVectors, *, amounts: int, width: int, layers: int, heads: int) -> None:
@@ -56,9 +63,10 @@ class CardSetEncoder(nn.Module):
         self.encoder: nn.TransformerEncoder = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
 
     def encode(self, amounts: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        # amounts: float [b, cards, amounts]. Returns (tokens, cards, real): each row's present cards, in id order and
-        # then padding, as float [b, longest, width] encodings, int64 [b, longest] card ids and bool [b, longest],
-        # true for a present card. A padding position holds a card that is not present, so no id repeats in a row.
+        # `amounts` is float [b, cards, amounts]. Returns (encoded, cards, real), with one position for each of a
+        # row's present cards in id order, then padding. `encoded` is float [b, longest, width], `cards` is int64
+        # [b, longest] card ids, and `real` is bool [b, longest], true at a present card. A padding position has the
+        # id of a card that is not present, so no id repeats in a row.
         present = amounts.gt(0).any(dim=-1)  # bool [b, cards]
         sizes = present.sum(dim=1)  # int64 [b], distinct cards in each row
         if not bool(sizes.gt(0).all()):
@@ -75,7 +83,7 @@ class CardSetEncoder(nn.Module):
 
     @override
     def forward(self, amounts: Tensor) -> Tensor:
-        # amounts: float [b, cards, amounts]. Returns float [b, width], the mean of the present cards' encodings.
+        # `amounts` is float [b, cards, amounts]. Returns float [b, width], the mean of the present cards' encodings.
         encoded, _, real = self.encode(amounts)
         weights = real.unsqueeze(-1).to(encoded.dtype)
         return (encoded * weights).sum(dim=1) / weights.sum(dim=1)
@@ -89,6 +97,7 @@ class DeckScore(nn.Module):
 
     @override
     def forward(self, decks: Tensor) -> Tensor:
-        # decks: float [b, cards] copy counts. Returns float [b], the logit of winning a game.
+        # `decks` is float [b, cards] copy counts. Returns float [b], the logit of each deck's chance of winning a
+        # game.
         encoded = self.cards(decks.unsqueeze(-1).to(torch.float32))
         return self.head(encoded).squeeze(-1)

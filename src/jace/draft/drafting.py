@@ -1,10 +1,11 @@
 """Run whole drafts for many pods at once and record what each seat saw.
 
-A pod keeps no history, so `run_drafts` builds each seat's `SeatView` as the
-draft goes and returns every view with the final pools. All pods pick in
-step, and each distinct drafter is called once per pick with the views of
-every seat it fills in every pod, so a model picks for all of them in one
-forward pass. Two seats share a drafter only when they hold the same object.
+A pod's state contains no history, so `run_drafts` builds each seat's
+`SeatView` as the draft goes and returns every view with the final pools. All
+pods pick in step. Each distinct drafter is called once per pick with the views
+of every seat it drafts for in every pod, so a model picks for all of them in
+one forward pass. Two seats share a drafter only when their entries in
+`drafters` are the same object.
 """
 
 from collections.abc import Callable, Sequence
@@ -32,13 +33,14 @@ class SeatView:
     picks: tuple[CardId, ...]
 
 
-# Returns one card for each view, in the order of the views. One call picks for many seats.
+# A drafter takes the views of many seats and returns one card for each view, in the order of the views, so one
+# call picks for many seats.
 type Drafter = Callable[[Sequence[SeatView]], Sequence[CardId]]
 
 
 @dataclass(frozen=True, slots=True)
 class DraftRecord:
-    # Indexed by seat, then by pick number.
+    # `views` is indexed by seat, then by pick number.
     views: tuple[tuple[SeatView, ...], ...]
     pools: tuple[Pool, ...]
 
@@ -93,7 +95,7 @@ def _add_views(pod_views: Sequence[list[SeatView]], state: Picking) -> None:
 def _ask_drafters(
     drafters: Sequence[Drafter], seat_groups: Sequence[Sequence[int]], *, views: Sequence[Sequence[Sequence[SeatView]]]
 ) -> list[list[CardId]]:
-    # Calls each distinct drafter once with the newest view of every seat it fills in every pod.
+    # Calls each distinct drafter once with the newest view of every seat it drafts for in every pod.
     # Returns the picks indexed by pod, then seat.
     picks: list[dict[int, CardId]] = [{} for _ in views]
     for seats in seat_groups:
