@@ -68,9 +68,7 @@ plays the games in worker processes:
 
 ```python
 workers = start_workers(build_actor, count=24, seed=0)
-collected, workers = play_on_workers(
-    workers, matchups, weights=weights, stall_seconds=60.0, device=torch.device("mps")
-)
+collected, workers = play_on_workers(workers, matchups, weights=weights, stall_seconds=60.0, device=torch.device("mps"))
 ```
 
 `build_actor` runs inside each worker and returns its models and the
