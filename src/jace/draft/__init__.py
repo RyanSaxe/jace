@@ -1,9 +1,9 @@
 """Simulate booster drafts and pick cards in them.
 
-The pod owns the rules of a draft table and nothing about which card a seat
-should take. Boosters, the loop that runs many pods at once, and the drafter
-model are separate modules that talk to a pod only through its states and
-its one transition.
+The `pod` module defines the rules of a draft table, and nothing about
+which card a seat should take. Three other modules open boosters, run many
+pods at once and define the drafter model. They use a pod only through its
+states and its one transition, `advance`.
 """
 
 from jace.draft.boosters import (

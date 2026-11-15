@@ -1,11 +1,11 @@
 """The types that connect models to the code that plays and trains.
 
-Collection, training and evaluation take a policy and a guesser as plain
-functions over batched tensors, and training also takes a win chance, so
-they work with any model and with the toy engine in tests. The real models
-in this package satisfy these types, and so does a three-line function
-written in a test. Every tensor here has a leading batch axis, one row per
-pending decision.
+The code that collects games, trains and evaluates takes a policy and a
+guesser as plain functions over batched tensors, and training also takes a
+win chance that way. That code therefore works with any model, and with
+the toy engine in tests. The real models in this package satisfy these
+types, and so does a three-line function written in a test. Every tensor
+here has a leading batch axis, with one row for each pending decision.
 """
 
 from collections.abc import Callable, Mapping
@@ -36,13 +36,16 @@ class Earlier:
     mask: Tensor
 
 
-# (boards, guess) -> action logits [n, max_actions] with illegal actions at -inf.
+# Given the boards and a guess, a policy scores every action slot of each board. It returns float
+# [n, max_actions] logits, with -inf for each illegal action.
 type Policy = Callable[[Boards, Guess], Tensor]
 
-# (boards, the game's earlier guesses) -> the new guess, each [n, cards].
+# A guesser makes a new guess from the boards and the same seat's earlier guesses in this game. Each
+# part of the new guess is float [n, cards].
 type Guesser = Callable[[Boards, Earlier], Guess]
 
-# (boards, the opponent's true hidden cards as a `Guess`) -> the acting seat's chance to win [n].
-# Its `deck` is each card's share of the opponent's hand and library, and its `hand` is 1 where
-# the opponent holds the card. Only training calls one, so the hidden cards never reach a player.
+# A win chance estimates the acting seat's chance to win, float [n], from the boards and the
+# opponent's true hidden cards. The hidden cards come as a `Guess`: its `deck` is each card's share
+# of the opponent's hand and library, and its `hand` is 1 where the opponent holds the card. Only
+# training calls a win chance, so the hidden cards never reach a player.
 type WinChance = Callable[[Boards, Guess], Tensor]

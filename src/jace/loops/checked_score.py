@@ -1,25 +1,36 @@
-"""Train a learning copy of the deck score on self-play, and let the search read it once it has earned that.
+"""Train a copy of the deck score on self-play, and switch the deck search to it once it predicts better.
 
-The deck score trained on human decks predicts how humans' decks did in
-humans' hands. Self-play decks win in the hands of the current player, so a
-copy of the score learns from the decks the loop plays, from the first
-iteration, while the human-trained score stays frozen. Before the learning
-copy trains on an iteration's decks, both copies predict those decks'
-records, and that held-out log loss is the test. Every self-play game has
-one winner, so an iteration's decks win half their games on average, while
-the human decks the frozen score was fit to won more. Each copy is tested
-with its mean logit over the decks moved to zero, so the test compares how
-the two rank decks, which is what the search asks of them, and a copy
-cannot earn the switch by learning that average alone. The deck search reads the
-human-trained score until the learning copy's mean test loss over the last
-`switch_iterations` iterations is lower by `switch_margin`, and then reads
-the learning copy for good. The switch is one-way so the search cannot
-flip between two rankings from one noisy iteration to the next.
+The deck score predicts a deck's chance of winning a game, and the deck
+search keeps the builds that the score ranks highest. The score that
+pretraining fit to human decks predicts how those decks did in human
+hands. Self-play decks win or lose in the hands of the current player
+instead, so the loop also trains a copy of the score, the learning copy,
+on the decks it plays. The learning copy trains from the first iteration,
+and the human-trained score stays frozen.
 
-The learning copy trains on the decks of the last `window` iterations with
-a pull toward the human-trained score: the KL divergence between their
-Bernoulli predictions on the same decks, so it keeps what the human decks
-taught wherever self-play has said little.
+The loop tests both scores on an iteration's decks before the learning copy
+trains on them, so the learning copy is tested on decks it has not seen. A
+score's test loss is the log loss of its predictions against each deck's record
+of wins and losses. Self-play decks play only each other, so an iteration's
+decks win half their games on average, while the human decks that the frozen
+score was fit to won more often. Each score's logits are therefore shifted to a
+mean of zero over the decks before the test. The test then compares how the two
+scores rank the decks, which is all the search uses. With the mean removed,
+learning the average win rate alone cannot make the learning copy pass the
+test.
+
+The search reads the human-trained score until the learning copy's mean
+test loss over the last `switch_iterations` iterations is lower by at
+least `switch_margin`. From then on it reads the learning copy. The switch
+is one-way so that one noisy iteration cannot flip the search between two
+rankings.
+
+The learning copy trains on the decks of the last `window` iterations. Its
+loss adds a pull toward the human-trained score: the KL divergence between
+the two scores' Bernoulli predictions for the same decks. The fit to the
+records weighs each deck by its games, while the pull weighs every deck
+the same. On decks with few games, the learning copy therefore stays close
+to the human-trained score.
 """
 
 from collections.abc import Sequence
@@ -37,14 +48,15 @@ __all__ = ("FIRST_CHECK", "PlayedDecks", "ScoreCheck", "ScoreRule", "check_score
 
 @dataclass(frozen=True, slots=True)
 class ScoreRule:
-    """The dials of the learning deck score and of the switch to it.
+    """The settings of the learning deck score and of the switch to it, fixed for a run.
 
-    The learning copy trains on the decks of the last `window` iterations,
-    `passes` gradient steps an iteration over all of them, and `pull`
-    weighs its KL divergence from the human-trained score. The search
-    switches to it once its mean test loss over the last
-    `switch_iterations` iterations is below the human-trained score's by
-    at least `switch_margin` nats per game.
+    The learning copy trains on the decks of the last `window` iterations.
+    It takes `passes` gradient steps an iteration, each over all of those
+    decks, and `pull` weighs its KL divergence from the human-trained score.
+
+    The search switches to the learning copy once the learning copy's mean
+    test loss over the last `switch_iterations` iterations is below the
+    human-trained score's by at least `switch_margin` nats per game.
     """
 
     window: int
@@ -56,7 +68,8 @@ class ScoreRule:
 
 @dataclass(frozen=True, slots=True)
 class PlayedDecks:
-    # The decks one iteration played: decks float [m, cards], wins and games float [m], every deck with a game.
+    # The decks played in one iteration, each with at least one game. `decks` is float [m, cards], each deck's
+    # copies of each card, and `wins` and `games` are float [m], each deck's record.
     decks: Tensor
     wins: Tensor
     games: Tensor
@@ -64,14 +77,16 @@ class PlayedDecks:
 
 @dataclass(frozen=True, slots=True)
 class ScoreCheck:
-    """What the deck-score check carries from one iteration to the next.
+    """What the deck-score check passes from one iteration to the next.
 
-    `recent` holds the played decks of the last iterations, oldest first,
-    which the learning copy trains on. `human_losses` and `learning_losses`
-    are the two copies' test losses over the last iterations, oldest
-    first. `reads_learning` is whether the search reads the learning copy:
-    it starts false, turns true once the learning copy has earned it, and
-    never turns back.
+    `recent` contains the played decks of the last `ScoreRule.window`
+    iterations, oldest first, and the learning copy trains on them.
+    `human_losses` and `learning_losses` are the two scores' test losses
+    over the last `ScoreRule.switch_iterations` iterations, oldest first.
+
+    `reads_learning` is whether the deck search reads the learning copy. It
+    starts false and becomes true once the learning copy passes the test.
+    It never becomes false again.
     """
 
     recent: tuple[PlayedDecks, ...]
@@ -85,23 +100,29 @@ FIRST_CHECK = ScoreCheck(recent=(), human_losses=(), learning_losses=(), reads_l
 
 
 def _centered(logits: Tensor, *, games: Tensor) -> Tensor:
-    # The logits less their mean over the decks, each deck weighed by its games.
+    # Each deck is weighed by its games, as `score_loss` weighs it, so the logits average zero per game.
     return logits - (logits * games).sum() / games.sum()
 
 
 def check_scores(
     check: ScoreCheck, *, played: PlayedDecks, human: Scorer, learning: Scorer, rule: ScoreRule
 ) -> tuple[ScoreCheck, Metrics]:
-    """Test both deck scores on an iteration's decks and return the check after it, with the losses.
+    """Test both deck scores on an iteration's decks, and return the next check with the iteration's metrics.
 
-    Call it before the learning copy trains on `played`, so the test is on
-    decks it has not seen. `human` and `learning` return the logit of
-    winning a game, and each is tested with its mean logit over the decks
-    moved to zero. The new check holds `played` in its window and the two
-    losses in its history, and reads the learning copy if it already did or
-    if the learning copy's mean loss over the last `rule.switch_iterations`
-    iterations is below the human-trained one's by `rule.switch_margin`.
-    An iteration whose decks played no game leaves the check as it was.
+    Call it before the learning copy trains on `played`, so that the
+    learning copy is tested on decks it has not seen. `human` and
+    `learning` each return the logit of winning a game. Each score's logits
+    are shifted to a mean of zero over the decks before the test.
+
+    The new check adds `played` to its window and the two test losses to
+    its history. If `check.reads_learning` is true, so is the new check's.
+    Otherwise it turns true when the history has losses from
+    `rule.switch_iterations` iterations and the learning copy's mean loss
+    over them is below the human-trained score's by at least
+    `rule.switch_margin`.
+
+    The metrics are the two test losses and the new `reads_learning`. When
+    `played` contains no deck, it returns `check` unchanged and no metrics.
     """
     if len(played.games) == 0:
         nothing: dict[str, float] = {}
@@ -139,10 +160,12 @@ def train_learning_score(
 ) -> Metrics:
     """Take `rule.passes` steps of the learning copy on the recent decks, pulled toward the human-trained score.
 
-    Each step's loss is the binomial log loss of every recent deck's record
-    plus `rule.pull` times the mean KL divergence from the learning copy's
-    Bernoulli prediction for each deck to the human-trained one's. Returns
-    the last step's two parts. `human` is not changed.
+    Every step fits the records of all the decks in `recent` at once, and
+    `rule.pull` weighs the pull against that fit, as the module docstring
+    describes. `human` is only read, never changed.
+
+    Returns the fit and the pull of the last step. With no recent decks, it
+    takes no step and returns no metrics.
     """
     if not recent:
         nothing: dict[str, float] = {}
@@ -152,8 +175,9 @@ def train_learning_score(
     games = torch.cat([played.games for played in recent])
     with torch.no_grad():
         human_logits = human(decks)
-    # A logit beside a zero is a two-way softmax whose first odds are sigmoid(logit), so `kl_to` between two such
-    # pairs is the KL divergence between the two Bernoulli predictions.
+    # `kl_to` compares softmax odds, so each logit is paired with a zero: the softmax of (logit, 0) gives the first
+    # choice the chance sigmoid(logit). `kl_to` on these pairs is therefore the KL divergence between the two
+    # Bernoulli predictions.
     zeros = torch.zeros_like(human_logits)
     human_odds = torch.stack((human_logits, zeros), dim=-1)
     fit = pull = torch.zeros(())

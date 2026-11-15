@@ -1,13 +1,18 @@
 """Example training loops and the schedules that drive them.
 
-A loop here is a short function assembled from the pieces in the other
-modules, and this is the only package that may import `jace.draft`. The
-limited loop shows the whole system working together and how dials are
-scheduled; it is meant to be read, copied and changed. Each limited
-format's sizes are one `LimitedFormat` record, which every entry point
-looks up by set code. The limited loop carries a `ScoreCheck` from one
-iteration to the next, which says when its deck search may trust the deck
-score that learns from self-play.
+A loop here is a short function built from the pieces in jace's other
+packages. This is the only package that may import `jace.draft`, so that
+constructed play needs no drafting code. The limited loop shows the whole
+system working together. It also shows how a schedule sets the dials, the
+values such as learning rates that change from one iteration to the next.
+The loop is meant to be read, copied and changed.
+
+The sizes of each limited format are one `LimitedFormat` record, which
+every training entry point looks up by set code. The limited loop passes a
+`ScoreCheck` from one iteration to the next. The check contains the recent
+test losses of the two deck scores, and whether the deck search has
+switched from the human-trained score to the one that learns from
+self-play.
 """
 
 from jace.loops.checked_score import (

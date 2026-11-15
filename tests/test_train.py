@@ -1,9 +1,11 @@
 """Check the training pieces on the toy game and on hand-worked examples.
 
-The tests use only what `jace.train` exports, with a tiny real model and the
-toy engine. They assert outcomes a loop author relies on: credit reaches the
-right decisions, a round plays exactly the games it was given, and a player
-actually gets better at a game whose best play is known.
+The tests use only what `jace.train` exports, with tiny real models and the
+toy engine. The toy game is High Card, where the best play is always to
+pick the highest card. Because that best play is known, one test can check
+that a player really gets better. The tests of credit and of earlier
+guesses use a few rows written by hand, where every expected value can be
+worked out.
 """
 
 from typing import override
@@ -35,7 +37,9 @@ def _blank_guesser(boards: Boards, _earlier: Earlier) -> Guess:
 
 
 def test_advantages_credit_each_decision_with_the_later_surprises_of_its_own_seat_and_game() -> None:
-    # Game 0, seat 0 decides at rows 0 and 2 and wins. Seat 1 decides at row 1 and loses.
+    # In game 0, seat 0 decides at rows 0 and 2 and wins, and seat 1 decides at row 1 and loses. A decision's
+    # surprise is the change from its value to its seat's next value, or, at the seat's last decision, to the
+    # result.
     games = torch.tensor([0, 0, 0])
     seats = torch.tensor([0, 1, 0])
     values = torch.tensor([0.5, 0.5, 0.7])
@@ -50,7 +54,8 @@ def test_advantages_credit_each_decision_with_the_later_surprises_of_its_own_sea
 
 
 def test_earlier_guesses_are_the_same_seats_previous_guesses_newest_first() -> None:
-    # Rows 0, 2, 3 are game 0 seat 0. Row 1 is the other seat. Each guess is marked by its row number.
+    # Rows 0, 2 and 3 are seat 0 of game 0, and row 1 is seat 1. Each guess is marked with its row number, so
+    # the test can see which rows' guesses come back.
     games = torch.tensor([0, 0, 0, 0])
     seats = torch.tensor([0, 1, 0, 0])
     marks = torch.arange(4.0)[:, None]
@@ -64,7 +69,7 @@ def test_earlier_guesses_are_the_same_seats_previous_guesses_newest_first() -> N
 
 
 def test_play_games_plays_exactly_the_games_it_was_given_and_returns_rows_of_no_other_game() -> None:
-    # Each matchup has decks no other has, so a result names the game it belongs to.
+    # Each matchup's decks appear in no other matchup, so a finished game's decks show which matchup it played.
     matchups = [((game,), (game + 100,)) for game in range(23)]
 
     collected = play_games(

@@ -1,9 +1,9 @@
 """Run a Hugging Face text-embedding model as the encoder `text_vectors` takes.
 
-This is the only module that imports `transformers`, and `jace.data` does
-not import it, because loading that package takes about half a second and
-only a run that embeds card text needs it. Import `hugging_face_encoder`
-from here, by this module's full name.
+This is the only module that imports `transformers`. Loading that package
+takes about half a second, and only a run that embeds card text uses it, so
+`jace.data` does not import this module. Import `hugging_face_encoder` from
+`jace.data.hugging_face` by its full name.
 """
 
 from collections.abc import Sequence
@@ -22,11 +22,14 @@ _TEXTS_PER_BATCH = 64
 def hugging_face_encoder(model_name: str, *, device: torch.device) -> TextEncoder:
     """Return an encoder that runs the Hugging Face model `model_name` on `device`.
 
-    The model and its tokenizer are loaded, and downloaded if this machine
-    has no copy, when the encoder is first called and not before, so a run
-    that finds its vectors in the cache never loads them. A text's vector is
-    the mean of the model's last hidden state over the text's tokens. A text
-    longer than the model's limit is cut off at the limit.
+    The encoder loads the model and its tokenizer each time it is called,
+    and not before, so a run that finds its vectors in the cache never loads
+    them. If this machine has no copy, `transformers` downloads them first.
+
+    A text's vector is the mean of the model's last hidden state over the
+    text's tokens. A text longer than the model's limit is cut off at the
+    limit. The encoder raises `ValueError` when Hugging Face has no
+    tokenizer for `model_name`.
     """
 
     def encode(texts: Sequence[str]) -> Tensor:

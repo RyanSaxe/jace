@@ -1,12 +1,15 @@
-"""Models that play a game, the model that judges a position for training, and their types.
+"""Models that play a game, the model that estimates the chance to win for training, and their types.
 
-The guess model predicts the opponent's deck and hand from the meta, what
-decks of the format look like, and the player model chooses actions with
-that guess as input. The win-chance model estimates
-the acting seat's chance to win from the board and the opponent's true
-hidden cards; only training calls it. Code that runs games depends only on
-the `Policy` and `Guesser` function types, and training also on the
-`WinChance` type, never on a model class.
+The guess model predicts the opponent's deck and hand. It reads the board,
+the cards the opponent has shown or revealed, and the meta, which describes
+what decks of the format look like. The player model chooses actions, and
+the guess is one of its inputs. The win-chance model estimates the acting
+seat's chance to win from the board and the opponent's true hidden cards.
+Only training calls the win-chance model.
+
+Code that runs games depends only on the `Policy` and `Guesser` function
+types, and training also depends on the `WinChance` type. None of that code
+depends on a model class.
 """
 
 from jace.play.guess import GuessModel, MetaNotSetError

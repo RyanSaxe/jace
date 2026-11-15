@@ -1,12 +1,13 @@
 """Build the card pool and the facts printed on each card from MTGJSON and 17Lands tables.
 
-The printed facts are what the card encoder reads besides a card's text and
-engine program: mana value, power, toughness, colours, types, rarity and
-whether the card is on the bonus sheet. All of them are known before anyone
-plays a card, so they exist for a set with no human data. The 17Lands
-statistics are read only for each card's average pick position, which a
-baseline ranks by; no card vector holds them. MTGJSON gives basic lands the
-rarity "common", so basics are recognised by name.
+Besides a card's text and engine program, the card encoder reads a few
+facts printed on the card. They are its mana value, power, toughness,
+colours, types and rarity, and whether it is on the bonus sheet. All of
+them are known before anyone plays the card, so a set with no human data
+has them too.
+
+Of the 17Lands statistics, only each card's average pick position is read,
+for a baseline that ranks cards by it. No card vector includes it.
 """
 
 from collections.abc import Mapping
@@ -21,10 +22,11 @@ from jace.data.store import SMALLEST_SPREAD
 
 __all__ = ("SetCards", "card_table")
 
+# MTGJSON gives basic lands the rarity "common", so `card_table` recognises basics by name.
 _BASIC_LANDS = frozenset({"Plains", "Island", "Swamp", "Mountain", "Forest"})
 _COLOURS = ("W", "U", "B", "R", "G")
 _TYPES = ("Creature", "Instant", "Sorcery", "Enchantment", "Artifact", "Land")
-# The printed numbers, standardised. Every card has a mana value, so only power and toughness
+# The printed numbers, which `card_table` standardises. Every card has a mana value, so only power and toughness
 # get a column that marks them missing.
 _NUMBERS = ("mana_value", "power", "toughness")
 _SOMETIMES_MISSING = ("power", "toughness")
@@ -34,14 +36,16 @@ _SOMETIMES_MISSING = ("power", "toughness")
 class SetCards:
     """One card set: its pool, and per-card tensors in card id order.
 
-    `printed` is float32 `[cards, printed facts]`, with one name per column
-    in `printed_names`. Mana value, power and toughness have mean zero and
-    spread one over the cards that have a value. A card with no power or
-    toughness, or one printed as `*`, gets zero there and one in the
-    `no_power` or `no_toughness` column. The other columns are 0/1 flags
-    for the colours, the types, the bonus sheet and the rarity. `ata` is
-    float32 `[cards]`, the average pick number a card was taken at, NaN for
-    a card nobody took. `mana_value` is float32 `[cards]`, as printed.
+    `printed` is float32 `[cards, printed facts]`, and `printed_names`
+    gives each column's name. Mana value, power and toughness have mean
+    zero and spread one over the cards that have a value. A card with no
+    power or toughness, or one printed as `*`, gets zero in that column and
+    one in the `no_power` or `no_toughness` column. The other columns are
+    0/1 flags for the colours, the types, the bonus sheet and the rarity.
+
+    `ata` is float32 `[cards]`, the average pick number at which humans
+    took each card, and NaN for a card nobody took. `mana_value` is float32
+    `[cards]`, the mana value as printed, not standardised.
     """
 
     pool: CardPool
@@ -56,18 +60,20 @@ def card_table(
 ) -> SetCards:
     """Read a set's printed card attributes, and the average pick position from its 17Lands statistics.
 
-    `attributes` has one row per card with the columns `name`, `set_code`,
-    `rarity`, `color`, `card_type`, `mana_value`, `power`, `toughness`,
-    `is_bonus_sheet` and `oracle_text`, and its row order becomes the card
-    ids. `statistics` has a `name` column and an `ata` column. `programs`
-    maps a printed name to the engine's tokens for that card. A card it
-    lacks gets an empty program, which marks it as one the engine cannot
-    play.
+    `attributes` has one row per card, and the card ids follow its row
+    order. It must have the columns `name`, `set_code`, `rarity`, `color`,
+    `card_type`, `mana_value`, `power`, `toughness`, `is_bonus_sheet` and
+    `oracle_text`. `statistics` must have a `name` column and an `ata`
+    column.
 
-    `read_set` returns the statistics aggregated over every draft of the
-    set, held-out drafts included, so a baseline that ranks by `ata` has
-    seen a summary of the held-out picks and its held-out score is a little
-    too high.
+    `programs` maps a printed name to the engine's program for that card, a
+    flat run of (kind, value) integer pairs. A card missing from `programs`
+    gets an empty program, which marks it as a card the engine cannot play.
+
+    `read_set` returns statistics that spells aggregated over every draft of
+    the set, held-out drafts included. A baseline that ranks cards by `ata`
+    therefore ranks them by statistics that include the held-out picks, and
+    its held-out score is a little too high.
     """
     cards = attributes.join(statistics, on="name", how="left", maintain_order="left")
     records = [

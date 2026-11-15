@@ -1,13 +1,19 @@
-"""Matches on paired deals, as the scoring command and the training loops both play them.
+"""Matches on paired deals, played the same way by the scoring command and the training loops.
+
+A paired deal is two decks and an engine seed. It is played as four games,
+so that each player plays each deck from each seat.
 
 `jace.loops.score` scores saved checkpoints against each other, and the
 training entry points score the player they are training every few
 iterations. Both deal from held-out human decks, seat the players through
-`jace.engine.scoring` and summarize with `jace.eval`, so the pieces they
-share live here and a number in a training curve means what the same number
-means in the scoring table. `score_against_scripted` is the in-training
-form: one player, sampling its actions and taking its top one, against
-manabot's three scripted players, each result appended to the run's record.
+`jace.engine.scoring` and summarize the games with `jace.eval`. The pieces
+they share are here, so a number in a training curve means the same as
+that number in the scoring table.
+
+The training entry points use `score_against_scripted`. It plays one
+player against manabot's three scripted players, once sampling its actions
+and once taking its top action, and appends each result to the run's
+evaluations.
 """
 
 import copy
@@ -51,7 +57,8 @@ __all__ = (
 
 # manabot's scripted players, by the name a result is recorded under.
 SCRIPTED: Mapping[str, Player] = {"random": random_seat, "greedy": greedy_seat, "heuristic": heuristic_seat}
-# The engine takes an unsigned 32-bit seed.
+# A deal's engine seed is drawn with this many bits. The engine accepts any seed from 0 to 2**64 - 1, so every
+# such seed fits.
 _ENGINE_SEED_BITS = 31
 
 
@@ -59,11 +66,13 @@ _ENGINE_SEED_BITS = 31
 class Harness:
     """The settings of a training run's own scoring, fixed for the whole run.
 
-    `deals` are the paired deals every evaluation plays, so two iterations
-    of a run are scored on the same decks and shuffles. `names` holds the
-    engine's name of each card by `CardId`. Games run in `workers`
-    processes, a game longer than `game_seconds` is recorded as hung, and
-    every range resamples the deals `resamples` times.
+    `deals` are the paired deals played at every evaluation, so every
+    evaluation in a run uses the same decks and shuffles. `names` is the
+    engine's name of each card, indexed by `CardId`.
+
+    The games run in `workers` processes, and a game longer than
+    `game_seconds` is recorded as hung. Each win rate's range comes from
+    resampling the deals `resamples` times.
     """
 
     deals: Sequence[Deal]
@@ -86,14 +95,17 @@ def draw_deals(decks: Sequence[Deck], *, count: int, seed: int) -> list[Deal]:
 def model_player(player: PlayerModel, guess: GuessModel, *, history: int, action: ActionChoice) -> Player:
     """Freeze the two models as they are now into a player for `jace.engine.scoring`.
 
-    The player holds its own copies on the CPU, so a match scores the
-    weights of this moment while training goes on, and the copies can be
-    sent to the processes that play the games whatever device the models
-    train on. The copy of the guess model keeps the meta the guess model
-    has now, from decks of earlier rounds, and never sees the decks the
-    match deals. `history` is how many earlier guesses the guess model is
-    shown, and `action` is whether the player samples its action or takes
-    its top one.
+    The player contains its own copies of the models on the CPU. A match
+    therefore scores the weights of this moment while training goes on,
+    and the copies can be sent to the processes that play the games
+    whatever device the models train on.
+
+    The guess model's copy has the meta that the guess model has now, built
+    from the decks of earlier rounds. The decks dealt in the match are never
+    added to it.
+
+    `history` is how many earlier guesses the guess model is shown, and
+    `action` is whether the player samples its action or takes its top one.
     """
     frozen_player = copy.deepcopy(player).cpu().requires_grad_(requires_grad=False)
     frozen_guess = copy.deepcopy(guess).cpu().requires_grad_(requires_grad=False)
@@ -117,9 +129,10 @@ def play_matches(
     game_seconds: float,
     decklists: Literal["open", "closed"],
 ) -> list[tuple[Played[GuessTally], ...]]:
-    # Plays `games` once for each pair of players A and B, seated as each game says, all in one call so
-    # the worker processes start once. Returns, for each pair, one result for each game, in order, with
-    # the tally of each seat's hand guesses.
+    # Plays every game of `games` once for each pair of players (A, B). Player A takes each game's `a_seat`, and
+    # player B takes the other seat. All the games go to one `play_games` call so that the worker processes start
+    # only once. Returns one tuple per pair, with a result for each game in the order of `games`, and each result
+    # contains the tally of each seat's hand guesses.
     seatings = [
         Seating(
             seed=game.seed,
@@ -142,7 +155,8 @@ def play_matches(
 
 
 def guess_details(tally: GuessTally) -> dict[str, object]:
-    # The guess report as JSON values, with null for a range of stated chance that holds no guess.
+    # The guess report as JSON values, or {} when the tally contains no guess. A range of stated chance that contains
+    # no guess is NaN in the report and null here, because run records are strict JSON, which has no NaN.
     if not tally.pairs:
         return {}
     report = guess_report(tally)
@@ -164,17 +178,24 @@ def score_against_scripted(
     harness: Harness,
     seed: int,
 ) -> dict[ActionChoice, dict[str, MatchScore]]:
-    """Score each of `players` against each scripted player and record the results under `checkpoint`.
+    """Score each of `players` against each scripted player, and record the results under `checkpoint`.
 
-    `players` holds one player for each way it chooses its action. Each
-    meets every opponent on all of the harness's deals, four games a deal,
-    and every game of every match is played in one call, so the worker
-    processes start once and share out all the games. Each result is
-    appended to the run's evaluations with the games that had no result,
-    the guess model's loss on those games and how the player chose its
-    actions, in the same fields `jace.loops.score` writes. Each choice's
-    ranges are resampled from a generator seeded with `seed`. Returns the
-    player's score against each opponent, by choice and opponent name.
+    `players` maps each way of choosing an action to a player that chooses
+    that way. Each player plays every scripted opponent on all of the
+    harness's deals, four games a deal. All the games of all the matches
+    are played in one `play_matches` call, so the worker processes start
+    only once and share out the games.
+
+    Each result is appended to the run's evaluations. Besides the win rate
+    and its range, an entry contains the counts of finished, abandoned and
+    hung games, the guess model's report on the games and how the player
+    chose its actions. Its fields are named as in the entries that
+    `jace.loops.score` writes, which also contain `seed` and
+    `games_per_second`.
+
+    The ranges for each action choice are resampled from a generator
+    seeded with `seed`. Returns the score against each opponent, by action
+    choice and then by opponent name.
     """
     games = legs(harness.deals)
     matches = [(action, name) for action in players for name in SCRIPTED]

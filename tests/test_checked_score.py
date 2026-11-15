@@ -1,11 +1,12 @@
 """Check when the deck search switches to the learning deck score, through `check_scores`.
 
-The two scores here are plain functions: the human-trained one predicts an
-even chance for every deck, and the learning one predicts the chances it is
-given. When those are the decks' true chances, the learning one's test loss
-is lower by an amount the test controls through how far the chances are
-from even. Each iteration's records are drawn at the true chances with a
-fixed seed.
+The two scores here are plain functions. The human-trained score predicts
+the same chance for every deck, an even one unless a test sets another. The
+learning score predicts the chances a test gives it. When a test gives it
+the decks' true chances, its log loss on the decks' records is lower than
+the human-trained score's, and the gap grows the further those chances are
+from even. In each iteration, `_iterations` draws every deck's wins out of
+200 games at its true chance, from a generator with a fixed seed.
 """
 
 import torch
@@ -43,7 +44,8 @@ def _iterations(
 
 
 def test_the_search_switches_only_once_the_learning_score_is_better_by_the_margin_over_enough_iterations() -> None:
-    # Chances 0.5 +- 0.25 make the truth beat an even guess by about 0.13 nats a game; +- 0.05 by about 0.005.
+    # Half the decks win 75% of their games and half win 25%. Predicting those chances beats an even guess by
+    # about 0.13 nats a game, far above the 0.01 margin. At 55% and 45% the gain is about 0.005 nats, below it.
     spread = torch.arange(_DECKS) % 2 * 2 - 1.0
     clear, slight = 0.5 + 0.25 * spread, 0.5 + 0.05 * spread
     clearly_better = _iterations(clear, believed=clear, count=4, check=FIRST_CHECK)
@@ -55,8 +57,10 @@ def test_the_search_switches_only_once_the_learning_score_is_better_by_the_margi
 
 
 def test_a_learning_score_that_only_corrects_the_human_scores_average_does_not_earn_the_switch() -> None:
-    # Every deck wins half its games. The human-trained score gives every deck 0.65, which costs it about
-    # 0.05 nats a game, five times the margin, but it ranks the decks no worse than the learning score's 0.5.
+    # Every deck wins half its games, and the human-trained score gives every deck 0.65. Compared as they are,
+    # 0.65 would lose to 0.5 by about 0.05 nats a game, five times the margin. `check_scores` moves each
+    # score's mean logit to zero before it compares them, so only the ranking counts, and a constant 0.65
+    # ranks the decks no worse than the learning score's constant 0.5.
     even = torch.full((_DECKS,), 0.5)
     checks = _iterations(even, believed=even, count=4, check=FIRST_CHECK, human_believes=0.65)
 
@@ -66,7 +70,8 @@ def test_a_learning_score_that_only_corrects_the_human_scores_average_does_not_e
 def test_the_switch_is_one_way() -> None:
     clear = 0.5 + 0.25 * (torch.arange(_DECKS) % 2 * 2 - 1.0)
     switched = _iterations(clear, believed=clear, count=3, check=FIRST_CHECK)[-1]
-    # Every deck now wins half its games, so the learning score's confident guesses cost it.
+    # From here on, every deck wins half its games, so the learning score's confident predictions lose to the
+    # human-trained score's even ones.
     after = _iterations(torch.full((_DECKS,), 0.5), believed=clear, count=4, check=switched)
 
     assert switched.reads_learning

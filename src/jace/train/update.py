@@ -1,16 +1,21 @@
 """Turn a loss into a training step, and the two updates that need a rollout.
 
-`apply` is the one place a gradient step happens: it steps every optimizer
-it is given. `update_player` and `update_guess` walk a rollout in slices,
-because the player's rule filters decisions over the whole rollout and the
-guess model needs each decision's earlier guesses. Both take the rows in a
-new random order on every pass. A rollout lists its games one worker after
-another, so a slice cut in play order would hold a handful of games, and
-its gradient would follow those games and not the round. `update_player`
-also trains the win chance its advantages come from, on the same slices.
-Both run on the device that holds the rollout, which must be the models'
-device: every slice is cut and every loss computed there, and the losses
-are read back once, after the last pass.
+`apply` is the one place a gradient step happens, and it steps every
+optimizer it is given. `update_player` and `update_guess` take a whole
+rollout and go through it in slices. They need the whole rollout because the
+decisions the player is trained on are picked by a quantile over all of
+them, and because the guess model reads each decision's earlier guesses.
+`update_player` also trains the win chance that its advantages come from,
+on the same slices.
+
+Both take the rows in a new random order on every pass. A rollout lists its
+games one worker after another, so a slice cut in play order would contain
+only a handful of games. That slice's gradient would follow those few games
+rather than the whole round.
+
+Both run on the rollout's device, which must also be the models' device.
+Every slice is cut and every loss computed there, and the losses are read
+back once, after the last pass.
 """
 
 from collections.abc import Mapping, Sequence
@@ -61,18 +66,27 @@ def update_player(
 ) -> Metrics:
     """Run `passes` passes of the player's update and its win chance's over `rollout`.
 
-    First the win chance of every row is computed, in slices of
-    `slice_rows` and without gradients, from the acting seat's boards and
-    the opponent's true hidden cards. The advantages, with
-    `lam_advantage`, and the win chance's targets, the lambda-returns with
-    `lam_value`, are computed once from those. So are the decisions that
-    teach the policy: the learner's own, with an advantage at least as
-    large as `rule` asks. Every pass takes the rows in a new random order
-    drawn from `generator`, and each slice steps the policy on its loss
-    with `policy_optimizers` and then the win chance on its error to the
-    targets with `win_chance_optimizers`. Returns the policy's mean loss as
-    `loss` and the win chance's as `win_chance_loss`, the share of decisions
-    kept, and the learner's mean advantage size before any normalizing.
+    The win chance reads the acting seat's boards and the opponent's true
+    hidden cards. Before the first pass, its predictions give the
+    advantages, the win chance's own targets and the decisions the policy is
+    trained on. These stay the same through every pass. `lam_advantage` is
+    the `lam` of the advantages, and `lam_value` is the `lam` of the
+    targets, which are lambda-returns. Both models learn only from the
+    learner's decisions, and the policy only from those that `rule` keeps.
+
+    For each slice of `slice_rows` rows, the policy takes a step with
+    `policy_optimizers` and then the win chance takes one with
+    `win_chance_optimizers`. The rows are shuffled with `generator` on every
+    pass. No model call runs on more than `slice_rows` rows at once.
+
+    The metrics returned are:
+
+    - `loss`, the policy's mean loss over every slice;
+    - `win_chance_loss`, the win chance's mean loss over every slice;
+    - `kept_share`, the share of all the rollout's decisions that the policy
+      is trained on;
+    - `advantage_size`, the mean absolute advantage of the learner's
+      decisions before any normalizing, or zero when there are none.
     """
     device = rollout.results.device
     layout = sequences(rollout.games, rollout.seats)
@@ -133,13 +147,16 @@ def update_guess(
 ) -> Metrics:
     """Run `passes` passes of the guess model's update over `rollout`.
 
-    Each decision is scored against the opponent's true deck and hand. Its
-    input includes the same seat's last `history` guesses in that game, as
-    they were made during play, so the model learns from its own earlier
-    guesses and not from the truth, on every pass. Those are looked up by
-    row, so the order of the rows does not matter to them. Every pass takes
-    the rows in a new random order drawn from `generator`. Returns the mean
-    loss.
+    Each decision's guess is scored against the opponent's true unseen cards
+    and hand. The model also reads the same seat's last `history` guesses in
+    that game, exactly as the guesser made them during play. It is
+    therefore trained with the earlier guesses it reads in play, not with
+    the true cards, and these inputs stay the same on every pass.
+
+    The rows are shuffled with `generator` on every pass. The earlier
+    guesses are looked up by row, so the shuffle does not change them. No
+    model call runs on more than `slice_rows` rows at once. Returns the mean
+    loss over every slice as `loss`.
     """
     device = rollout.results.device
     layout = sequences(rollout.games, rollout.seats)
@@ -155,5 +172,6 @@ def update_guess(
 
 
 def _mean(losses: list[Tensor]) -> float:
-    # The mean of the slices' losses, zero for no slice. Reading a loss waits for the device, so it is read once.
+    # The mean of the slices' losses, or zero when there was no slice. Reading a loss back waits for
+    # the device to finish, so the losses are read once, together.
     return float(torch.stack(losses).mean()) if losses else 0.0

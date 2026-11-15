@@ -1,14 +1,17 @@
-"""Read one card set's 17Lands public data through the `spells` package.
+"""Read one card set's 17Lands public data and MTGJSON card data through the `spells` package.
 
-This is the only module that imports spells. spells downloads the free
-17Lands Premier Draft files and MTGJSON card data with `uv run spells add
-<set>`, converts them to Parquet, and keeps them in its own data home:
-`~/.local/share/spells` unless the environment variable `SPELLS_DATA_HOME`
-names another folder. `read_set` never downloads. It raises
-`SetNotDownloadedError` with the command to run when a file is missing.
-The card statistics are aggregated by spells over every draft and game of
-the set, which takes about ten seconds the first time and is cached by
-spells under `cache/<set>` in its data home.
+This is the only module that imports spells. The command `uv run spells add
+<set>` downloads the free 17Lands Premier Draft files and the MTGJSON card data
+for a set, and converts them to Parquet. spells stores the files in its own
+data home, which is `~/.local/share/spells` unless the environment variable
+`SPELLS_DATA_HOME` names another folder.
+
+`read_set` never downloads. When a file is missing, it raises
+`SetNotDownloadedError` with the command to run.
+
+The card statistics come from spells, which aggregates them over every
+draft and game of the set. That takes about ten seconds the first time,
+and spells then caches the result under `cache/<set>` in its data home.
 """
 
 from dataclasses import dataclass
@@ -42,9 +45,9 @@ class SetData:
     """The tables of one card set, as `jace.data`'s loaders take them.
 
     `attributes` has one row per card, from MTGJSON. `statistics` has one
-    row per card with its 17Lands numbers. `picks` has one row per human
-    pick and `games` one row per game. The last two are lazy: nothing is
-    read from disk until a loader collects them.
+    row per card with its 17Lands statistics. `picks` has one row per human
+    pick, and `games` has one row per game. The last two are lazy frames, so
+    nothing is read from disk until a loader collects them.
     """
 
     attributes: pl.DataFrame

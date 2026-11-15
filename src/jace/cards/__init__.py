@@ -1,10 +1,11 @@
 """Card data and the card vectors every model reads.
 
-Every other module names cards by `CardId` and reads them through one
-`CardVectors`: the `CardEncoder` while the drafter's pretraining trains it,
-and the `CardTable` frozen from it everywhere after. Nothing here knows
-about drafting, deck building or play, so those modules can change without
-touching how a card is represented.
+Every other module refers to a card by its `CardId`, and every model gets
+a card's vector from a `CardVectors`. The drafter's pretraining trains a
+`CardEncoder` and reads the vectors from it. Every later model reads a
+`CardTable`, which contains the vectors frozen from that encoder. This
+package does not import the drafting, deck-building or play code, so that
+code can change without changing how a card is represented.
 """
 
 from jace.cards.encoder import (

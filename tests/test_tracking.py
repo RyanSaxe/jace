@@ -2,8 +2,9 @@
 
 Every test makes a real run folder under pytest's temporary directory and
 reads it back the way a caller would. The dead writer is a real child
-process that enters the writing block and exits without leaving it, so the
-operating system, not a stand-in, releases its lock.
+process. It enters the `writing` block and ends with `os._exit`, so it
+never leaves the block, and the operating system, not a stand-in, releases
+its lock.
 """
 
 import functools

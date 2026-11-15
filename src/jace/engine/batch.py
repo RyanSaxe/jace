@@ -1,12 +1,15 @@
 """The interface between a game engine and everything that plays games.
 
-Training steps many games at once through `GameBatch` and never sees the
-engine behind it, so tests can hand it a small fake. A batch is made for a
-fixed list of matchups and plays exactly those games, a few at a time: when
-a game ends, its place is taken by the next matchup of the list that has not
-started, and when none is left the place stays empty. A game is known by its
-position in the list, so nothing about a batch depends on a source of
-matchups that it would have to ask.
+Training steps many games at once through `GameBatch` and never imports the
+engine behind it. A test can therefore give training a small fake batch,
+such as `jace.engine.toy.ToyBatch`, in place of the engine.
+
+A batch is made for a fixed list of matchups and plays exactly those games,
+a few at a time. When a game ends, the next matchup that has not started
+takes its place. Once every matchup has started, the place of a game that
+ends stays empty. `Decisions` and `Finished` identify a game by its position
+in the list. The batch is given the whole list when it is made, and no matchup
+is added later.
 """
 
 import enum
@@ -43,52 +46,62 @@ type Board = Mapping[str, npt.NDArray[np.generic]]
 
 @dataclass(frozen=True, slots=True)
 class BoardLayout:
-    """What a model must know about an engine's boards before it sees one.
+    """What a model is told about an engine's boards before it reads one.
 
-    Every column of a player's and a card's row is a number, so
-    `player_features` and `card_features` are column counts, which include
-    the columns of their turn state when the engine reports one. A
-    permanent's, an action's and an event's row also hold columns that name
-    something, and each of those is listed by what it names. A column in no
-    list is not read. The guess model also counts the opponent's cards, so
-    the layout names the few columns that counting reads: a card's zone
-    flags, a player's hand and library sizes and the known-hand rows. An
-    engine adapter builds this from what its engine reports, and
-    `jace.play` takes it as plain data, so the models never import an
-    engine.
+    Every column of a player's row and of a card's row is a number, so
+    `player_features` and `card_features` are simply column counts. Each
+    count includes the row's turn-state columns when the engine reports
+    them.
+
+    The rows of permanents, actions and events also have columns that name
+    something, such as a card definition or another object on the board. The
+    layout lists those columns by what they name. A column that is in no
+    list is not read.
+
+    The guess model also counts the opponent's cards. For that count, the
+    layout names a card's zone flags, a player's hand and library sizes, and
+    the columns of the known-hand rows.
+
+    An engine adapter builds the layout from its engine's description of
+    the boards. `jace.play` takes the layout as plain data, so the models
+    never import an engine.
     """
 
     player_features: int
     card_features: int
-    # The columns read as numbers: flags, counts, amounts, ranks and kinds.
+    # The columns of a permanent's, an action's and an event's row that are read as numbers: flags,
+    # counts, amounts, ranks and kinds.
     permanent_features: tuple[int, ...]
     action_features: tuple[int, ...]
     event_features: tuple[int, ...]
-    # The column of a permanent's row that holds its card definition id plus one, zero for none.
+    # The column of a permanent's row that contains its card definition id plus one, or zero for none.
     permanent_definition: int
-    # The columns of a permanent's row that name another board object by its index in the order
-    # that `action_focus` uses, plus one, zero for none: the object it is attached to and the
-    # attacker it blocks.
+    # The columns of a permanent's row that point to another object on the board: the object the
+    # permanent is attached to, and the attacker it blocks. Each contains that object's index plus
+    # one, or zero for none. The index counts objects in the order that `action_focus` uses.
     permanent_links: tuple[int, ...]
-    # The columns that hold a small whole number, with -1 or 0 for none: an action's mode and
-    # ability, and the seat that controlled an event.
+    # The columns that contain a small whole number standing for a category. In an action's row these
+    # are its mode and its ability, with 0 for none. In an event's row it is the seat that controlled
+    # the event, with -1 for none.
     action_categories: tuple[int, ...]
     event_categories: tuple[int, ...]
-    # The columns of a decklist row: the card definition id plus one, zero for none, then the
-    # copies of that card not yet seen and the copies in the deck.
+    # The columns of a decklist row. `decklist_definition` contains the card definition id plus one,
+    # or zero for none. `decklist_copies` is a pair of columns: how many copies of that card are not
+    # yet seen, then how many are in the deck.
     decklist_definition: int
     decklist_copies: tuple[int, int]
-    # The flag columns of a card's row that mark it as in its owner's library or hand, or as a
-    # token. A card with none of them set is one of its owner's deck that both seats see: on the
-    # battlefield, in the graveyard, in exile or on the stack.
+    # The flag columns of a card's row that mark the card as in its owner's library, in its owner's
+    # hand, or as a token. A card with none of them set is a card of its owner's deck that both seats
+    # can see, on the battlefield, in the graveyard, in exile or on the stack.
     card_unshown_flags: tuple[int, ...]
-    # The columns of a player's row that count the cards in its hand and in its library, each
-    # divided by `zone_count_scale`.
+    # The columns of a player's row that contain the number of cards in the player's hand and in their
+    # library. Each number is divided by `zone_count_scale`.
     hand_count: int
     library_count: int
     zone_count_scale: float
-    # The columns of a known-hand row: the card definition id plus one, zero for none, then how
-    # many copies of that card the player is known to hold because they were revealed.
+    # The columns of a known-hand row. `known_hand_definition` contains the card definition id plus
+    # one, or zero for none. `known_hand_copies` contains how many copies of that card the player is
+    # known to hold because they were revealed.
     known_hand_definition: int
     known_hand_copies: int
 
@@ -97,29 +110,33 @@ class Outcome(enum.Enum):
     SEAT_0_WON = 0
     SEAT_1_WON = 1
     DRAW = 2
-    # The engine could not continue the game, so it has no result and its decisions are discarded.
+    # The game has no result, because the engine either could not continue it or cut it short. Training
+    # discards its decisions.
     ABANDONED = 3
-    # The game ran past a time limit and its process was killed, so it has no result. Only code that
-    # runs games under a time limit reports it; a `GameBatch` never does.
+    # The game has no result, because it ran past a time limit and its process was killed. Only
+    # `jace.engine.scoring.play_games`, which runs games under a time limit, reports it. A
+    # `GameBatch` never does.
     HUNG = 4
 
 
 @dataclass(frozen=True, slots=True)
 class Decisions:
-    # One row for each game in play. n is zero once every game of the list is over.
-    # games: [n], each game's position in the batch's list of matchups.
+    # Each array has one row for each game in play, n rows in all. n is zero once every game of the
+    # list is over.
+    # Each game's position in the batch's list of matchups, [n].
     games: npt.NDArray[np.int64]
-    # seats: [n], the seat that must act in each game.
+    # The seat that must act in each game, [n].
     seats: npt.NDArray[np.int64]
-    # boards: each array [n, ...], only what the acting seat may see.
+    # Each game's boards as the acting seat sees them, each array [n, ...]. Nothing hidden from that
+    # seat is included.
     boards: Board
-    # action_counts: [n]; game i's legal actions are 0 .. action_counts[i] - 1.
+    # How many legal actions each game has, [n]. Game i's legal actions are 0 to action_counts[i] - 1.
     action_counts: npt.NDArray[np.int64]
 
 
 @dataclass(frozen=True, slots=True)
 class Finished:
-    # game: the game's position in the batch's list of matchups.
+    # The game's position in the batch's list of matchups.
     game: int
     outcome: Outcome
     decks: tuple[Deck, Deck]
@@ -127,25 +144,29 @@ class Finished:
 
 @dataclass(frozen=True, slots=True)
 class HiddenCards:
-    # One row for each game in play, in the order of `Decisions`.
-    # hands: [n, 2, cards], copies of each card in each seat's hand.
+    # Each array has one row for each game in play, in the same order as the rows of `Decisions`.
+    # The copies of each card in each seat's hand, [n, 2, cards].
     hands: npt.NDArray[np.int64]
-    # libraries: [n, 2, cards], copies of each card in each seat's library, order unknown.
+    # The copies of each card in each seat's library, [n, 2, cards]. The library's order is not given.
     libraries: npt.NDArray[np.int64]
 
 
 class GameBatch(Protocol):
     """A fixed list of games, stepped a few at a time until all are over.
 
-    `decisions` returns the pending decision of every game in play, in
-    arrays of its own that no later step changes, so a caller may keep them
-    without a copy. `act` applies one action to each of those games, in the
-    same order, and returns the games that ended on that step. A game that
-    ends makes room for the next one of the list, so the rows of the next
-    `decisions` may belong to other games. `hidden_cards` returns both
-    seats' true hands and libraries in every game in play as card counts;
-    it exists to label training data for the guess model and to show the
-    win chance what the opponent holds, and must never reach a player.
+    `decisions` returns the pending decision of every game in play. Each
+    call returns new arrays, and no later step changes them, so a caller may
+    keep them without copying.
+
+    `act` applies one action to each of those games, in the same order, and
+    returns the games that ended on that step. When a game ends, the next
+    game of the list takes its place, so the rows of the next `decisions`
+    may belong to different games.
+
+    `hidden_cards` returns both seats' true hands and libraries in every
+    game in play, as card counts. Training uses them as the guess model's
+    targets and as an input to the win-chance model, which only training
+    calls. They must never reach a player.
     """
 
     def decisions(self) -> Decisions: ...

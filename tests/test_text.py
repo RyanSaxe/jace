@@ -1,9 +1,10 @@
 """Check the card text writer, the text vectors and the program tokens through `jace.data`.
 
 No test downloads or runs a language model. The encoder is a small function
-that turns a text into two numbers and counts its calls, which is enough to
-show what the cache does. The cards are a hand-made table with the columns
-`read_set` returns, and the cache files go to a temporary folder.
+that turns each text into two numbers and counts its calls, so a test can
+see when `text_vectors` reads its cache instead of encoding. The cards are
+a hand-made table with the columns that `read_set` returns, and the cache
+files go to pytest's temporary folder.
 """
 
 from collections.abc import Sequence

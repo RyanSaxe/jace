@@ -1,21 +1,24 @@
 """Train only the player, its win chance and the guess model, by self-play on fixed human decks.
 
-This is the limited loop with the draft and the deck building left out: the
-decks are human decks from the training share of the 17Lands data, so what
-is measured is how well the player learns to play, and nothing else moves.
-Each iteration plays a fixed number of games to the end in worker
-processes, all with that iteration's weights, and then updates the player,
-its win chance and the guess model. The guess model's meta starts from the
-human decks of the training split, and each iteration's decks join it
-once their games are over. All three read cards through the card
-vectors of `--embedding-run`, frozen into a `CardTable`, which is not
-trained here: a step taken for one model would change the others' input.
-Every few iterations the player is scored with the scoring harness on
-paired deals of held-out human decks, which are never played in training,
-against random play, scripted greedy and the heuristic player. Every flag that
-shapes the player's update is on the command line, because this loop exists
-to compare them. Run it with
-`uv run python -m jace.loops.train_player --help`.
+This is the limited loop without the draft and the deck building. The decks are
+human decks from the training split of the 17Lands data, and only the player,
+its win chance and the guess model train. What the loop measures is therefore
+how well the player learns to play. Each iteration plays `--games` games to
+their end in worker processes, all with that iteration's weights, and then
+updates the three models.
+
+All three read cards through the card vectors of `--embedding-run`, frozen into
+a `CardTable`. The table is not trained here, because a step taken for one
+model would change the other models' input. The guess model's meta, its
+statistics of the format's decks, starts from the human decks of the training
+split, and each iteration's decks join it once their games are over.
+
+Every few iterations the player is scored against random play, scripted greedy
+and the heuristic player, on paired deals of held-out human decks that training
+never plays. A paired deal is two decks and an engine seed, played four times
+so that each player plays each deck from each seat. Most settings of the
+player's update are flags, because this loop exists to compare them. Run it
+with `uv run python -m jace.loops.train_player --help`.
 """
 
 import argparse
@@ -70,12 +73,12 @@ from jace.train.workers import play_on_workers, start_workers, stop_workers
 
 __all__ = ("main",)
 
-# The dials of the player's rule that no flag sets, as `train_limited` has them.
+# The update settings that no flag sets, with the values `train_limited` uses.
 _CLIP = 0.2
 _STAY = 0.1
 _SLICE_ROWS = 512
 _MAX_GRAD_NORM = 1.0
-# PyTorch seeds a generator with a signed 64-bit integer.
+# A PyTorch generator accepts any seed from -2**63 to 2**64 - 1, so 63 random bits always make a valid seed.
 _SEED_BITS = 63
 _SAVED: tuple[ModelName, ...] = ("embedding", "player", "win_chance", "guess")
 
@@ -127,8 +130,7 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
 
 
 def _resume(run_folder: Path, models: PlayModels) -> int:
-    # Loads the newest checkpoint of every module of the stopped run at `run_folder` and returns
-    # the iteration they were saved after. Optimizer state is not checkpointed, so it starts fresh.
+    # Returns the iteration the newest checkpoints were saved after. Optimizers are not checkpointed and start fresh.
     modules = {
         "embedding": models.embedding,
         "player": models.player,
@@ -155,7 +157,6 @@ def _update(
     optimizers: Mapping[ModelName, torch.optim.Optimizer],
     generator: torch.Generator,
 ) -> dict[str, float]:
-    # One update of the player and its win chance and one of the guess model on a round's games.
     on_device = to_device(rollout, models.embedding.device)
     rule = PlayerRule(
         clip=_CLIP,
@@ -194,8 +195,8 @@ def _update(
 
 
 def _save(run: Running, models: PlayModels, *, iteration: int) -> CheckpointRef:
-    # Saves the four modules and returns the player's checkpoint. The card table does not change
-    # in this loop, and is saved so that a checkpoint can be loaded and scored by itself.
+    # The card table does not change in this loop. It is saved anyway, so that this run's checkpoints can be loaded
+    # and scored without the run their card vectors came from.
     save_checkpoint(run, model="embedding", update=iteration, module=models.embedding)
     save_checkpoint(run, model="win_chance", update=iteration, module=models.win_chance)
     save_checkpoint(run, model="guess", update=iteration, module=models.guess)
@@ -215,13 +216,17 @@ def _train(
 ) -> None:
     """Run every iteration after `done`, saving the curve and the checkpoints on the way.
 
-    An iteration plays `--games` games between decks drawn at random from
-    `decks` and updates the three models on them. Every module is saved after
-    every `checkpoint_every`-th iteration, when that is above zero, after
-    the last, and after every `evaluate_every`-th, when the player is also
-    scored on the harness's deals. The curve file is rewritten after each
-    iteration, so a stopped run still has its curve, and a resumed run
-    keeps the curve up to `done`.
+    An iteration plays `--games` games, each between two decks drawn at random
+    from `decks`, and then updates the three models on them. Every module is
+    saved after the last iteration and after every `evaluate_every`-th, when
+    the player is also scored on the harness's deals. With `checkpoint_every`
+    above zero, every module is also saved after every `checkpoint_every`-th
+    iteration. The curve file is rewritten after each iteration, so a stopped
+    run still has its curve.
+
+    `done` is how many iterations a resumed run has already finished and
+    checkpointed, and a new run passes zero. A resumed run keeps its curve up
+    to `done`, drops any later points, and goes on from there.
     """
     optimizers: dict[ModelName, torch.optim.Optimizer] = {
         name: torch.optim.Adam(own_parameters(module, models.embedding), lr=arguments.rate)
@@ -245,8 +250,8 @@ def _train(
         collected = play(matchups)
         play_ended = time.perf_counter()
         updates = _update(arguments, models, rollout=collected.rollout, optimizers=optimizers, generator=generator)
-        # The iteration's decks join the meta only now that their games are over, each once, so no game of
-        # the iteration was guessed with them.
+        # Each deck of the iteration's matchups joins the meta once, however many games it played, and only after
+        # the iteration's games are over.
         played = sorted({deck for matchup in matchups for deck in matchup})
         copies = torch.stack([torch.bincount(torch.tensor(deck), minlength=models.embedding.cards) for deck in played])
         meta = blend_meta(models.guess.meta, copies.float().to(models.embedding.device), decay=arguments.meta_decay)
@@ -286,13 +291,13 @@ def _train(
 def main(argv: Sequence[str]) -> None:
     """Train the player, its win chance and the guess model on human decks and save the run's record.
 
-    The run folder is created under `--run-dir` by `jace.tracking` and gets
-    a checkpoint of the embedding, the player, the win chance and the guess
-    model at the end, at every evaluation, and every `--checkpoint-every`
-    iterations.
-    The curve is written beside it as `<run id>.curve.json`: the metrics of
-    every iteration, and at each evaluation the player's win rates against
-    the three scripted players with its land and spell rates.
+    `jace.tracking` creates the run folder under `--run-dir`. The run saves a
+    checkpoint of the card table, the player, the win chance and the guess
+    model at the end, at every evaluation and every `--checkpoint-every`
+    iterations. The curve file `<run id>.curve.json` is next to the folder. It
+    contains the metrics of every iteration and, at each evaluation, the
+    player's win rates against the three scripted players, with its land and
+    spell rates in that iteration's games.
     """
     arguments = _arguments(argv)
     torch.manual_seed(arguments.seed)
@@ -315,7 +320,7 @@ def main(argv: Sequence[str]) -> None:
         folder, curve_file = start_run(arguments, device=device, inputs=(embedding_ref,), clock=clock)
         models.guess.set_meta(starting_meta(arguments, cards))
     else:
-        # The resumed guess model holds the meta of the decks the run had played.
+        # The resumed guess model's checkpoint already contains the meta the run had reached, so it is not set again.
         folder, curve_file = arguments.resume, arguments.resume.with_name(f"{arguments.resume.name}.curve.json")
     workers = start_workers(
         functools.partial(play_actor, arguments=arguments, card_width=embedding.width),
@@ -324,7 +329,8 @@ def main(argv: Sequence[str]) -> None:
     )
 
     def play(matchups: Sequence[Matchup]) -> Collected:
-        # The workers of one round are the ones the round before left, with any stalled one replaced.
+        # Reuses the last call's workers, with any stalled one replaced. The decisions are returned on the CPU, and
+        # `_update` moves them to the models' device.
         nonlocal workers
         collected, workers = play_on_workers(
             workers,

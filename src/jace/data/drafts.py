@@ -1,18 +1,22 @@
 """Human drafts from 17Lands pick rows, as tensors a drafter can train on.
 
-17Lands publishes one row per pick with one column per card for the pack
-and for the pool so far. A draft becomes one sequence of steps, numbered
-across rounds, so a model can read the whole draft. Some sets, Avatar among
-them, lack every draft's first pick because the game client never logged
-it. The pool at the second pick still names the card taken, so the first
-step is rebuilt as a pack that holds only that card, with weight zero: the
-model reads it as history and is never trained or scored on it. Drafts that
-lack any later pick are dropped.
+17Lands publishes one row per pick. A row has one column per card for the
+pack, and one per card for the pool taken so far. Each draft becomes one
+sequence of steps, numbered across rounds, so a model can read the whole
+draft.
 
-The sample weights follow an earlier human-trained drafter by the same
-author: picks by stronger players and from events that went well count for
-more, and the first picks of each round count for less, because those are
-where humans most often take a rare card over a better one.
+Some sets, Avatar among them, lack every draft's first pick, because the
+game client never logged it. The pool at the second pick still contains
+the card taken first, so the first step is rebuilt as a pack that contains
+only that card. That step gets weight zero. A drafter reads it as history
+and is never trained or scored on it. Drafts that lack any later pick are
+dropped.
+
+The sample weights follow those of RyanSaxe/mtg, an earlier drafter
+trained on human picks. Picks by stronger players and from events that went
+well count for more. A round's first pick counts for less than the few
+picks after it, because the first pick is where humans most often take a
+rare card over a better one.
 """
 
 import math
@@ -29,23 +33,22 @@ from jace.data.store import SPLIT_KEYS, Tensors, cached, card_columns, split_key
 __all__ = ("RESULT_FLOOR", "HumanDrafts", "PoolAtSecondPickError", "load_drafts")
 
 _CACHE_FILE = "drafts.pt"
-# Pick rows read into memory at a time. Each row holds one int8 per card for the pack.
+# Pick rows are read into memory this many at a time, because each row has an int8 pack count for every card of
+# the set, not only for the cards in its pack.
 _ROWS_PER_READ = 500_000
 
-# How much a player's rank says about their picks, from 0 to 1, as the earlier drafter set it.
+# A score from 0 to 1 for each rank, as RyanSaxe/mtg sets them. A higher score gives a player's picks more weight.
 _RANK_SCORES = {"bronze": 0.01, "silver": 0.1, "gold": 0.25, "platinum": 0.5, "diamond": 0.75, "mythic": 1.0}
 _RANKS = tuple(_RANK_SCORES)
-# Used for a player with no recorded rank, and for one with no recorded win rate.
+# The rank score given to a player with no recorded rank, and the win rate given to one with no recorded win rate.
 _UNKNOWN_RANK_SCORE = 0.5
 _UNKNOWN_WIN_RATE = 0.5
-# The skill weight is win rate ** (_SKILL_POWER - rank score), kept within these bounds, so
-# rank and win rate count together and no player's picks are ignored.
 _SKILL_POWER = 2.0
+# The lowest skill weight a player can get, so that every player's picks stay in training.
 _SKILL_FLOOR = 0.1
-# An event's result weighs its picks and its deck by the share it won, kept at or above this.
+# Each pick is weighted by the share of matches its event won, and `jace.loops.pretrain_decks` weights each human
+# deck by the share of games its event won. Neither weight goes below this floor.
 RESULT_FLOOR = 0.5
-# Pick x of a round weighs (ln x + 1) / x ** _POSITION_POWER: low for the first pick, highest
-# for the second, then falling, with the eighth pick about equal to the first.
 _POSITION_POWER = math.e / 5
 
 
@@ -53,12 +56,14 @@ _POSITION_POWER = math.e / 5
 class HumanDrafts:
     """Complete human drafts, one row per draft and one step per pick.
 
-    `packs` is int16 `[drafts, steps, pack_size]`: the card ids in the pack
-    at each step, then -1. A card with two copies in a pack appears twice.
-    `picks` is int16 `[drafts, steps]`, the card taken. `weights` is float32
-    `[drafts, steps]`, the sample weight of each pick; zero marks a first
-    pick rebuilt from the pool, whose pack holds only the card taken.
-    `held_out` is bool `[drafts]`, True for drafts kept out of training.
+    `packs` is int16 `[drafts, steps, pack_size]`, the card ids in the pack
+    at each step, padded with -1. A card with two copies in a pack appears
+    twice. `picks` is int16 `[drafts, steps]`, the card taken at each step.
+
+    `weights` is float32 `[drafts, steps]`, the sample weight of each pick.
+    A weight of zero marks a first pick rebuilt from the pool, whose pack
+    contains only the card taken. `held_out` is bool `[drafts]`, true for
+    the drafts kept out of training.
     """
 
     packs: Tensor
@@ -75,26 +80,40 @@ class PoolAtSecondPickError(ValueError):
 def load_drafts(rows: pl.LazyFrame, *, pool: CardPool, cache_dir: Path, held_out_share: float) -> HumanDrafts:
     """Turn 17Lands pick rows into tensors, reading `rows` only when `cache_dir` has no copy.
 
-    `rows` needs the columns `draft_id`, `rank`, `user_game_win_rate_bucket`,
-    `event_match_wins`, `event_match_losses`, `pack_number`, `pick_number`
-    and `pick`, plus `pack_card_<name>` and `pool_<name>` for every card of
-    `pool`. The first call saves `drafts.pt` in `cache_dir` and later calls
-    load it, so use one directory per card set. Drafts are ordered by id.
-    A draft is held out when a checksum of its id falls in the lowest
-    `held_out_share` of values, so the split is by draft and never changes.
+    `rows` must have the columns `draft_id`, `rank`,
+    `user_game_win_rate_bucket`, `event_match_wins`, `event_match_losses`,
+    `pack_number`, `pick_number` and `pick`, plus `pack_card_<name>` and
+    `pool_<name>` for every card of `pool`. The first call saves `drafts.pt`
+    in `cache_dir` and later calls load it, so use one directory per card
+    set.
+
+    Drafts are ordered by id. A draft is held out when a checksum of its id
+    falls in the lowest `held_out_share` of values, so the split is by draft
+    and never changes.
+
+    Raises `StaleCacheError` when `drafts.pt` was saved for a pool with
+    other card names, and `CardColumnsError` when the card columns of `rows`
+    do not match the cards of `pool`. Raises `PoolAtSecondPickError` when a
+    draft lacks its first pick and its pool at the second pick does not
+    contain exactly one card.
     """
     saved = cached(cache_dir / _CACHE_FILE, lambda: _read(rows, pool=pool), pool=pool)
     packs = saved["packs"]
     win_rate = torch.where(saved["win_rate"].isnan(), _UNKNOWN_WIN_RATE, saved["win_rate"])
     rank_scores = torch.tensor([*_RANK_SCORES.values(), _UNKNOWN_RANK_SCORE])
+    # A win rate is at most 1, so subtracting the rank score from `_SKILL_POWER` gives a player of higher rank a higher
+    # weight at the same win rate.
     skill = win_rate.pow(_SKILL_POWER - rank_scores[saved["rank"].long()]).clamp(_SKILL_FLOOR, 1.0)
     matches = (saved["wins"] + saved["losses"]).float()
     result = (saved["wins"] / matches.clamp_min(1.0)).clamp(RESULT_FLOOR, 1.0)
     picks_per_round = packs.shape[2]
     pick_in_round = torch.arange(packs.shape[1]) % picks_per_round + 1
+    # The first pick of a round weighs less than the next few. The weight is highest at the second pick, then falls,
+    # and the eighth pick weighs about as much as the first.
     position_weight = (pick_in_round.log() + 1) / pick_in_round.pow(_POSITION_POWER)
     weights = (skill * result)[:, None] * position_weight[None, :]
-    # A pack that opens a round with one card is a first pick rebuilt from the pool.
+    # Only a first pick rebuilt from the pool has a first pack with a single card. With one pick per round, every
+    # pack has a single slot and this test cannot apply, so no weight is zeroed.
     rebuilt = packs[:, 0, 1] < 0 if picks_per_round > 1 else torch.zeros(len(packs), dtype=torch.bool)
     weights[rebuilt, 0] = 0.0
     return HumanDrafts(
@@ -134,7 +153,7 @@ def _read(rows: pl.LazyFrame, *, pool: CardPool) -> Tensors:
     placed = described.join(drafts.select("draft_id", "draft"), on="draft_id", how="left", maintain_order="left")
     draft_of_row = torch.from_numpy(
         placed["draft"].fill_null(-1).cast(pl.Int64).to_numpy(writable=True)
-    )  # [rows], -1 to skip
+    )  # [rows], -1 for a row of a dropped draft
     step_of_row = torch.tensor(placed["step"].to_list(), dtype=torch.int64)  # [rows]
     kept = draft_of_row >= 0
 
@@ -144,7 +163,7 @@ def _read(rows: pl.LazyFrame, *, pool: CardPool) -> Tensors:
     for start in range(0, len(placed), _ROWS_PER_READ):
         pack_counts = torch.from_numpy(rows.slice(start, _ROWS_PER_READ).select(pack_columns).collect().to_numpy())
         chunk = slice(start, start + len(pack_counts))
-        # `row` counts the kept rows of this chunk.
+        # `_pack_slots` gets only this chunk's kept rows, so its `row` indexes those rows and not the whole chunk.
         row, slot, card = _pack_slots(pack_counts[kept[chunk]])
         packs[draft_of_row[chunk][kept[chunk]][row], step_of_row[chunk][kept[chunk]][row], slot] = card.to(torch.int16)
 
@@ -170,8 +189,9 @@ def _read(rows: pl.LazyFrame, *, pool: CardPool) -> Tensors:
 
 
 def _pack_slots(counts: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    # counts: int8 [rows, cards], copies of each card in each row's pack. Returns int64 (row, slot,
-    # card), one entry per copy: the card sits in `slot` of its row's pack, counted from 0.
+    # `counts` is int8 [rows, cards], the copies of each card in each row's pack. Returns three int64 tensors
+    # (row, slot, card) with one entry per copy, so `card[i]` goes in `slot[i]` of the pack of row `row[i]`.
+    # Slots count from 0.
     row, card = counts.nonzero(as_tuple=True)
     copies = counts[row, card].long()
     row, card = row.repeat_interleave(copies), card.repeat_interleave(copies)

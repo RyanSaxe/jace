@@ -1,15 +1,19 @@
 """Check the guess model, the player model and the win-chance model on real engine boards.
 
-The boards in `tests/data/manabot_v10_boards.npz` are three decisions from
-real games, encoded by the engine adapter at input version 10, each with
-permanents, events and the acting seat's decklist on the board. No
+`tests/data/manabot_v10_boards.npz` contains the boards of three decisions
+from real games, encoded by the engine adapter at policy input version 10.
+Each board has permanents, events and the acting seat's decklist. No
 permanent on them blocks or is attached to anything, so the test of those
 links adds one. On every board the opponent has cards in hand that it has
-not revealed. The guess model's meta is fitted from two 40-card decks onto
-a format whose boosters hold the first 400 cards, so the cards from 400 on
-are not legal. The models are built from the layout the adapter reports,
-and the tests call them only through `jace.play`, so the token layout and
-the network can change without touching them.
+not revealed.
+
+The guess model's meta is fitted from two 40-card decks. A card that neither
+deck contains gets its copies from the day-0 meta, which is the meta before any
+deck is known. Here it is the day-0 meta of a format whose boosters contain
+only the first 400 cards, so cards 400 and up are not legal. The models are
+built from the layout the adapter reports, and the tests call them only through
+`jace.play`, so the token layout and the network can change without any edit to
+these tests.
 """
 
 from pathlib import Path
@@ -42,7 +46,8 @@ MORE_CARDS = 520
 CARD_WIDTH = 16
 LEGAL_CARDS = 400
 DECK_SIZE = 40
-# Board 0's opponent shows five copies of card 267 and one of card 302, and board 1's four of card 213.
+# The meta's two decks contain cards that the opponents show on the boards. Board 0's opponent shows five
+# copies of card 267 and one of card 302, and board 1's opponent shows four copies of card 213.
 META_DECKS = (
     ((267, 5), (302, 2), *((card, 1) for card in range(33))),
     ((213, 6), *((card, 1) for card in range(100, 134))),
@@ -102,7 +107,8 @@ def _win_chance_model(cards: int) -> WinChanceModel:
 
 
 def _hidden_cards(*, in_hand: range) -> Guess:
-    # The opponent holds one copy of each of the first twenty cards unseen, those of `in_hand` in hand.
+    # A truth in which the opponent's unseen cards are one copy each of cards 0 to 19, and the opponent holds
+    # the cards of `in_hand` in its hand.
     truth = Guess(deck=torch.zeros(3, CARDS), hand=torch.zeros(3, CARDS))
     truth.deck[:, :20] = 1 / 20
     truth.hand[:, in_hand] = 1.0
@@ -110,8 +116,9 @@ def _hidden_cards(*, in_hand: range) -> Guess:
 
 
 def _move_weights(guesser: GuessModel, *, seed: int) -> None:
-    # Moves each weight a little at random, as training would, so the corrections are not zero. The card
-    # table has no weights, so only the model's own move.
+    # A new guess model's corrections to the meta guess are all zero. Moving each weight a little at random, as
+    # training would, makes them nonzero. The card table has no weights, so only the guess model's own weights
+    # move.
     generator = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         for parameter in guesser.parameters():
@@ -171,9 +178,9 @@ def _action_odds(player: PlayerModel, boards: Boards) -> Tensor:
 
 
 def test_player_reads_which_object_a_permanent_blocks_or_is_attached_to() -> None:
-    # A link names an object by its index plus one in the engine's order: both players, the acting
-    # seat's cards, the opponent's cards, then the acting seat's permanents. The acting seat's
-    # permanents 0 and 3 on board 0 are different cards.
+    # A link names an object by its position plus one, in the engine's order: the two players, the acting
+    # seat's cards, the opponent's cards, then the acting seat's permanents. On board 0, the acting seat's
+    # permanents 0 and 3 are different cards, so linking to one or the other should change the odds.
     boards = _real_boards()
     player, _ = _models(CARDS)
     first_permanent = 2 + boards["agent_cards"].shape[1] + boards["opponent_cards"].shape[1]
@@ -189,7 +196,7 @@ def test_player_reads_which_object_a_permanent_blocks_or_is_attached_to() -> Non
 
 @pytest.mark.parametrize(("row", "unseen_after"), [(1, 0), (11, 8)], ids=["last copy", "one of nine"])
 def test_player_reads_the_copies_left_unseen_in_its_own_deck(row: int, unseen_after: int) -> None:
-    # Board 0's decklist row 1 is a card with one unseen copy, and row 11 a land with nine.
+    # On board 0, decklist row 1 is a card with one unseen copy, and row 11 is a land with nine.
     boards = _real_boards()
     player, _ = _models(CARDS)
     unseen, _ = board_layout().decklist_copies
@@ -209,7 +216,8 @@ def test_random_policy_spreads_probability_evenly_over_legal_actions() -> None:
 
 
 def test_win_chance_reads_which_cards_the_opponent_truly_holds_in_hand() -> None:
-    # The same board and the same unseen cards, with different ones of them in the opponent's hand.
+    # Both truths have the same board and the same unseen cards. They differ only in which of those cards are
+    # in the opponent's hand.
     boards = _real_boards()
     model = _win_chance_model(CARDS)
 
@@ -269,9 +277,10 @@ def test_padding_rows_do_not_change_the_policy_the_guess_or_the_win_chance() -> 
 
 
 def test_a_board_gets_the_same_outputs_alone_as_beside_a_fuller_board() -> None:
-    # The models keep as many rows of each kind as the fullest board of the batch needs, so board 1
-    # keeps fewer rows alone than beside board 0, which holds more cards and permanents. One of its
-    # permanents is attached to the opponent's permanent 1, whose row moves with what is kept.
+    # The tokens contain as many rows of each kind as the fullest board of the batch needs. They contain fewer rows for
+    # board 1 alone than for board 1 batched with board 0, which has more cards and permanents. The test attaches the
+    # acting seat's first permanent on board 1 to the opponent's permanent 1. That permanent's row changes with how many
+    # rows are kept before it, and the link must still name it.
     boards = {name: rows.clone() for name, rows in _real_boards().items()}
     link = board_layout().permanent_links[0]
     first_opponent_permanent = 2 + 2 * boards["agent_cards"].shape[1] + boards["agent_permanents"].shape[1]
@@ -339,8 +348,8 @@ def test_models_score_a_larger_pool_and_old_cards_keep_their_scores() -> None:
 
 
 def test_the_guess_never_reads_the_opponents_decklist_whatever_the_weights() -> None:
-    # An engine that opens the decklists reports the opponent's deck in the decklist rows of seat 1. Two
-    # different decks there, with the same board and the same meta, give the same guess.
+    # An engine that opens the decklists reports the opponent's deck in the decklist rows of seat 1. The test
+    # writes two different decks there, and with the same board and the same meta the guess must not change.
     boards = _real_boards()
     _, guesser = _models(CARDS)
     _move_weights(guesser, seed=3)
@@ -361,9 +370,11 @@ def test_the_guess_never_reads_the_opponents_decklist_whatever_the_weights() -> 
 
 @pytest.mark.parametrize("empty_library", [False, True], ids=["library as dealt", "library empty"])
 def test_every_legal_card_keeps_a_chance_and_the_chances_add_up_to_at_most_the_hand(*, empty_library: bool) -> None:
-    # No deck behind the meta holds most legal cards, and the opponent shows all five copies of card 267
-    # that the decks hold, yet the meta cannot know the opponent's deck holds no more. With its library
-    # empty, every card the opponent has not shown is in its hand, which still holds only 6, 5 and 5 cards.
+    # Most legal cards are in neither of the meta's decks. On board 0 the opponent shows all five copies of
+    # card 267 that the meta's decks contain, but its own deck may contain more. So every legal card must have
+    # a share and a chance above zero. The opponents' hands have 6, 5 and 5 cards, and the untrained guess's
+    # chances that each card is in hand must add up to no more than that. With the library empty, every card
+    # the opponent has not shown is in its hand, and that bound must still hold.
     boards = {name: rows.clone() for name, rows in _real_boards().items()}
     if empty_library:
         boards["opponent_player"][:, 0, board_layout().library_count] = 0.0

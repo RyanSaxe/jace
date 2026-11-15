@@ -1,12 +1,12 @@
 """Check that encoding only the real tokens computes what the padded encoder computes.
 
-`encode_real` packs the real tokens of every row and runs the encoder's
-layers on them by hand, so nothing but these checks ties it to
-`nn.TransformerEncoder.forward`. The rows have every length from one token
-to the full row, with their real tokens at scattered positions, and the
-first check runs in float64 so that any difference beyond rounding shows.
-On MPS attention runs as Metal kernels, which work in float32, so that
-check allows float32's rounding.
+`encode_real` packs the real tokens of every row and runs the encoder's layers
+on them by hand, not through `nn.TransformerEncoder.forward`. These tests are
+the only check that the two compute the same. The rows have every length from
+one token to the full row, and each row's real tokens are at random positions.
+The first test runs in float64, so any difference larger than rounding fails
+it. On MPS, attention runs as Metal kernels that work in float32, so the MPS
+test allows float32's rounding.
 """
 
 import pytest

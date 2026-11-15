@@ -1,11 +1,13 @@
 """Turn each card's engine program into the token ids the card encoder reads.
 
 A program is the engine's own definition of a card: a flat run of (kind,
-value) integer pairs, about fifty per card. It says what the card does in
-the engine's terms, which rules text only describes, and it exists for a
-card from a set nobody has played. This package does not import the
-engine, so the caller passes in the engine's vocabulary of pairs, and a
-pair's id is the same for every pool.
+value) integer pairs, about fifty pairs per card. Rules text describes what
+a card does, and the program defines it in the engine's terms. A card from
+a set nobody has played has a program too.
+
+This package does not import the engine, so the caller passes in the
+engine's vocabulary of pairs. The vocabulary comes from the engine and not
+from a pool, so a pair gets the same token id in every pool.
 """
 
 from collections.abc import Mapping
@@ -35,13 +37,16 @@ class ProgramTooLongError(ValueError):
 def program_tokens(pool: CardPool, *, vocabulary: Mapping[tuple[int, int], int]) -> Tensor:
     """Return int64 `[cards, longest]`, each card's program as token ids, one row per card of `pool` in card id order.
 
-    `vocabulary` numbers (kind, value) pairs from zero, and a pair it holds
-    becomes `FIRST_PROGRAM_TOKEN` plus that number. A pair it lacks becomes
-    `UNKNOWN_TOKEN`. A card with an empty program, one the engine cannot
-    play, gets the single token `NO_PROGRAM_TOKEN`, so every row has at
-    least one token that is not padding. Rows shorter than the longest are
-    padded with `PADDING_TOKEN`. Raises `ProgramTooLongError` when a program
-    has more than `MAX_PROGRAM_TOKENS` pairs.
+    `vocabulary` gives each (kind, value) pair a number from zero, and the
+    pair's token id is `FIRST_PROGRAM_TOKEN` plus that number. A pair
+    missing from `vocabulary` becomes `UNKNOWN_TOKEN`. A card with an empty
+    program, one the engine cannot play, gets the single token
+    `NO_PROGRAM_TOKEN`. Every row therefore has at least one token that is
+    not padding for the card encoder to average. Rows shorter than the
+    longest are padded with `PADDING_TOKEN`.
+
+    Raises `ProgramTooLongError` when a program has more than
+    `MAX_PROGRAM_TOKENS` pairs.
     """
     rows: list[list[int]] = []
     for card in range(len(pool)):

@@ -1,9 +1,11 @@
 """Check that a match is scored fairly and that no game goes missing.
 
-The pairing and the statistics are checked on the toy game and on outcomes
-written by hand, where the right answer is known exactly. One test plays
-real Magic in child processes to check the time limit: a game that stalls
-must be recorded as hung while every other game still gets its result.
+A deal is two decks and an engine seed, and `legs` lists each deal as four
+games, so that player A takes each deck in each seat. That pairing and the
+statistics are checked on the toy game and on outcomes written by hand,
+where the right answer is known exactly. One test plays real Magic in child
+processes under a time limit of five seconds a game. In one of its games a
+player never takes its seat, so that game must be recorded as hung.
 """
 
 import functools
@@ -43,14 +45,17 @@ def _highest_card_outcome(game: Game) -> Outcome:
 
 
 def _stalls_in_one_game(seed: int, *, stalled_seed: int) -> Seat:
-    # Random play that never starts the one game whose seed it is given.
+    # A random player, except in the one game whose player seed is `stalled_seed`. There it sleeps for ten
+    # minutes before it takes its seat, so that game never starts.
     if seed == stalled_seed:
         time.sleep(600)
     return random_seat(seed)
 
 
 def test_a_player_scores_exactly_half_against_itself_whichever_seat_wins_each_deal() -> None:
-    # An odd number of deals, so the seat that wins more of them cannot come out at a half.
+    # Both seats play the same way, so a deal's seed alone determines which seat wins. With an odd number of
+    # deals, one seat must win more deals than the other, so the score can be exactly a half only if each deal
+    # puts player A in each seat equally often.
     games = legs(_deals(51))
     outcomes = [_highest_card_outcome(game) for game in games]
 

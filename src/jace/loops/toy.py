@@ -1,11 +1,12 @@
 """Train a small player on the toy game and print how often it picks its best card.
 
-High Card needs no game engine: each seat holds three cards, picks one, and
-the higher pick wins. The best play is always the highest card, so the share
-of decisions where the player picks it shows whether training works. The
-script uses the same pieces a real loop does: `play_games` plays a list of
-games to the end and `update_player` learns from them, with a win chance
-that sees the opponent's hand. Run it with `uv run python -m jace.loops.toy`.
+High Card runs without the game engine. Each seat holds three cards and picks one,
+and the higher pick wins. The best play is always the highest card, so if
+training works, the share of decisions in which the player picks its
+highest card rises. The script uses the same pieces a real loop does.
+`play_games` plays a list of games to the end, and `update_player` updates
+the player from them, with a win chance that reads the opponent's hand.
+Run it with `uv run python -m jace.loops.toy`.
 """
 
 import sys

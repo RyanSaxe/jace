@@ -1,8 +1,10 @@
 """Check boosters, whole drafts and the drafter model through `jace.draft`.
 
-The tests run small real drafts with real drafters and a tiny real model.
-They use only the names `jace.draft` exports, so the code behind those names
-can be rearranged without touching them.
+Three tests run small real drafts. Their boosters are written by hand with
+numbered cards, so a test can follow each pack from seat to seat. The drafter
+model is tiny and real, with random card vectors. The tests use only the names
+`jace.draft` exports, so the code that implements those names can be rearranged
+without any edit to these tests.
 """
 
 import random
