@@ -1,17 +1,23 @@
 """Hold the sizes of each limited format in one record, and turn them into deck rules.
 
-A limited format fixes how a draft runs and what a legal deck is: how many
-seats draft, how many boosters of which spec each opens, how many picks a
-booster gives, how many cards a deck holds and how many of them are lands.
-No model fixes any of these numbers, so every entry point looks its format
-up here by set code and passes the numbers in. A new format is one more
-record in `_FORMATS`. The record lives in `jace.loops` because it holds the
-draft's format and booster spec, and only the loops may import `jace.draft`.
-`deck_rules` turns a format's deck numbers into the `BuildRules` of one card
-set, whose basics and nonbasic lands are that set's card ids, and
-`booster_meta` turns its boosters and deck size into the guess model's
-day-0 meta, what a player knows of the format's decks before it has seen
-one.
+A limited format fixes how a draft runs and what makes a deck legal. For
+the draft, its record gives the seats in a pod, the boosters each seat
+opens and the picks a seat takes from each. For a deck, it gives the
+number of cards and how many of them may be lands. These numbers are rules
+of the format, not anything a model learns, so every training entry point
+looks its format up here by set code. A new format needs one more record
+in `_FORMATS`.
+
+The record is in `jace.loops` because it contains the draft's format
+and booster spec, and only the loops may import `jace.draft`.
+
+`deck_rules` turns a format's deck sizes into the `BuildRules` of one card
+set, with that set's card ids for the basic and nonbasic lands.
+`booster_meta` builds the format's day-0 meta. A meta contains each card's
+mean copies in the format's decks and how often cards appear together in
+them, and the guess model reads it. The day-0 meta is the one used before
+any deck of the format has been seen, so it is computed from how often the
+format's boosters contain each card.
 """
 
 from collections.abc import Mapping
@@ -38,11 +44,13 @@ __all__ = (
 class LimitedFormat:
     """Every number that sizes one limited format.
 
-    `draft` gives the seats of a pod, the boosters each seat opens and the
-    picks it takes from each, and `booster` the odds of every booster slot.
-    A deck holds exactly `deck_size` cards, and from `min_lands` to
+    `draft` gives the number of seats in a pod, the number of rounds, and
+    the picks a seat takes in each round. In every round, each seat opens
+    one booster. `booster` gives the odds of every booster slot.
+
+    A deck has exactly `deck_size` cards, and from `min_lands` to
     `max_lands` of them are lands. A seat's pool is every card it picked,
-    so it holds `picks` cards.
+    so a pool has `picks` cards.
     """
 
     draft: DraftFormat
@@ -56,8 +64,8 @@ class LimitedFormat:
         return self.draft.rounds * self.draft.picks_per_round
 
 
-# Eight seats each open three boosters and pick every card of them. A deck is 40 cards,
-# and 99.8% of the human Avatar decks hold 15 to 18 lands.
+# Eight seats each open three boosters, and the seats pick every card of them. A deck is 40 cards,
+# and 99.8% of the human Avatar decks have 15 to 18 lands.
 TLA_LIMITED = LimitedFormat(
     draft=DraftFormat(seats=8, rounds=3, picks_per_round=len(TLA_PLAY_BOOSTER)),
     booster=TLA_PLAY_BOOSTER,
@@ -82,7 +90,8 @@ def limited_format(set_code: str) -> LimitedFormat:
 
 
 def deck_rules(limited: LimitedFormat, cards: SetCards) -> BuildRules:
-    # The format's deck rules for this card set: its basic lands, and every other card whose type line is a land.
+    # The format's deck rules for this card set. The basics are the set's cards of basic rarity, and the nonbasic
+    # lands are every other card whose type line is a land.
     is_land = cards.printed[:, cards.printed_names.index("type_land")] > 0  # bool [cards]
     basics = cards.pool.of_rarity(Rarity.BASIC)
     return BuildRules(
@@ -95,11 +104,12 @@ def deck_rules(limited: LimitedFormat, cards: SetCards) -> BuildRules:
 
 
 def booster_cards(pool: CardPool) -> dict[Rarity, list[CardId]]:
-    # The cards a booster of the set may hold, by rarity: every card of the pool the engine can play.
+    # The cards a booster of the set may contain, by rarity. Only cards the engine can play are included, so that
+    # every drafted deck can be played.
     return {rarity: [card for card in pool.of_rarity(rarity) if pool[card].program] for rarity in Rarity}
 
 
 def booster_meta(limited: LimitedFormat, pool: CardPool) -> Meta:
-    # The day-0 meta of the format on this card pool, from how often its boosters hold each card.
+    # The day-0 meta of the format on this card pool, from how often its boosters contain each card.
     copies = copies_per_booster(limited.booster, booster_cards(pool), pool_size=len(pool))
     return day_zero_meta(copies, deck_size=limited.deck_size)

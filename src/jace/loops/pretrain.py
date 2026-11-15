@@ -1,25 +1,29 @@
 """Train the drafter and the card encoder to copy human picks, before any self-play.
 
-Each step scores every pick of a batch of whole human drafts in one pass
-and lowers the weighted cross-entropy of the card the human took, over the
-cards in the pack. How well it copies is measured on held-out drafts as the
-share of picks where the human's card is the model's first choice, or among
-its first two or three, and as the log loss of the human's card. Those
-measures count every recorded pick equally and ignore the sample weights.
-The same measures on as many training drafts show when the model starts to
-fit its training drafts better than drafts it has not seen. The two
-penalties of an earlier human-trained drafter, against taking rares and
-against costly cards, are hand-added priors: they are off unless
-`PickPriors` is passed.
+Each step scores every pick of a batch of whole human drafts in one pass. It
+lowers the cross-entropy of the card the human took, over the cards in the
+pack, with each pick weighted by its sample weight.
 
-The card encoder reads each card's text, engine program and printed facts,
-and the pick loss trains it with the drafter, each with its own optimizer.
-It is saved as the run's "embedding" checkpoint, which `pretrain_decks` and
-self-play read frozen. Run it with
-`uv run python -m jace.loops.pretrain --help`. The card set must already be
-downloaded with `uv run spells add <set>`, and the first run on a data
-folder without cached text vectors downloads the text model from Hugging
-Face.
+The model is measured on held-out drafts by how often the human's card is its
+first choice, or among its first two or three, and by the log loss of the
+human's card. These measures count every recorded pick equally, whatever its
+sample weight. Taking the same measures on as many training drafts shows when
+the model starts to fit its training drafts better than drafts it has not seen.
+
+RyanSaxe/mtg, an earlier drafter trained on human picks, added two penalties to
+its loss. One penalizes taking rare cards and the other taking costly cards.
+Here they are hand-added priors, off unless `pretrain_drafter` is given a
+`PickPriors`.
+
+The card encoder reads each card's text, engine program and printed facts. The
+pick loss trains it together with the drafter, each with its own optimizer. The
+encoder is saved as the run's "embedding" checkpoint, which `pretrain_decks`
+and the self-play loops read frozen.
+
+Run it with `uv run python -m jace.loops.pretrain --help`. The card set must
+already be downloaded with `uv run spells add <set>`. A run on a data folder
+without cached text vectors loads the text model from Hugging Face, and
+downloads it first if this machine has no copy.
 """
 
 import argparse
@@ -65,8 +69,9 @@ __all__ = (
     "pretrain_drafter",
 )
 
-# (seen [b, t, cards] 0/1, picks int64 [b, t]) -> float [b, t, cards]: a score for every card at
-# every step, finite for a card in the pack and -inf for every other. `DrafterModel.whole_draft` is one.
+# A pick scorer takes `seen`, float [b, t, cards] with a one for each card in the pack at each step, and `picks`,
+# int64 [b, t], the card taken at each step. It returns float [b, t, cards], a score for every card at every step,
+# which must be finite for a card in the pack and -inf for every other card. `DrafterModel.whole_draft` is one.
 type PickScorer = Callable[[Tensor, Tensor], Tensor]
 
 _TOP_RANKS = (1, 2, 3)
@@ -77,11 +82,12 @@ _EVALUATE_DRAFTS = 512
 class PretrainSettings:
     """How long to train and how often to measure.
 
-    Each of `steps` steps trains on `drafts_per_step` whole drafts drawn at
-    random from the training drafts. Every `evaluate_every` steps, and
-    after the last step, the held-out drafts are scored `evaluate_drafts`
-    at a time, and the result is logged with the mean training loss since
-    the previous measurement.
+    Each of the `steps` steps trains on `drafts_per_step` whole drafts, drawn
+    at random from the training drafts, and `max_grad_norm` caps the norm of
+    each step's gradient. The model is measured every `evaluate_every` steps
+    and after the last step. A measurement scores the held-out drafts
+    `evaluate_drafts` at a time, and the result is logged with the mean
+    training loss since the previous measurement.
     """
 
     steps: int
@@ -95,12 +101,18 @@ class PretrainSettings:
 class PickPriors:
     """Two hand-added penalties from an earlier human-trained drafter, off unless passed.
 
-    `rare` is float `[cards]`, one for rare and mythic cards. When the human
-    took a card that is not rare, the model pays `rare_weight` times the
-    chance it gives to rare cards. `mana_value` is float `[cards]`. The
-    model pays `mana_weight` times how far the expected mana value of its
-    pick exceeds the human's pick, less `mana_margin`. Neither has been
-    shown to help this model, so compare a run with and without them.
+    `rare` is float `[cards]`, one for each rare or mythic card and zero for
+    every other card. When the human took a card that is not rare, the loss
+    adds `rare_weight` times the chance the model gives to rare cards.
+
+    `mana_value` is float `[cards]`, each card's mana value. The mana penalty
+    compares the expected mana value of the model's pick with the mana value
+    of the human's card. It is zero while the expected value is at least
+    `mana_margin` lower, and it grows by `mana_weight` for each point of mana
+    value above that.
+
+    Both penalties are weighted like the pick loss. Neither has been shown to
+    help this model, so compare a run with and without them.
     """
 
     rare: Tensor
@@ -112,8 +124,9 @@ class PickPriors:
 
 @dataclass(frozen=True, slots=True)
 class PickAccuracy:
-    # The share of `picks` recorded picks where the human's card was among the scorer's best 1, 2 and 3, and the
-    # mean negative log-probability of the human's card under the softmax of the scores over the pack, in nats.
+    # Measured over `picks` recorded picks. `top1`, `top2` and `top3` are the shares of picks where the human's card
+    # was among the scorer's best 1, 2 and 3 cards. `log_loss` is the mean negative log-probability of the human's
+    # card under the softmax of the scores over the pack, in nats.
     top1: float
     top2: float
     top3: float
@@ -125,10 +138,11 @@ class PickAccuracy:
 class CurvePoint:
     """One measurement of a drafter pretraining run, after `step` steps.
 
-    `loss` is the mean training loss since the previous point, weighted as
-    training weighs picks. `top1` to `log_loss` are measured on the
-    held-out drafts, and `training_top1` and `training_log_loss` the same
-    way on as many training drafts, so the two log losses compare directly.
+    `loss` is the mean training loss since the previous point, with each pick
+    weighted as in training. `top1`, `top2`, `top3` and `log_loss` are the
+    `PickAccuracy` measures on the held-out drafts. `training_top1` and
+    `training_log_loss` are the same measures on as many training drafts, so
+    the two log losses can be compared directly.
     """
 
     step: int
@@ -159,14 +173,18 @@ def pretrain_drafter(
 ) -> tuple[CurvePoint, ...]:
     """Train `model` on the drafts that are not held out and return its learning curve.
 
-    `optimizers` holds the drafter's optimizer and the card encoder's, and
-    every step moves both. Each one's learning rate is its rate at the call
-    times `rate_scale(step)`. `generator` draws the training batches and
-    lives on the CPU. Every point of the curve is also logged to `run` under
-    "drafter". The last point holds the final held-out accuracy. The
-    training drafts measured are the first ones, as many as are held out.
-    The model is measured in eval mode, so without its dropout, and is left
-    in training mode.
+    `optimizers` contains the drafter's optimizer and the card encoder's, and
+    every step updates both. At each step, each optimizer's learning rate is
+    its rate at the call times `rate_scale(step)`. `generator` draws the
+    training batches and must be a CPU generator. When `priors` is given, the
+    loss also adds its two penalties.
+
+    The model is measured every `settings.evaluate_every` steps and after the
+    last step, on the held-out drafts and on the first training drafts, as
+    many as are held out. It is measured in eval mode, so without its dropout,
+    and is left in training mode. Every point of the curve is also logged to
+    `run` under "drafter", and the last point contains the final held-out
+    accuracy.
     """
     device = model.embedding.device
     cards = model.embedding.cards
@@ -234,13 +252,14 @@ def pick_accuracy(
 
     `rows` is int64 `[n]`, the drafts to score, and `cards` is the number of
     cards in the pool. Every recorded pick counts once, whatever its sample
-    weight; a first pick rebuilt from the pool is not counted. A pack with
-    fewer cards than the rank asked for always counts as a hit, so the last
-    pick of every round does. The log loss reads the scores as logits over
-    the pack. No gradients are kept.
+    weight. A first pick rebuilt from the pool is not counted. The log loss
+    treats the scores as logits over the pack. No gradients are kept.
 
-    A card that scores the same as the human's card counts as ranked above
-    it, so a scorer that cannot tell cards apart gets no credit for them.
+    A pick from a pack of k cards or fewer always counts as a hit at rank k, so
+    the last pick of every round is a hit at every rank. A card that scores the
+    same as the human's card counts as ranked above it, so a scorer that gives
+    every card the same score gets no credit for them.
+
     Raises `NonFiniteScoreError` when a card in a pack gets a score that is
     NaN or infinite, which is what a model that diverged returns.
     """
@@ -256,26 +275,30 @@ def pick_accuracy(
             scores = score(seen, picks)  # [b, t, cards]
             if not bool(scores[seen > 0].isfinite().all()):
                 raise NonFiniteScoreError
-            # [m], the other cards ranked level with the pick or above it. The pick is level with itself.
+            # `ahead` is int64 [m], how many other cards score at least as high as the human's card at each real pick.
+            # The `- 1` leaves out the human's card itself.
             ahead = (scores >= scores.gather(2, picks[:, :, None])).sum(dim=-1)[real] - 1
             hits += torch.stack([(ahead < top).sum() for top in _TOP_RANKS]).cpu()
             counted += int(real.sum())
-            # A padded step's row is -inf everywhere, so its log-softmax is NaN; `real` drops it first.
+            # A padded step's row is -inf everywhere, so its log-softmax is NaN. Indexing with `real` drops that row
+            # before the sum.
             surprise -= float(scores.log_softmax(dim=-1).gather(2, picks[:, :, None]).squeeze(2)[real].sum())
     top1, top2, top3 = (hits / max(counted, 1)).tolist()
     return PickAccuracy(top1=top1, top2=top2, top3=top3, log_loss=surprise / max(counted, 1), picks=counted)
 
 
 def _seen(packs: Tensor, *, cards: int) -> Tensor:
-    # packs: int16 [b, t, pack_size] card ids, -1 past a pack's end. Returns float [b, t, cards] 0/1.
-    # Ids shift up by one so the -1 padding lands in column 0, which is then dropped.
+    # `packs` is int16 [b, t, pack_size], the card ids in each pack, padded with -1. Returns float [b, t, cards], one
+    # for each card in the pack and zero elsewhere. The ids shift up by one so that the -1 padding lands in column 0,
+    # which is then dropped.
     with_padding = torch.zeros(*packs.shape[:2], cards + 1, device=packs.device)
     with_padding.scatter_(2, packs.long() + 1, 1.0)
     return with_padding[:, :, 1:]
 
 
 def _prior_loss(logits: Tensor, picked: Tensor, *, weights: Tensor, priors: PickPriors) -> Tensor:
-    # logits: [m, cards] with cards outside the pack at -inf. picked: int64 [m]. weights: [m].
+    # `logits` is [m, cards], with cards outside the pack at -inf. `picked` is int64 [m] and `weights` is [m], one
+    # entry per pick.
     chances = logits.softmax(dim=-1)
     rare_penalty = (1.0 - priors.rare[picked]) * (chances * priors.rare).sum(dim=-1)
     mana_excess = (chances * priors.mana_value).sum(dim=-1) - priors.mana_value[picked] + priors.mana_margin
@@ -355,13 +378,16 @@ def _priors(arguments: _Arguments, cards: SetCards, *, device: torch.device) -> 
 def _baselines(
     drafts: HumanDrafts, cards: SetCards, *, device: torch.device, settings: PretrainSettings
 ) -> tuple[dict[str, float], PickAccuracy]:
-    """Score two pickers that learn nothing on the held-out picks.
+    """Score two untrained pickers on the held-out picks.
 
     The first is a uniformly random pick, computed exactly from the pack
     sizes. The second always takes the pack's card with the lowest average
     pick position. That position is averaged over every draft of the set,
-    the held-out ones included, so the second baseline has seen a summary
-    of the picks it is scored on.
+    the held-out ones included, so the second picker's choices already
+    depend on the picks it is scored on.
+
+    Returns the random pick's `top1` to `top3` shares and `log_loss` as a
+    dictionary, and the second picker's `PickAccuracy`.
     """
     held_out = drafts.held_out.nonzero().squeeze(1)
     # A card nobody took has no average pick position and ranks after every card that has one.
@@ -376,7 +402,7 @@ def _baselines(
         earliest_taken, drafts, rows=held_out, cards=len(cards.pool), device=device, settings=settings
     )
     real = drafts.weights[held_out] > 0
-    sizes = (drafts.packs[held_out] >= 0).sum(dim=-1)[real].float()  # [m] cards in each scored pack
+    sizes = (drafts.packs[held_out] >= 0).sum(dim=-1)[real].float()  # [m], the size of each scored pack
     uniform = {f"top{top}": float((sizes.clamp_max(top) / sizes).mean()) for top in _TOP_RANKS}
     return {**uniform, "log_loss": float(sizes.log().mean())}, by_ata
 
@@ -384,12 +410,12 @@ def _baselines(
 def main(argv: Sequence[str]) -> None:
     """Pretrain a drafter on one card set and save its record, checkpoints and learning curve.
 
-    The run folder is created under `--run-dir` by `jace.tracking` and gets
-    a "drafter" and an "embedding" checkpoint. The curve is written beside
-    it as `<run id>.curve.json`, with the device, the wall time and two
-    baselines scored on the same held-out picks: a uniformly random pick,
-    computed exactly, and always taking the pack's card with the lowest
-    average pick position.
+    `jace.tracking` creates the run folder under `--run-dir`, and the run saves
+    a "drafter" and an "embedding" checkpoint in it. The curve file
+    `<run id>.curve.json` is written beside the folder. Along with the curve,
+    it contains the device, the wall time and two baselines scored on the same
+    held-out picks. The first is a uniformly random pick, computed exactly. The
+    second always takes the pack's card with the lowest average pick position.
     """
     arguments = _arguments(argv)
     device = device_named(arguments.device)

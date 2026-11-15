@@ -1,18 +1,26 @@
 """What the command-line entry points of `jace.loops` share, as plain functions.
 
-`pretrain`, `pretrain_decks` and `train_limited` each parse their flags
-into a frozen record, start a run folder and write a curve file beside it.
-The flags all three take, the record that holds them, the choice of device
-and the start of the run live here, so the three agree on what a run
-folder and its config look like. So do the card encoder's inputs, its
-shape flags and `load_card_table`, which every entry point after the
-drafter's pretraining reads its card vectors with. The two entry points
-that train a player on real games also share how games reach them:
-`PlayArguments` are their common flags, `play_actor` builds what a worker
-process plays with, `starting_meta` is the meta their guess model starts
-from, and `score_player` scores the player on held-out decks with the
-scoring harness. This is not a framework: an entry point calls what it
-needs and does the rest itself.
+Four entry points train models: `pretrain`, `pretrain_decks`,
+`train_limited` and `train_player`. Each one parses its flags into a frozen
+record, creates a run folder and writes a curve file beside the folder.
+This module defines the flags they all take, the record that contains
+them, the choice of device and the creation of the run folder, so that all
+four agree on what a run folder and its config look like.
+
+The card encoder's inputs and shape flags are here too, with
+`load_card_table`. Every entry point after the drafter's pretraining reads
+its card vectors with `load_card_table`. That includes `jace.loops.score`,
+which takes none of the shared flags.
+
+`train_limited` and `train_player` both train a player on engine games, and
+they share the pieces that play those games and score the player.
+`PlayArguments` are their common flags, and `play_actor` builds the `Actor`
+that a worker process plays with. `starting_meta` fits the meta that their
+guess model starts from, and `scoring_harness` and `score_player` score the
+player on held-out decks.
+
+This is not a framework. An entry point calls what it needs and does the
+rest itself.
 """
 
 import argparse
@@ -88,10 +96,11 @@ __all__ = (
     "starting_meta",
 )
 
-# Adam's decay rates for pretraining on human data, as an earlier human-trained drafter set them.
+# Adam's decay rates for pretraining on human data, the ones an earlier human-trained drafter was trained with.
 ADAM_BETAS = (0.9, 0.98)
 
-# The engine takes an unsigned 32-bit seed.
+# Each round's engine seed is drawn with this many bits. `start_batch` accepts any non-negative seed and derives
+# the engine's seeds from it.
 _ENGINE_SEED_BITS = 31
 # A scoring game that takes longer than this many seconds is recorded as hung.
 _GAME_SECONDS = 120.0
@@ -100,12 +109,14 @@ _RANGE_RESAMPLES = 1000
 
 @dataclass(frozen=True, slots=True)
 class RunArguments:
-    """The flags every entry point takes, which `add_run_flags` adds to a parser.
+    """The flags every training entry point takes, which `add_run_flags` adds to a parser.
 
-    An entry point's own record extends this one with its other flags, so
-    `start_run` can read the fields below with their types and still record
-    every flag in the run's config. `run_dir` holds run folders, and
-    `data_dir` is the cache of processed 17Lands tensors for `set_code`.
+    An entry point's own record extends this one with its other flags. That
+    lets `start_run` read the fields below with their types while it still
+    records every flag in the run's config.
+
+    `run_dir` is the folder that contains the run folders, and `data_dir`
+    is where the processed 17Lands tensors of `set_code` are cached.
     """
 
     data_dir: Path
@@ -119,16 +130,28 @@ class RunArguments:
 
 @dataclass(frozen=True, slots=True)
 class PlayArguments(RunArguments):
-    """The flags of an entry point that trains a player on real games.
+    """The flags of an entry point that trains a player on engine games, which `add_play_flags` adds to a parser.
 
-    `add_play_flags` adds them to a parser. They say how games are played
-    (`workers` processes of `games_per_worker` games at once, a stalled one
-    replaced after `stall_seconds`), how the player and the guess model
-    learn from them, how fast the guess model's meta forgets older decks,
-    the shapes of the player, the guess model and the win chance, and how
-    often and on how many held-out deals the player is scored.
-    `jace.loops.score` reads the model shapes from a run's config under
-    these names.
+    The games are played by `workers` processes, each running
+    `games_per_worker` games at once. A worker that completes no step for
+    `stall_seconds` is replaced.
+
+    The player and the guess model make `passes` update passes over each
+    block of games, and `normalize` is whether the advantages are scaled to
+    mean zero and unit spread. `history` is how many earlier guesses the
+    guess model is shown. After each iteration, the iteration's decks are
+    blended into the guess model's meta, and every deck already in it counts
+    `meta_decay` times what it counted before.
+
+    `play_width`, `play_layers` and `play_heads` give the shape of the
+    player, the guess model and the win chance. The player also reads
+    `guess_cards` hand-guess tokens and `deck_guess_cards` deck-guess
+    tokens.
+
+    Every `evaluate_every` iterations, the player is scored on
+    `evaluate_deals` paired deals drawn from `evaluate_decks` held-out human
+    decks. `jace.loops.score` reads the model shapes and `history` back from
+    a run's config under these names.
     """
 
     workers: int
@@ -152,7 +175,7 @@ class PlayArguments(RunArguments):
 class PlayModels:
     player: PlayerModel
     guess: GuessModel
-    # win_chance: trains the player and never plays, so no worker is sent its weights.
+    # The win chance is used only to train the player. It never plays, so `play_weights` sends no worker its weights.
     win_chance: WinChanceModel
     embedding: CardTable
 
@@ -250,20 +273,25 @@ def start_run(
 
 
 def playable_decks(decks: Tensor, *, pool: CardPool, count: int) -> list[Deck]:
-    # decks: uint8 [n, cards]. The first `count` decks whose every card the engine can play.
+    # `decks` is uint8 [n, cards] copy counts. Returns the first `count` decks that contain only cards the engine can
+    # play, each as a tuple of card ids.
     playable = torch.tensor([bool(pool[card].program) for card in range(len(pool))])
     usable = decks[(decks[:, ~playable] == 0).all(dim=1)][:count]
     return [tuple(torch.repeat_interleave(torch.arange(len(pool)), row.long()).tolist()) for row in usable]
 
 
 def starting_meta(arguments: RunArguments, cards: SetCards) -> Meta:
-    """Fit the meta a run's guess model starts from, from the public human decks of the training split.
+    """Fit the meta a run's guess model starts from, to the public human decks of the training split.
 
-    These are the 17Lands decks of the drafts that are not held out, the
-    split the drafter trains on, so no deck the scoring harness deals is
-    among them. A card no human deck holds, and every card when the split
-    holds no deck, keeps what the day-0 meta of the set's limited format
-    says of it: its copies from how often the format's boosters hold it.
+    The training split is the 17Lands drafts that are not held out, which
+    the drafter also trains on. The scoring harness deals only held-out
+    decks, so none of its decks are among these.
+
+    A card that no training deck contains takes its copies from the day-0
+    meta of the set's limited format, where a card's copies are in
+    proportion to how often the format's boosters contain it. The fitted
+    meta treats such a card as independent of every other card. With no
+    training decks at all, the result is the day-0 meta.
     """
     human = load_decks(
         read_set(arguments.set_code).games,
@@ -284,10 +312,11 @@ def set_cards(data: SetData) -> SetCards:
 def card_inputs(data: SetData, cards: SetCards, *, data_dir: Path) -> CardInputs:
     """Build what the card encoder reads about every card of `cards`, in card id order.
 
-    The text vectors are cached in `data_dir`, and the first run without
-    them downloads the text model from Hugging Face. The program tokens use
-    the engine's own vocabulary, so a card's tokens do not depend on the
-    pool. `data` must be the set `cards` was built from.
+    The text vectors are cached in `data_dir`. A run that does not find
+    them there loads the text model from Hugging Face, which downloads it
+    first if this machine has no copy. The program tokens use the engine's
+    own vocabulary, so a card's tokens do not depend on the pool. `data`
+    must be the set `cards` was built from.
     """
     text = text_vectors(
         card_texts(data.attributes),
@@ -302,12 +331,15 @@ def card_inputs(data: SetData, cards: SetCards, *, data_dir: Path) -> CardInputs
 def load_card_table(run_folder: Path, *, inputs: CardInputs) -> tuple[CardTable, CheckpointRef]:
     """Load the newest card vectors the run at `run_folder` saved, as a table, and the reference of their checkpoint.
 
-    A drafter pretraining run is the one kind whose config records the card
-    encoder's shape, under the names `add_card_flags` gives it, and it saves
-    a `CardEncoder`. That encoder is rebuilt on `inputs` with the recorded
-    shape, loaded and frozen. Every other run saves the `CardTable` it read,
-    which holds its own shape and is loaded as it is. Raises
-    `NotCardVectorsError` for a run saved before the card encoder existed.
+    A drafter pretraining run saves a `CardEncoder`, and its config records
+    the encoder's shape under the names that `add_card_flags` gives it. For
+    such a run, the table is computed once from that encoder on `inputs`,
+    without gradients. Every other kind of run saves the `CardTable` it
+    read, which is loaded as it is, and `inputs` is not read.
+
+    Raises `NotCardVectorsError` when the run's embedding checkpoint has no
+    table and its config records no encoder shape, as for a run saved
+    before the card encoder existed.
     """
     reference = latest_checkpoint(run_folder, "embedding")
     config = json.loads((run_folder / "identity.json").read_text())["config"]
@@ -355,13 +387,16 @@ def play_weights(models: PlayModels) -> Weights:
 
 
 def play_actor(seed: int, *, arguments: PlayArguments, card_width: int) -> Actor:
-    """Build what one worker plays with, inside the worker's process.
+    """Build the `Actor` that one worker plays with, inside the worker's process.
 
-    The models have the shapes the arguments give, a card table of zeros
-    `card_width` wide and whatever weights PyTorch starts the models with:
-    every round replaces them, and the table, with the training process's.
-    Each round's games start on a new engine seed drawn from a generator
-    made from `seed`, and report only the board arrays the models read.
+    The models get the shapes in `arguments`, a card table of zeros
+    `card_width` wide, and the weights PyTorch starts any model with. No
+    game is played with these values: at the start of every round, the
+    worker replaces the weights and the table with the training process's.
+
+    Each round's games start from a new engine seed, drawn from a generator
+    seeded with `seed`. The engine reports only the board arrays that the
+    models read.
     """
     cards = set_cards(read_set(arguments.set_code))
     models = build_play_models(arguments, CardTable(torch.zeros(len(cards.pool), card_width)), pool=cards.pool)
@@ -389,7 +424,8 @@ def play_actor(seed: int, *, arguments: PlayArguments, card_width: int) -> Actor
 
 
 def scoring_harness(arguments: PlayArguments, cards: SetCards) -> Harness:
-    # The deals a run scores its player on, from the human decks it holds out of training.
+    # The `Harness` a run scores its player with. Its deals are drawn from the first `evaluate_decks` held-out human
+    # decks that the engine can play.
     data = read_set(arguments.set_code)
     human = load_decks(
         data.games, pool=cards.pool, cache_dir=arguments.data_dir, held_out_share=arguments.held_out_share
@@ -429,14 +465,17 @@ def score_player(
 
 
 def land_and_spell_rates(rollout: Rollout) -> dict[str, float]:
-    """Measure how often a seat played a land, and cast a spell, in a turn that offered one.
+    """Measure how often a seat played a land, and cast a spell, in a turn where it could.
 
-    A turn here is every decision one seat of one game made while one turn
-    was being played. The land rate is the share of the turns that offered
-    a land play in which the seat made one, and the spell rate is the same
-    for casting. Counting turns and not decisions means a seat that casts
-    first and plays its land afterwards scores a full turn. A rollout that
-    offered none scores zero.
+    Here a turn groups the decisions that one seat of one game made during
+    one turn of that game. The land rate is the share of turns with a legal
+    land play in which the seat played a land. The spell rate is the same
+    share for casting a spell.
+
+    The rates count turns and not decisions, so a seat that casts a spell
+    and then plays its land still counts as having played a land that turn.
+    A rate is zero when no turn of the rollout had its action among the
+    legal ones.
     """
     turns = torch.stack((rollout.games.double(), rollout.seats.double(), turn_numbers(rollout.boards).double()), dim=1)
     _, turn = turns.unique(dim=0, return_inverse=True)  # int64 [n], the turn each decision belongs to

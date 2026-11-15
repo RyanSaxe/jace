@@ -1,18 +1,27 @@
 """Score checkpoints of a limited run against each other and against scripted opponents.
 
-Every pair of players meets on the same deals: two human decks the run never
-trained on and an engine seed, played four times so that each player holds
-each deck in each seat. The table gives one player's win rate over the deals
-with a range from resampling whole deals, the games the engine abandoned or
-hung on, and a rating for every player on a scale that puts random play at
-1000. Each checkpoint's results, and how well its guess model predicted the
-opponent's hand in those games, are appended to the `evaluations.jsonl` of
-the run it came from. A player is named by the iteration of its checkpoint,
-or `top-<iteration>` for that checkpoint taking its top action where it
-would otherwise sample, or `random`, `greedy`, `heuristic` or
-`flat-<games per action>` for one of manabot's players. The model sizes, the card set and the data folder are
-read from the run's own record. Run it with
-`uv run python -m jace.loops.score --help`.
+Every pair of players plays the same deals. A deal is two held-out human decks,
+which the run never trained on, and an engine seed. Each deal is played four
+times, so that each player plays each deck from each seat.
+
+For each pair, the table gives the first player's win rate over the deals, with
+a range from resampling whole deals. It also shows how many games the engine
+abandoned or hung on. When `random` plays a different player in at least one
+pair, the table also gives ratings, on a scale that puts random play at 1000. A
+pair of a player with itself does not count toward them. Each checkpoint's
+results, and how well its guess model predicted the opponent's hand in those
+games, are appended to the `evaluations.jsonl` of the checkpoint's run.
+
+A player is named in one of these ways:
+
+- An iteration number names the player checkpointed at that iteration.
+- `top-<iteration>` names the same checkpoint, taking its top action where it
+  would otherwise sample.
+- `random`, `greedy` and `heuristic` name manabot's scripted players.
+- `flat-<games per action>` names manabot's flat Monte Carlo search.
+
+The model sizes, the card set and the data folder are read from the run's own
+record. Run it with `uv run python -m jace.loops.score --help`.
 """
 
 import argparse
@@ -83,7 +92,7 @@ class _Arguments:
 
 @dataclass(frozen=True, slots=True)
 class _Match:
-    # a, b: the names of player A and player B. They are equal when a player faces itself.
+    # `a` and `b` are the names of player A and player B, equal when a player faces itself.
     a: str
     b: str
     played: tuple[Played[GuessTally], ...]
@@ -142,9 +151,9 @@ def _model_player(
     layout: BoardLayout,
     action: ActionChoice,
 ) -> tuple[Player, CheckpointRef]:
-    # Builds the player and the guess model of iteration `update` as the run built them, on the
-    # run's card table, and returns the player with its player checkpoint. The guess model guesses
-    # from the meta its checkpoint was saved with, which never held the decks the opponents are dealt.
+    # Builds the player and the guess model of iteration `update` with the run's shapes and card table, and returns
+    # the player with its player checkpoint. The guess model guesses from the meta saved in its checkpoint, which
+    # never contained the held-out decks that the deals use.
     numbers = {name: value for name, value in config.items() if isinstance(value, int)}
     engine_to_card = engine_card_ids(cards.pool)
     shape = {"width": numbers["play_width"], "layers": numbers["play_layers"], "heads": numbers["play_heads"]}
@@ -182,7 +191,7 @@ def _players(
     embedding: CardTable,
     layout: BoardLayout,
 ) -> tuple[dict[str, Player], dict[str, CheckpointRef]]:
-    # Returns every named player, and the player checkpoint of each one that is a checkpoint.
+    # Returns every named player, and the player checkpoint of each player that was loaded from one.
     players: dict[str, Player] = {}
     checkpoints: dict[str, CheckpointRef] = {}
     for name in names:
@@ -204,7 +213,8 @@ def _players(
 
 
 def _seen_by(name: str, match: _Match, *, games: Sequence[Game]) -> tuple[Game, ...]:
-    # The games with `name` as player A, which exchanges the two players when `name` is the match's player B.
+    # Returns the games relabelled so that `name` is player A. When `name` is the match's player B, each game's
+    # `a_seat` becomes the other seat.
     if name == match.a:
         return tuple(games)
     return tuple(dataclasses.replace(game, a_seat=1 - game.a_seat) for game in games)
@@ -262,7 +272,8 @@ def _record_match(
 
 
 def _rated_games(matches: Sequence[_Match], *, games: Sequence[Game]) -> list[RatedGame]:
-    # Every game with a result between two different players. A player facing itself says nothing about ratings.
+    # Returns every game with a result between two different players. A game against itself cannot show that one
+    # player is stronger than another, so it is left out.
     rated: list[RatedGame] = []
     for match in matches:
         if match.a == match.b:
@@ -286,8 +297,9 @@ def _record_ratings(
     arguments: _Arguments,
     generator: torch.Generator,
 ) -> None:
-    # Writes one evaluation for each rated checkpoint: its rating, and its win rate over every
-    # game it played against the other players, with deals resampled across all of them at once.
+    # Writes one "population" evaluation for each rated checkpoint, with its rating and its win rate over every game
+    # it played against other players. The rate's range resamples whole deals, and a deal's result is the mean of its
+    # games in all those matches.
     for name in ratings.keys() & checkpoints.keys():
         faced = [match for match in matches if name in {match.a, match.b} and match.a != match.b]
         score = score_match(
@@ -325,7 +337,8 @@ def _write(line: str) -> None:
 
 
 def _write_guesses(matches: Sequence[_Match], *, games: Sequence[Game], names: Sequence[str]) -> None:
-    # One block for each player that guessed: its loss over all its matches and the table of chances.
+    # Prints one block for each player that guessed, with its loss over all its matches and its table of stated and
+    # observed chances.
     for name in names:
         tally = add_tallies([_guesses(name, match, games=games) for match in matches if name in {match.a, match.b}])
         if not tally.pairs:
@@ -342,10 +355,14 @@ def main(argv: Sequence[str]) -> None:
     """Play every pair, print the table and append each checkpoint's results to its run.
 
     A pair's line is printed and recorded as soon as its games end, so a
-    stopped command keeps the pairs it finished. Ratings need random play
-    among the pairs, as the player they are measured from, and are fitted
-    after the last pair. The run's writer lock is held throughout, so a
-    run that is still training cannot be scored.
+    stopped command keeps the pairs it finished. Ratings are fitted after the
+    last pair. They need a pair of `random` with a different player, because
+    every rating is measured from random play.
+
+    The command holds the run's writer lock throughout, so a run that is still
+    training cannot be scored. Raises `RunLockedError` when another process is
+    writing the run, and `ValueError` when the run has no checkpoint of a named
+    iteration.
     """
     arguments = _arguments(argv)
     config = json.loads((arguments.run / "identity.json").read_text())["config"]
@@ -355,9 +372,9 @@ def main(argv: Sequence[str]) -> None:
     human = load_decks(
         data.games, pool=cards.pool, cache_dir=data_dir, held_out_share=float(str(config["held_out_share"]))
     )
-    # Self-play never trains the card table, so every checkpoint of the run reads the newest one.
+    # Self-play never trains the card table, so the newest one is the table every checkpoint of the run trained with.
     embedding, _ = load_card_table(arguments.run, inputs=card_inputs(data, cards, data_dir=data_dir))
-    # The decks the run kept out of training, the same ones it scored itself on.
+    # The held-out human decks, the split that the run's own evaluations also deal from.
     decks = playable_decks(human.decks[human.held_out], pool=cards.pool, count=arguments.decks)
     deals = draw_deals(decks, count=arguments.deals, seed=arguments.seed)
     games = legs(deals)

@@ -1,22 +1,24 @@
 """Train every model on real games of one card set, starting from human data.
 
-This is the limited loop run for real: packs of the set's playable cards are
-drafted, the search keeps each pool's best few decks, one for each block of
-games, and the decks play each other on the engine in worker processes,
-every deck the same number of games and every game to its end. Every model
-reads cards through the card vectors of `--embedding-run`, frozen into a
-`CardTable`. The drafter and the deck models can start from checkpoints
-trained on human data; the player, its win chance and the guess model
-always start untrained. The deck score `--decks-run` holds stays frozen as
-the human-trained score, and a copy of it learns from the games. A model's weights fit only the card
-vectors they were trained with, so `--embedding-run` should be the run its
-checkpoint came from or one that read the same vectors. The table is not
-trained here, so a model whose rate is zero does not change. The guess
-model's meta starts from the human decks of the training split, and each
-iteration's decks join it once their games are over. Every few iterations
-the player is scored with the scoring harness on paired deals of human
-decks it never trains on, against random play, scripted greedy and the
-heuristic player. Run it with `uv run python -m jace.loops.train_limited --help`.
+This is the limited loop run for real. Each iteration drafts packs of the set's
+playable cards, and the deck search keeps each pool's best few decks, one for
+each block of games. The decks play each other on the engine in worker
+processes. Every deck plays the same number of games, and every game is played
+to its end. Every few iterations the player is scored on paired deals of
+held-out human decks, against random play, scripted greedy and the heuristic
+player. Run it with `uv run python -m jace.loops.train_limited --help`.
+
+Every model reads cards through the card vectors of `--embedding-run`, frozen
+into a `CardTable`. The table is not trained here, so a model whose rate is
+zero does not change. The drafter and the deck models can start from
+checkpoints trained on human data, while the player, its win chance and the
+guess model always start untrained. A model's weights fit only the card vectors
+they were trained with, so `--embedding-run` should be the run those
+checkpoints came from, or one that read the same vectors. A frozen copy of the
+deck score from `--decks-run` is the human-trained score, and the loaded score
+learns from the games. The guess model's meta, its statistics of the format's
+decks, starts from the human decks of the training split, and each iteration's
+decks join it once their games are over.
 """
 
 import argparse
@@ -77,7 +79,7 @@ from jace.train.workers import play_on_workers, start_workers, stop_workers
 
 __all__ = ("main",)
 
-# Ataraxos's player rule. Its `keep_quantile`, `normalize` and `spread` are replaced by the arguments and the schedule.
+# Ataraxos's player rule. The flags replace its `keep_quantile` and `normalize`, and the schedule replaces its `spread`.
 _PLAYER_RULE = PlayerRule(clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.75, keep_floor=0.0, normalize=True)
 _SLICE_ROWS = 512
 
@@ -183,8 +185,8 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     arguments = _Arguments(**vars(parser.parse_args(argv)))
     if arguments.resume is not None:
         config = json.loads((arguments.resume / "identity.json").read_text())["config"]
-        # The drafter is pulled toward the drafter the run started from, and the learning deck score toward the
-        # deck score it started from. Only those runs' checkpoints hold them.
+        # The drafter is pulled toward the drafter the run started from, and the learning deck score toward the deck
+        # score it started from. Only those runs' checkpoints contain them, so a resume must name the same runs again.
         for name, given in (("drafter_run", arguments.drafter_run), ("decks_run", arguments.decks_run)):
             if given is None and config[name] is not None:
                 parser.error(
@@ -195,7 +197,7 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
 
 @dataclass(frozen=True, slots=True)
 class _Models:
-    # Every trained thing of a run. The six models share `embedding`, which is not trained.
+    # Every module a run saves. The six models share `embedding`, the card table, which is not trained.
     player: PlayerModel
     win_chance: WinChanceModel
     guess: GuessModel
@@ -238,7 +240,6 @@ def _build_models(arguments: _Arguments, embedding: CardTable, *, pool: CardPool
 
 
 def _load_inputs(arguments: _Arguments, models: _Models) -> tuple[CheckpointRef, ...]:
-    # Loads the newest model checkpoints of the runs the arguments name and returns their references.
     # A model's checkpoint never replaces the shared card table.
     modules = _by_name(models)
     sources: list[tuple[Path | None, ModelName]] = [
@@ -256,8 +257,7 @@ def _load_inputs(arguments: _Arguments, models: _Models) -> tuple[CheckpointRef,
 
 
 def _resume(run_folder: Path, models: _Models) -> int:
-    # Loads the newest checkpoint of every module of the stopped run at `run_folder` and returns
-    # the iteration they were saved after. Optimizer state is not checkpointed, so it starts fresh.
+    # Returns the iteration the newest checkpoints were saved after. Optimizers are not checkpointed and start fresh.
     modules = _by_name(models)
     updates: set[int] = set()
     for model in ("embedding", *(name for name in modules if name != "embedding")):
@@ -272,7 +272,6 @@ def _resume(run_folder: Path, models: _Models) -> int:
 
 
 def _save(run: Running, models: _Models, *, iteration: int) -> CheckpointRef:
-    # Saves every module and returns the player's checkpoint.
     saved = {
         name: save_checkpoint(run, model=name, update=iteration, module=module)
         for name, module in _by_name(models).items()
@@ -292,13 +291,15 @@ def _train(
 ) -> None:
     """Run every iteration after `done`, scoring the player and saving checkpoints on the way.
 
-    Every module is saved after every `checkpoint_every`-th iteration, when
-    that is above zero, after the last, and after every `evaluate_every`-th,
-    when the player is also scored on the harness's deals. The curve file
-    is rewritten after each iteration, so a run that is stopped still has
-    its curve. `done` is how many iterations a resumed run has already
-    finished and checkpointed; a new run passes zero. A resumed run keeps
-    the curve up to `done` and goes on from there.
+    Every module is saved after the last iteration and after every
+    `evaluate_every`-th, when the player is also scored on the harness's deals.
+    With `checkpoint_every` above zero, every module is also saved after every
+    `checkpoint_every`-th iteration. The curve file is rewritten after each
+    iteration, so a stopped run still has its curve.
+
+    `done` is how many iterations a resumed run has already finished and
+    checkpointed, and a new run passes zero. A resumed run keeps its curve up
+    to `done`, drops any later points, and goes on from there.
     """
     every = arguments.checkpoint_every
     checkpoint_at = {arguments.iterations, *(range(every, arguments.iterations, every) if every > 0 else ())}
@@ -332,8 +333,8 @@ def _train(
 
 
 def _move(models: _Models, *, frozen: Sequence[nn.Module], to: torch.device) -> torch.device:
-    # Drafting, deck building and every update run on the device, with the frozen human-trained models
-    # the updates read. The workers play on the CPU, with weights sent from here.
+    # Drafting, deck building and every update run on `to`, so the frozen human-trained models they read go there too.
+    # The workers play on the CPU, with weights sent from here.
     for module in (*_by_name(models).values(), *frozen):
         module.to(to)
     return to
@@ -347,8 +348,8 @@ def _note_switch(iteration: int, *, before: ScoreCheck, after: ScoreCheck) -> No
 
 
 def _resumed_check(curve_file: Path, *, done: int, rule: ScoreRule) -> ScoreCheck:
-    # The deck-score check a stopped run had reached, from the losses and the switch its curve logged. The decks
-    # it played were not saved, so the learning deck score's window starts empty.
+    # Rebuilds the deck-score check a stopped run had reached from the test losses and the switch in its curve. The
+    # decks it played were not saved, so the learning deck score's window starts empty.
     points = [
         point
         for point in json.loads(curve_file.read_text())["iterations"]
@@ -366,12 +367,12 @@ def _resumed_check(curve_file: Path, *, done: int, rule: ScoreRule) -> ScoreChec
 def main(argv: Sequence[str]) -> None:
     """Run limited training on one card set and save its record, checkpoints and curve.
 
-    The run folder is created under `--run-dir` by `jace.tracking` and gets
-    a checkpoint of every model at the end, at every evaluation, and every
-    `--checkpoint-every` iterations. The curve is written beside it as
-    `<run id>.curve.json`: the metrics of every iteration, with the seconds
-    each step took, and the player's win rates against the three scripted
-    players at each evaluation.
+    `jace.tracking` creates the run folder under `--run-dir`, and the run saves
+    a checkpoint of every module at the end, at every evaluation and every
+    `--checkpoint-every` iterations. The curve file `<run id>.curve.json` is
+    next to the folder. It contains the metrics of every iteration, with the
+    seconds each step took, and the player's win rates against the three
+    scripted players at each evaluation.
     """
     arguments = _arguments(argv)
     torch.manual_seed(arguments.seed)
@@ -384,8 +385,8 @@ def main(argv: Sequence[str]) -> None:
     )
     models = _build_models(arguments, embedding, pool=pool, picks=limited.picks)
     inputs = (embedding_ref, *_load_inputs(arguments, models))
-    # The copies are taken before a resumed run's own models are loaded, so the pulls stay toward the
-    # drafter and the deck score trained on human data. Each keeps its own copy of the card table.
+    # The copies are made before a resumed run's own models are loaded, so the pulls stay toward the drafter and the
+    # deck score trained on human data. Each copy gets its own card table.
     human_drafter = None
     if arguments.drafter_run is not None:
         human_drafter = copy.deepcopy(models.drafter).eval().requires_grad_(requires_grad=False)
@@ -394,7 +395,7 @@ def main(argv: Sequence[str]) -> None:
     # A resumed run must not replay the games it already played.
     rng = random.Random(arguments.seed + done)
 
-    # The card table has no parameters, so it has no optimizer: self-play does not train it.
+    # The card table has no parameters, so it gets no optimizer, and self-play does not train it.
     optimizers: dict[ModelName, torch.optim.Optimizer] = {
         name: torch.optim.Adam(own_parameters(module, models.embedding), lr=arguments.rate)
         for name, module in _by_name(models).items()
@@ -449,7 +450,7 @@ def main(argv: Sequence[str]) -> None:
     )
 
     def play(matchups: Sequence[Matchup]) -> Collected:
-        # Reuses the last round's workers, a stalled one replaced, and returns the decisions on the models' device.
+        # Reuses the last call's workers, with any stalled one replaced. It returns the decisions on the models' device.
         nonlocal workers
         collected, workers = play_on_workers(
             workers, matchups, weights=play_weights(play_models), stall_seconds=arguments.stall_seconds, device=device
@@ -457,7 +458,6 @@ def main(argv: Sequence[str]) -> None:
         return collected
 
     def iterate(iteration: int) -> dict[str, float]:
-        # Each iteration hands the deck-score check it ends with to the next.
         nonlocal check
         dials = schedule(iteration)
         if arguments.player_rate is not None:
@@ -465,8 +465,8 @@ def main(argv: Sequence[str]) -> None:
         metrics, after = limited_iteration(
             setup, learners, check=check, dials=dials, other_seats=(), play=play, rng=rng
         )
-        # The iteration's decks, the newest of the check's recent ones, join the meta only now that their games
-        # are over, so no game of the iteration was guessed with them.
+        # `after.recent[-1]` contains the decks of this iteration that finished a game. They join the meta only now
+        # that their games are over, so the meta never contains a deck while that deck is in play.
         models.guess.set_meta(blend_meta(models.guess.meta, after.recent[-1].decks, decay=arguments.meta_decay))
         _note_switch(iteration, before=check, after=after)
         check = after
@@ -478,7 +478,7 @@ def main(argv: Sequence[str]) -> None:
         check = FIRST_CHECK
         models.guess.set_meta(starting_meta(arguments, cards))
     else:
-        # The resumed guess model holds the meta of the decks the run had played.
+        # The resumed guess model's checkpoint already contains the meta the run had reached, so it is not set again.
         folder, curve_file = arguments.resume, arguments.resume.with_name(f"{arguments.resume.name}.curve.json")
         check = _resumed_check(curve_file, done=done, rule=setup.score_rule)
     try:

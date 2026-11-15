@@ -1,21 +1,24 @@
 """Train the deck score and the deck builder on human decks, before any self-play.
 
-The deck score learns each deck's chance of winning a game from the wins
-and losses of the event it played. The deck builder learns the human's deck
-for a pool by teacher forcing: the deck's spells and nonbasic lands in a
-random order, cut into the rounds the builder samples in, the human's land
-total and the human's basics split. A new random order each time the deck
-is drawn teaches it to finish a deck from any partial one. Both read the
-card vectors of a drafter pretraining run, frozen into a `CardTable`, so
-neither can move what the drafter learned about the cards.
+The deck score learns each deck's chance of winning a game from the wins and
+losses of the event it played. The deck builder learns the human's deck for a
+pool by teacher forcing, which trains it to make each of the human's choices
+likely, given the deck built so far. The choices are the human's land total,
+the deck's spells and nonbasic lands, and the human's split of basic lands. The
+spells and nonbasic lands come in a random order, cut into the rounds the
+builder samples in. Each time a deck is drawn it gets a new order, so the
+builder learns to finish a deck from any partial one. Both models read the card
+vectors of a drafter pretraining run, frozen into a `CardTable`, so neither can
+change what the drafter learned about the cards.
 
-Basic lands follow `BuildRules`: a deck may hold any number of them, so the
-builder never reads the basics counted in a human pool and splits the land
-slots left with its basics head. Only human decks that the rules allow
-teach or test the builder. The deck score reads every deck. Both models are
-measured with `jace.loops.deck_measures`, on held-out decks and on as many
-training decks, so the two curves show when a model starts to fit its
-training decks better than decks it has not seen.
+Under `BuildRules`, a deck may contain any number of basic lands. The builder
+therefore never reads the basics counted in a human pool, and its basics head
+chooses how many of each basic fill the land slots that are left. The builder
+trains and is tested only on human decks that the rules allow, while the deck
+score trains on every deck. Both models are measured with
+`jace.loops.deck_measures`, on held-out decks and on as many training decks, so
+the two curves show when a model starts to fit its training decks better than
+decks it has not seen.
 
 Run it with `uv run python -m jace.loops.pretrain_decks --help`. The card
 set must already be downloaded with `uv run spells add <set>`.
@@ -76,12 +79,12 @@ __all__ = (
 class DeckSettings:
     """How long to train one deck model and how often to measure it.
 
-    Each of `steps` steps trains on `decks_per_step` human decks drawn at
-    random from the training decks. Every `evaluate_every` steps, and after
-    the last step, the model is measured on the first `evaluate_decks`
-    held-out decks and on as many of the first training decks, and the
-    result is logged with the mean training loss since the previous
-    measurement.
+    Each of the `steps` steps trains on `decks_per_step` human decks, drawn at
+    random from the training decks, and `max_grad_norm` caps the norm of each
+    step's gradient. The model is measured every `evaluate_every` steps and
+    after the last step, on the first `evaluate_decks` held-out decks and on as
+    many of the first training decks. Each measurement is logged with the mean
+    training loss since the previous one.
     """
 
     steps: int
@@ -93,8 +96,8 @@ class DeckSettings:
 
 @dataclass(frozen=True, slots=True)
 class ScorePoint:
-    # `loss` is the mean training loss since the previous point. `log_loss` and `correlation` are the held-out fit at
-    # `step`, and `training_log_loss` is the log loss on as many training decks.
+    # `loss` is the mean training loss since the previous point. `log_loss` and `correlation` are the `score_fit` of
+    # the held-out decks after `step` steps, and `training_log_loss` is the log loss on as many training decks.
     step: int
     loss: float
     log_loss: float
@@ -106,12 +109,12 @@ class ScorePoint:
 class BuilderPoint:
     """One measurement of a deck builder pretraining run, after `step` steps.
 
-    `loss` is the mean training loss since the previous point, weighted as
-    training weighs decks. `log_loss` is `build_log_loss` of the held-out
-    human builds, unweighted, and `training_log_loss` the same on as many
-    training builds. `overlap` and `lands` measure the builder's likeliest
-    deck for each held-out pool: its `deck_overlap` with the human deck and
-    its `land_total_match`.
+    `loss` is the mean training loss since the previous point, with each deck
+    weighted as in training. `log_loss` is the unweighted `build_log_loss` of
+    the held-out human builds, and `training_log_loss` is the same on as many
+    training builds. `overlap` and `lands` measure the builder's likeliest deck
+    for each held-out pool. `overlap` is its `deck_overlap` with the human
+    deck, and `lands` is its `land_total_match`.
     """
 
     step: int
@@ -134,11 +137,13 @@ def pretrain_deck_score(
 ) -> tuple[ScorePoint, ...]:
     """Train `model` on the decks that are not held out and return its learning curve.
 
-    A deck's target is its event's record: the loss is the binomial log
-    loss of the wins out of the games played, so a deck with more games
-    counts for more. Each of `optimizers` has its learning rate set to its
-    rate at the call times `rate_scale(step)`. `generator` draws the batches
-    and lives on the CPU. Every point is also logged to `run` under
+    A deck's target is its event's record. The loss is the binomial log loss of
+    the deck's wins out of its games, so a deck with more games counts for
+    more.
+
+    At each step, each optimizer's learning rate is its rate at the call times
+    `rate_scale(step)`. `generator` draws the batches and must be a CPU
+    generator. Every point of the curve is also logged to `run` under
     "deck_score".
     """
     device = model.cards.embedding.device
@@ -192,20 +197,21 @@ def pretrain_deck_builder(
 ) -> tuple[BuilderPoint, ...]:
     """Train `model` to write the human deck for a pool and return its learning curve.
 
-    Each step lays `decks_per_step` human decks out with `builds_from_decks`
-    and lowers their negative log-probability under the builder's sampling
-    at temperature 1, in rounds of `spells_per_round`, so one call of the
-    model learns every round of every deck. A deck's log-probability weighs
-    the share of games its event won, kept at or above
-    `jace.data.RESULT_FLOOR` as the pick weights are, and the weights of a
-    batch average one. Only decks that `allowed_by(rules, decks)` accepts
-    are used, for training and measuring. Each measured deck is laid out in
-    one random order before the first step, so every point scores the same
-    builds.
+    The builder learns by teacher forcing. Each step lays out `decks_per_step`
+    human decks with `builds_from_decks` and lowers their negative
+    log-probability under the builder's sampling at temperature 1, in rounds of
+    `spells_per_round`. One call of the model scores every round of every deck.
+    Each deck's log-probability is weighted by the share of games its event
+    won, kept at or above `jace.data.RESULT_FLOOR` as the pick weights are, and
+    the weights of a batch average one. Only decks that
+    `allowed_by(rules, decks)` accepts are used, for training and for measuring.
 
-    `optimizers` and `rate_scale` are as in `pretrain_deck_score`.
-    `generator` draws the batches and the orders and lives on the CPU. Every
-    point is also logged to `run` under "deck_builder".
+    Each measured deck is laid out in one random order before the first step,
+    so every point of the curve scores the same builds. Every point is also
+    logged to `run` under "deck_builder".
+
+    `optimizers` and `rate_scale` are as in `pretrain_deck_score`. `generator`
+    draws the batches and the orders, and must be a CPU generator.
     """
     device = model.cards.embedding.device
     allowed = allowed_by(rules, decks)
@@ -332,16 +338,19 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
 def main(argv: Sequence[str]) -> None:
     """Pretrain a deck score and a deck builder on one card set and save the run.
 
-    The score trains first and the builder second, on one card table.
-    The run folder is created under `--run-dir` by `jace.tracking` and gets
-    a "deck_score", a "deck_builder" and an "embedding" checkpoint. The
-    curves are written beside it as `<run id>.curve.json`, with the log
-    loss of predicting the training decks' overall win rate for every
-    held-out deck as the score's baseline. The builder's curve measures its
-    likeliest deck, and the summary adds the overlap of one deck sampled at
-    temperature 1 from each of the same held-out pools. The land head's
-    baseline is the land total the training decks hold most often, and how
-    often the held-out decks hold it.
+    The score trains first and the builder second, both on one card table.
+    `jace.tracking` creates the run folder under `--run-dir`, and the run saves
+    a "deck_score", a "deck_builder" and an "embedding" checkpoint in it. The
+    curve file `<run id>.curve.json` is written beside the folder, with a
+    baseline for each model.
+
+    In the curve file, the score's baseline predicts the training decks'
+    overall win rate for every held-out deck, with its log loss. The builder's
+    curve is measured on its likeliest deck for each held-out pool, and the
+    file adds the overlap of one deck sampled at temperature 1 from each of the
+    same pools. The land head's baseline is the most common land total among
+    the training decks the rules allow, with the share of the human decks of
+    those held-out pools that have it.
     """
     arguments = _arguments(argv)
     device = device_named(arguments.device)
