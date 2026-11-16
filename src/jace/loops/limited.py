@@ -130,10 +130,9 @@ class Learners:
     reads `human_score` until the deck-score check switches it to `score`.
 
     `optimizers` has one optimizer per model, keyed "player", "win_chance",
-    "guess", "drafter", "deck_builder" and "deck_score", over that model's own
-    parameters. The win chance learns at the player's rate. No optimizer may
-    contain the shared card embedding's parameters, so build each one from
-    `own_parameters`.
+    "guess", "drafter", "deck_builder" and "deck_score". Build each from
+    `own_parameters`, so that none contains the shared card embedding. The win
+    chance learns at the player's rate.
     """
 
     policy: Policy
@@ -415,21 +414,22 @@ def limited_iteration(
     other_seats: Sequence[Drafter],
     play: PlayGames,
     rng: random.Random,
-) -> tuple[Metrics, ScoreCheck]:
-    """Draft, build, play and learn once, and return the metrics and the deck-score check this iteration ends with.
+) -> tuple[Metrics, ScoreCheck, PlayedDecks]:
+    """Draft, build, play and learn once, and return the metrics, the next deck-score check and the decks played.
 
     `check` is the deck-score check the previous iteration returned, or
     `FIRST_CHECK` for the first. `dials` are this iteration's values from the
     schedule. `other_seats` are the drafters of the last seats of every pod,
     such as past versions, and the learner drafts in the rest. `play` plays a
     list of matchups to their end with the learners' player in both seats, on
-    the engine and in the processes the caller chose. It returns the decisions
+    the engine and in the processes the caller chose, and returns the decisions
     on the play models' device.
 
     Each block's games are the `balanced_matchups` of that block's builds, so
     every deck plays the same number of games. The builder learns only in an
     iteration whose search read the learning deck score. The metrics include
-    the seconds each of the four steps took in the whole iteration.
+    the seconds each of the four steps took in the whole iteration. The decks
+    played are those that finished a game, and none when no game finished.
     """
     generator = torch.Generator().manual_seed(rng.getrandbits(_SEED_BITS))
     _set_rate(learners.optimizers["player"], dials.player_rate)
@@ -497,4 +497,4 @@ def limited_iteration(
         "play_seconds": playing,
         "update_seconds": updating + time.perf_counter() - deck_updates_began,
     }
-    return metrics | seconds, after
+    return metrics | seconds, after, tested

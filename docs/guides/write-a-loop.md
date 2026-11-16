@@ -37,7 +37,7 @@ if check.reads_learning and dials.builder_rate > 0:
 if dials.drafter_rate > 0:
     # A pool's deck is its best build, the one the deck score ranked first.
     metrics |= _update_drafter(..., win_rates=best_wins / best_games.clamp_min(1.0), ...)
-return metrics, after
+return metrics, after, tested
 ```
 
 The loop has two deck scores. One was trained on human decks and stays
@@ -86,8 +86,8 @@ uv run python -m jace.loops.train_limited --help
 The loop calls the player, its win chance and the guess model only as
 functions, and it plays games only through `play`. That is why the same
 loop runs on manabot in worker processes and on the toy game in one
-process. `limited_iteration` returns its metrics and the check to pass to the
-next iteration.
+process. `limited_iteration` returns its metrics, the check to pass to the
+next iteration, and the decks that finished a game.
 
 The guess model starts each guess from a meta. A meta is a set of
 statistics over a format's decks: how many copies of each card they
@@ -96,10 +96,11 @@ not change the meta.
 `train_limited` sets it to the human decks' meta before the first
 iteration. After each iteration, it blends that iteration's decks into the
 meta, so no game is guessed with a meta that contains its own decks. Those
-decks are the last entry of the returned check's `recent`:
+are the decks `limited_iteration` returns:
 
 ```python
-meta = blend_meta(models.guess.meta, after.recent[-1].decks, decay=arguments.meta_decay)
+metrics, after, played = limited_iteration(setup, learners, check=check, ...)
+meta = blend_meta(models.guess.meta, played.decks, decay=arguments.meta_decay)
 models.guess.set_meta(meta)
 ```
 

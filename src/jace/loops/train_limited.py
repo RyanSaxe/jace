@@ -462,12 +462,12 @@ def main(argv: Sequence[str]) -> None:
         dials = schedule(iteration)
         if arguments.player_rate is not None:
             dials = replace(dials, player_rate=arguments.player_rate)
-        metrics, after = limited_iteration(
+        metrics, after, played = limited_iteration(
             setup, learners, check=check, dials=dials, other_seats=(), play=play, rng=rng
         )
-        # `after.recent[-1]` contains the decks of this iteration that finished a game. They join the meta only now
-        # that their games are over, so the meta never contains a deck while that deck is in play.
-        models.guess.set_meta(blend_meta(models.guess.meta, after.recent[-1].decks, decay=arguments.meta_decay))
+        # The decks join the meta only once their games are over, so the meta never contains a deck while it is in play.
+        # With no deck played, the blend only multiplies the meta's deck weights by the decay.
+        models.guess.set_meta(blend_meta(models.guess.meta, played.decks, decay=arguments.meta_decay))
         _note_switch(iteration, before=check, after=after)
         check = after
         return dict(metrics)
