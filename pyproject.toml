@@ -3,11 +3,14 @@ name = "jace"
 version = "0.1.0"
 description = "Learn to draft, build decks and play Magic: The Gathering by self-play"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.13,<3.14"
 dependencies = [
-    "manabot",
+    "manabot>=0.2.3",
+    "managym>=0.2.3",
     "numpy>=2",
+    "spells-mtg>=0.18",
     "torch>=2.10",
+    "transformers>=5.22.2",
 ]
 
 [dependency-groups]
@@ -22,7 +25,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py312"
+target-version = "py313"
 # BYOR vendors and manages these check scripts; they follow BYOR's own config.
 # The repository's own check scripts sit beside them and are linted.
 extend-exclude = [
@@ -64,6 +67,10 @@ ignore = [
     "PLR0913",
     # Seeded pseudo-random generators drive simulations here; nothing is cryptographic.
     "S311",
+    # TODO comments mark open design questions in the code itself, with no author or issue link.
+    "FIX002",
+    "TD002",
+    "TD003",
 ]
 
 [tool.ruff.lint.mccabe]
@@ -76,6 +83,10 @@ ban-relative-imports = "all"
 [tool.ruff.lint.per-file-ignores]
 ".byor/scripts/max-file-lines.py" = [
     # This check runs git with fixed arguments, never with outside input.
+    "S603",
+]
+"src/jace/loops/keep_running.py" = [
+    # It starts this package's own training command with the flags its caller typed.
     "S603",
 ]
 "tests/**/*.py" = [
@@ -99,6 +110,3 @@ exclude = [
     ".byor/scripts/no-thin-docstrings.py",
     ".byor/scripts/ruff.py",
 ]
-
-[tool.uv.sources]
-manabot = { git = "https://github.com/loopflowstudio/manabot", rev = "b5e8f404adf55a2315a2810906cbb81c49465781" }

@@ -1,0 +1,95 @@
+"""Check pretraining on human picks through `jace.loops.pretrain` and the drafter.
+
+The pretraining test makes up its drafts. Every pack is random, and the
+"human" always takes the card with the lowest id in the pack. A tiny model
+learns that rule in a few seconds on the CPU. The test uses a real run
+folder in a temporary directory, a real model and real optimizers. The
+whole-draft test scores random packs and picks with an untrained model.
+Every one of its packs contains card 0, because the model reads a pack
+with no cards as padding.
+"""
+
+import functools
+from datetime import UTC, datetime
+from pathlib import Path
+
+import torch
+
+from jace.cards import CardTable
+from jace.data import HumanDrafts
+from jace.draft import DrafterModel
+from jace.loops.pretrain import PretrainSettings, pick_accuracy, pretrain_drafter
+from jace.tracking import Identity, create_run, writing
+
+__all__ = ()
+
+_CARDS = 10
+_ROUNDS = 2
+_PICKS_PER_ROUND = 3
+
+
+def _lowest_card_drafts(drafts: int, *, generator: torch.Generator) -> HumanDrafts:
+    steps = _ROUNDS * _PICKS_PER_ROUND
+    packs = torch.full((drafts, steps, _PICKS_PER_ROUND), -1, dtype=torch.int16)
+    for draft in range(drafts):
+        for step in range(steps):
+            size = _PICKS_PER_ROUND - step % _PICKS_PER_ROUND
+            packs[draft, step, :size] = torch.randperm(_CARDS, generator=generator)[:size].to(torch.int16)
+    lowest = torch.where(packs < 0, _CARDS, packs).min(dim=-1).values
+    held_out = torch.arange(drafts) >= drafts * 3 // 4
+    return HumanDrafts(packs=packs, picks=lowest, weights=torch.ones(drafts, steps), held_out=held_out)
+
+
+def _model(*, dropout: float) -> DrafterModel:
+    embedding = CardTable(torch.randn(_CARDS, 8))
+    return DrafterModel(embedding, width=16, layers=2, heads=2, picks=_ROUNDS * _PICKS_PER_ROUND, dropout=dropout)
+
+
+def test_scoring_a_whole_draft_gives_each_pick_the_logits_it_gets_from_its_own_history() -> None:
+    torch.manual_seed(0)
+    model = _model(dropout=0.0)
+    seen = (torch.rand(3, 6, _CARDS) < 0.4).float()
+    seen[:, :, 0] = 1.0
+    picks = torch.randint(_CARDS, (3, 6))
+
+    whole = model.whole_draft(seen, picks)
+
+    for step in range(6):
+        alone = model.forward(seen[:, :step], picks[:, :step], pack=seen[:, step])
+        in_pack = alone.isfinite()
+        assert torch.equal(in_pack, whole[:, step].isfinite())
+        assert torch.allclose(whole[:, step][in_pack], alone[in_pack], atol=1e-5)
+
+
+def test_pretraining_on_picks_that_follow_a_rule_learns_the_rule_on_held_out_drafts(tmp_path: Path) -> None:
+    torch.manual_seed(0)
+    generator = torch.Generator().manual_seed(0)
+    drafts = _lowest_card_drafts(64, generator=generator)
+    model = _model(dropout=0.1)
+    optimizers = [torch.optim.Adam(model.parameters(), lr=1e-2)]
+    settings = PretrainSettings(steps=60, drafts_per_step=16, evaluate_every=20, evaluate_drafts=16, max_grad_norm=1.0)
+    identity = Identity(config={}, seed=0, jace_commit="test", manabot_commit="test", inputs=())
+    clock = functools.partial(datetime, 2026, 1, 1, tzinfo=UTC)
+    folder = create_run(tmp_path, identity, clock=clock)
+    held_out = drafts.held_out.nonzero().squeeze(1)
+    untrained = pick_accuracy(
+        model.eval().whole_draft, drafts, rows=held_out, cards=_CARDS, device=torch.device("cpu"), settings=settings
+    )
+    model.train()
+
+    with writing(folder, clock=clock) as run:
+        curve = pretrain_drafter(
+            model,
+            drafts,
+            optimizers=optimizers,
+            rate_scale=lambda _: 1.0,
+            settings=settings,
+            run=run,
+            generator=generator,
+        )
+
+    assert [point.step for point in curve] == [20, 40, 60]
+    assert untrained.top1 < 0.8
+    assert curve[-1].top1 > 0.95
+    assert curve[-1].log_loss < untrained.log_loss / 2
+    assert model.training

@@ -1,0 +1,79 @@
+"""Check when the deck search switches to the learning deck score, through `check_scores`.
+
+The two scores here are plain functions. The human-trained score predicts
+the same chance for every deck, an even one unless a test sets another. The
+learning score predicts the chances a test gives it. When a test gives it
+the decks' true chances, its log loss on the decks' records is lower than
+the human-trained score's, and the gap grows the further those chances are
+from even. In each iteration, `_iterations` draws every deck's wins out of
+200 games at its true chance, from a generator with a fixed seed.
+"""
+
+import torch
+from torch import Tensor
+
+from jace.loops import FIRST_CHECK, PlayedDecks, ScoreCheck, ScoreRule, check_scores
+
+__all__ = ()
+
+_DECKS = 64
+_GAMES = 200.0
+_RULE = ScoreRule(window=2, passes=1, pull=1.0, switch_iterations=3, switch_margin=0.01)
+
+
+def _iterations(
+    chances: Tensor, *, believed: Tensor, count: int, check: ScoreCheck, human_believes: float = 0.5
+) -> list[ScoreCheck]:
+    # Runs `count` iterations of the check on decks that win at `chances`, scored by a human-trained score that
+    # gives every deck `human_believes` and by a learning score that predicts `believed`.
+    generator = torch.Generator().manual_seed(0)
+    decks = torch.eye(_DECKS)
+    checks: list[ScoreCheck] = []
+    for _ in range(count):
+        wins = torch.binomial(torch.full((_DECKS,), _GAMES), chances, generator=generator)
+        played = PlayedDecks(decks=decks, wins=wins, games=torch.full((_DECKS,), _GAMES))
+        check, _ = check_scores(
+            check,
+            played=played,
+            human=lambda decks: torch.full((len(decks),), human_believes).logit(),
+            learning=lambda _decks: believed.logit(),
+            rule=_RULE,
+        )
+        checks.append(check)
+    return checks
+
+
+def test_the_search_switches_only_once_the_learning_score_is_better_by_the_margin_over_enough_iterations() -> None:
+    # Half the decks win 75% of their games and half win 25%. Predicting those chances beats an even guess by
+    # about 0.13 nats a game, far above the 0.01 margin. At 55% and 45% the gain is about 0.005 nats, below it.
+    spread = torch.arange(_DECKS) % 2 * 2 - 1.0
+    clear, slight = 0.5 + 0.25 * spread, 0.5 + 0.05 * spread
+    clearly_better = _iterations(clear, believed=clear, count=4, check=FIRST_CHECK)
+    barely_better = _iterations(slight, believed=slight, count=4, check=FIRST_CHECK)
+
+    assert [check.reads_learning for check in clearly_better] == [False, False, True, True]
+    assert not any(check.reads_learning for check in barely_better)
+    assert len(clearly_better[-1].recent) == _RULE.window
+
+
+def test_a_learning_score_that_only_corrects_the_human_scores_average_does_not_earn_the_switch() -> None:
+    # Every deck wins half its games, and the human-trained score gives every deck 0.65. Compared as they are,
+    # 0.65 would lose to 0.5 by about 0.05 nats a game, five times the margin. `check_scores` moves each
+    # score's mean logit to zero before it compares them, so only the ranking counts, and a constant 0.65
+    # ranks the decks no worse than the learning score's constant 0.5.
+    even = torch.full((_DECKS,), 0.5)
+    checks = _iterations(even, believed=even, count=4, check=FIRST_CHECK, human_believes=0.65)
+
+    assert not any(check.reads_learning for check in checks)
+
+
+def test_the_switch_is_one_way() -> None:
+    clear = 0.5 + 0.25 * (torch.arange(_DECKS) % 2 * 2 - 1.0)
+    switched = _iterations(clear, believed=clear, count=3, check=FIRST_CHECK)[-1]
+    # From here on, every deck wins half its games, so the learning score's confident predictions lose to the
+    # human-trained score's even ones.
+    after = _iterations(torch.full((_DECKS,), 0.5), believed=clear, count=4, check=switched)
+
+    assert switched.reads_learning
+    assert all(check.reads_learning for check in after)
+    assert after[-1].human_losses[-1] < after[-1].learning_losses[-1]

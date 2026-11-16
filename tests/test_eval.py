@@ -1,12 +1,16 @@
 """Check that the evaluation numbers mean what a reader takes them to mean.
 
-A win rate's range must tighten as games are added, and an honest guess must
-read as honest. Both are checked on results with a known answer.
+Both tests use results whose answer is known. The win-rate test scores 20
+games and then 2,000 games, half of them won each time, so only the number
+of games differs. The guess test states each card's true chance, one of
+0.05, 0.35 and 0.85, and draws whether the card is in hand at that chance.
+Each of the three chances falls in its own range of stated chance, and in
+each of those ranges the report's stated and observed chances must match.
 """
 
 import torch
 
-from jace.eval import check_guess, learner_results, win_rate
+from jace.eval import check_guess, win_rate
 from jace.play import Guess
 
 __all__ = ()
@@ -25,18 +29,12 @@ def test_the_range_around_a_win_rate_narrows_as_games_are_added() -> None:
     assert (large.high - large.low) < (small.high - small.low) / 4
 
 
-def test_each_game_counts_once_for_the_learner_however_many_decisions_it_had() -> None:
-    # Game 7: the learner (seat 0) decides twice and wins. Game 9: it decides once and loses.
-    games = torch.tensor([7, 7, 7, 9, 9])
-    learner = torch.tensor([True, False, True, False, True])
-    results = torch.tensor([1.0, 0.0, 1.0, 1.0, 0.0])
-
-    assert learner_results(games, learner=learner, results=results).tolist() == [1.0, 0.0]
-
-
 def test_a_guess_that_states_true_frequencies_reads_as_honest_and_beats_the_base_rate() -> None:
     generator = torch.Generator().manual_seed(0)
-    chance = torch.tensor([0.05, 0.35, 0.85]).repeat(20000, 1)
+    # Each card's chance changes from one decision to the next, as it does when the guess model reads the board. The
+    # base rate gives each card its frequency over all the decisions, and it would guess as well as the true
+    # chances if those never changed.
+    chance = torch.tensor([[0.05, 0.35, 0.85], [0.85, 0.05, 0.35]]).repeat(10000, 1)
     truth = (torch.rand(chance.shape, generator=generator) < chance).float()
 
     report = check_guess(Guess(deck=chance, hand=chance), hand_truth=truth)

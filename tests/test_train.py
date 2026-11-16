@@ -1,27 +1,34 @@
 """Check the training pieces on the toy game and on hand-worked examples.
 
-The tests use only what `jace.train` exports, with a tiny real model and the
-toy engine. They assert outcomes a loop author relies on: credit reaches the
-right decisions, games are never lost or split between calls, and a player
-actually gets better at a game whose best play is known.
+The tests use only what `jace.train` exports, with tiny real models and the
+toy engine. The toy game is High Card, where the best play is always to
+pick the highest card. Because that best play is known, one test can check
+that a player really gets better. The tests of credit and of earlier
+guesses use a few rows written by hand, where every expected value can be
+worked out.
 """
 
+from typing import override
+
+import numpy as np
+import numpy.typing as npt
+import pytest
 import torch
 from torch import Tensor, nn
 
+from jace.engine import Finished, Outcome
 from jace.engine.toy import HAND_SIZE, TOY_CARDS, ToyBatch
-from jace.modules import run
 from jace.play import Boards, Earlier, Guess
-from jace.train import PlayerRule, advantages, collect, earlier_guesses, sequences, update_player
+from jace.train import PlayerRule, advantages, earlier_guesses, play_games, sequences, update_player
 
 __all__ = ()
 
 HISTORY = 2
 
 
-def _uniform_policy(boards: Boards, _guess: Guess) -> tuple[Tensor, Tensor]:
+def _uniform_policy(boards: Boards, _guess: Guess) -> Tensor:
     rows = len(boards["hand"])
-    return torch.zeros(rows, HAND_SIZE), torch.full((rows,), 0.5)
+    return torch.zeros(rows, HAND_SIZE)
 
 
 def _blank_guesser(boards: Boards, _earlier: Earlier) -> Guess:
@@ -30,7 +37,9 @@ def _blank_guesser(boards: Boards, _earlier: Earlier) -> Guess:
 
 
 def test_advantages_credit_each_decision_with_the_later_surprises_of_its_own_seat_and_game() -> None:
-    # Game 0, seat 0 decides at rows 0 and 2 and wins. Seat 1 decides at row 1 and loses.
+    # In game 0, seat 0 decides at rows 0 and 2 and wins, and seat 1 decides at row 1 and loses. A decision's
+    # surprise is the change from its value to its seat's next value, or, at the seat's last decision, to the
+    # result.
     games = torch.tensor([0, 0, 0])
     seats = torch.tensor([0, 1, 0])
     values = torch.tensor([0.5, 0.5, 0.7])
@@ -45,7 +54,8 @@ def test_advantages_credit_each_decision_with_the_later_surprises_of_its_own_sea
 
 
 def test_earlier_guesses_are_the_same_seats_previous_guesses_newest_first() -> None:
-    # Rows 0, 2, 3 are game 0 seat 0. Row 1 is the other seat. Each guess is marked by its row number.
+    # Rows 0, 2 and 3 are seat 0 of game 0, and row 1 is seat 1. Each guess is marked with its row number, so
+    # the test can see which rows' guesses come back.
     games = torch.tensor([0, 0, 0, 0])
     seats = torch.tensor([0, 1, 0, 0])
     marks = torch.arange(4.0)[:, None]
@@ -58,67 +68,65 @@ def test_earlier_guesses_are_the_same_seats_previous_guesses_newest_first() -> N
     assert earlier.guesses.deck[1, 0, 0].item() == 0.0
 
 
-def test_a_game_still_running_when_collect_stops_is_returned_whole_by_a_later_call() -> None:
-    batch = ToyBatch(lambda: ((0,), (1,)), games=16, seed=3)
-    generator = torch.Generator().manual_seed(3)
-    rollouts = []
-    games_carried = 0
-    pending = None
-    for _ in range(4):
-        collected = collect(
-            batch,
-            pending,
-            learner=_uniform_policy,
-            opponent=_uniform_policy,
-            guesser=_blank_guesser,
-            cards=TOY_CARDS,
-            history=HISTORY,
-            decisions=20,
-            generator=generator,
-        )
-        pending = collected.pending
-        rollouts.append(collected.rollout)
-        games_carried += 0 if pending.rows is None else len(pending.rows.games.unique())
+def test_play_games_plays_exactly_the_games_it_was_given_and_returns_rows_of_no_other_game() -> None:
+    # Each matchup's decks appear in no other matchup, so a finished game's decks show which matchup it played.
+    matchups = [((game,), (game + 100,)) for game in range(23)]
 
-    assert games_carried > 0
-    game_sets = [set(rollout.games.tolist()) for rollout in rollouts]
-    assert sum(len(games) for games in game_sets) == len(set().union(*game_sets))
-    for rollout in rollouts:
-        for game in set(rollout.games.tolist()):
-            rows = rollout.games == game
-            first_seat = rows & (rollout.seats == 0)
-            second_seat = rows & (rollout.seats == 1)
-            assert int(first_seat.sum()) == int(second_seat.sum())
-            assert float(rollout.results[first_seat][0] + rollout.results[second_seat][0]) == 1.0
+    collected = play_games(
+        lambda games: ToyBatch(games, games=4, seed=3),
+        matchups,
+        learner=_uniform_policy,
+        opponent=_uniform_policy,
+        guesser=_blank_guesser,
+        cards=TOY_CARDS,
+        history=HISTORY,
+        generator=torch.Generator().manual_seed(3),
+    )
+
+    rollout = collected.rollout
+    assert sorted(game.game for game in collected.games) == list(range(len(matchups)))
+    assert all(game.decks == matchups[game.game] for game in collected.games)
+    assert set(rollout.games.tolist()) == set(range(len(matchups)))
+    assert (collected.abandoned, collected.lost) == (0, 0)
+    for game in range(len(matchups)):
+        first_seat = (rollout.games == game) & (rollout.seats == 0)
+        second_seat = (rollout.games == game) & (rollout.seats == 1)
+        assert int(first_seat.sum()) == int(second_seat.sum()) > 0
+        assert float(rollout.results[first_seat][0] + rollout.results[second_seat][0]) == 1.0
 
 
-def test_a_player_learns_to_pick_its_highest_card() -> None:
+@pytest.mark.parametrize("several_shuffled_passes_on_normalized_advantages", [False, True])
+def test_a_player_learns_to_pick_its_highest_card(*, several_shuffled_passes_on_normalized_advantages: bool) -> None:
     torch.manual_seed(0)
     generator = torch.Generator().manual_seed(0)
-    model = nn.Sequential(nn.Linear(HAND_SIZE + 1, 32), nn.Tanh(), nn.Linear(32, HAND_SIZE + 1))
+    options = several_shuffled_passes_on_normalized_advantages
+    model = nn.Sequential(nn.Linear(HAND_SIZE + 1, 32), nn.Tanh(), nn.Linear(32, HAND_SIZE))
+    win_chance_model = nn.Sequential(nn.Linear(HAND_SIZE + 1 + TOY_CARDS, 32), nn.Tanh(), nn.Linear(32, 1))
 
-    def policy(boards: Boards, _guess: Guess) -> tuple[Tensor, Tensor]:
-        output = run(model, torch.cat([boards["hand"], boards["seen"]], dim=-1))
-        return output[:, :HAND_SIZE], output[:, HAND_SIZE].sigmoid()
+    def policy(boards: Boards, _guess: Guess) -> Tensor:
+        view = torch.cat([boards["hand"], boards["seen"]], dim=-1)
+        return model(view)
 
-    batch = ToyBatch(lambda: ((0,), (1,)), games=64, seed=0)
+    def win_chance(boards: Boards, truth: Guess) -> Tensor:
+        view_and_truth = torch.cat([boards["hand"], boards["seen"], truth.hand], dim=-1)
+        return win_chance_model(view_and_truth).squeeze(-1).sigmoid()
+
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-3)
-    rule = PlayerRule(clip=0.2, stay=0.1, spread=0.01, keep_quantile=0.0, keep_floor=0.0, value_weight=0.5)
+    win_chance_optimizer = torch.optim.Adam(win_chance_model.parameters(), lr=3e-3)
+    rule = PlayerRule(clip=0.2, stay=0.1, spread=0.01, keep_quantile=0.0, keep_floor=0.0, normalize=options)
     best_pick_rates = []
-    pending = None
-    for _ in range(40):
-        collected = collect(
-            batch,
-            pending,
+    for iteration in range(40):
+        collected = play_games(
+            lambda games, seed=iteration: ToyBatch(games, games=64, seed=seed),
+            [((0,), (1,))] * 512,
             learner=policy,
             opponent=_uniform_policy,
             guesser=_blank_guesser,
             cards=TOY_CARDS,
             history=HISTORY,
-            decisions=512,
             generator=generator,
         )
-        rollout, pending = collected.rollout, collected.pending
+        rollout = collected.rollout
         mine = rollout.learner
         best_pick_rates.append(
             float((rollout.boards["hand"][mine].argmax(dim=-1) == rollout.actions[mine]).float().mean())
@@ -126,13 +134,51 @@ def test_a_player_learns_to_pick_its_highest_card() -> None:
         update_player(
             policy,
             rollout,
+            win_chance=win_chance,
             rule=rule,
             lam_advantage=0.5,
             lam_value=0.8,
             slice_rows=256,
             max_grad_norm=1.0,
-            optimizers=[optimizer],
+            policy_optimizers=[optimizer],
+            win_chance_optimizers=[win_chance_optimizer],
+            passes=2 if options else 1,
+            generator=generator,
         )
 
     assert best_pick_rates[0] < 0.45
     assert best_pick_rates[-1] > 0.65
+
+
+class _AbandonsEveryThirdGame(ToyBatch):
+    """The toy game, except that every third game of the list is reported as abandoned when it ends.
+
+    It stands in for an engine that cannot finish some games, which the toy
+    engine never does. The other games finish with real results, so a test
+    can tell the two kinds of ending apart.
+    """
+
+    @override
+    def act(self, actions: npt.NDArray[np.int64]) -> tuple[Finished, ...]:
+        return tuple(
+            Finished(game=ended.game, outcome=Outcome.ABANDONED, decks=ended.decks) if ended.game % 3 == 0 else ended
+            for ended in super().act(actions)
+        )
+
+
+def test_an_abandoned_game_is_counted_and_none_of_its_decisions_are_returned() -> None:
+    collected = play_games(
+        lambda games: _AbandonsEveryThirdGame(games, games=4, seed=5),
+        [((0,), (1,))] * 12,
+        learner=_uniform_policy,
+        opponent=_uniform_policy,
+        guesser=_blank_guesser,
+        cards=TOY_CARDS,
+        history=HISTORY,
+        generator=torch.Generator().manual_seed(5),
+    )
+
+    finished = {game.game for game in collected.games}
+    assert collected.abandoned == 4
+    assert finished == {game for game in range(12) if game % 3}
+    assert set(collected.rollout.games.tolist()) == finished

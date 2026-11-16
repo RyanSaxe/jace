@@ -4,9 +4,9 @@
 
 | Need             | Why                                                       |
 | ---------------- | --------------------------------------------------------- |
-| Python 3.12      | manabot supports only 3.12                                |
+| Python 3.13      | The one version `pyproject.toml` allows                   |
 | [uv](https://docs.astral.sh/uv/) | It installs jace and runs every command   |
-| A Rust toolchain | Installing builds manabot's engine from source            |
+| A Rust toolchain | Only to compile the engine, managym 0.2.3, on a platform with no prebuilt managym package. Prebuilt packages exist for macOS on Apple silicon and Linux on x86-64 |
 
 ## Install and check
 
@@ -17,8 +17,8 @@ uv sync
 uv run pytest -q
 ```
 
-The first `uv sync` compiles manabot's engine, which takes a few minutes.
-The tests then run in about three seconds, and 45 should pass.
+`uv sync` installs managym and manabot 0.2.3. Where it has to compile the
+engine, that takes a few minutes. The tests then run in under a minute.
 
 ## Run the example
 
@@ -26,14 +26,15 @@ The tests then run in about three seconds, and 45 should pass.
 uv run python -m jace.loops.toy
 ```
 
-It trains a player on High Card, a game where each seat picks one of three
-cards and the higher card wins. It needs no game engine. The share of
-decisions where the player picks its best card rises as it trains:
+It trains a player on High Card, a toy game that runs without the engine.
+Each seat holds three cards and plays one, and the higher card wins. In
+each line the example prints, `best card` is the share of decisions in
+which the player played its highest card. It rises as the player trains:
 
 ```text
-iteration  1  best card 0.36  win rate 0.56
-iteration 20  best card 0.59  win rate 0.60
-iteration 40  best card 0.78  win rate 0.74
+iteration  1  best card 0.34  win rate 0.49
+iteration 20  best card 0.61  win rate 0.67
+iteration 40  best card 0.81  win rate 0.76
 ```
 
 ## Next

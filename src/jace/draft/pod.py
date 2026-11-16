@@ -20,9 +20,9 @@ class InvalidDraftError(ValueError):
     """The format, the boosters or a set of picks does not describe a legal draft.
 
     It is raised before a new state is built, so the state the caller holds
-    is still valid. The message names the round and seat at fault when there
-    is one. It subclasses `ValueError` so callers that validate input in bulk
-    can catch both.
+    is still valid. When one round or seat is at fault, the message names
+    it. It subclasses `ValueError`, so a caller that validates input in bulk
+    can catch it together with other `ValueError`s.
     """
 
 
@@ -36,7 +36,7 @@ class DraftFormat:
     """The shape of a draft: how many seats, rounds, and picks in each round.
 
     A round is one booster per seat. Seats may take fewer cards than a booster
-    holds, and the cards left over at the end of a round are discarded. A pod
+    contains, and the cards left over at the end of a round are discarded. A pod
     of eight drafting three 14-card boosters to the last card is
     `DraftFormat(seats=8, rounds=3, picks_per_round=14)`.
     """
@@ -80,11 +80,13 @@ type PodState = Picking | Complete
 def open_pod(draft_format: DraftFormat, boosters: Sequence[Sequence[Pack]]) -> Picking:
     """Seat the pod and open the first round.
 
-    `boosters[round][seat]` is the booster that seat opens in that round. The
-    cards in a booster keep their order, and a card may appear more than once.
+    `boosters[round][seat]` is the booster that seat opens in that round.
+    Each booster's cards stay in the order given, and a card may appear more
+    than once.
 
-    Raises `InvalidDraftError` when the boosters do not match the format: the wrong
-    number of rounds or seats, or a booster too small for a round's picks.
+    Raises `InvalidDraftError` when the boosters do not match the format.
+    That happens when the number of rounds or the number of boosters in a
+    round is wrong, or when a booster has fewer cards than a round has picks.
     """
     if len(boosters) != draft_format.rounds:
         message = f"expected {draft_format.rounds} rounds of boosters, got {len(boosters)}"
@@ -117,8 +119,10 @@ def advance(state: Picking, picks: Sequence[CardId]) -> PodState:
     The result is `Picking` again after the packs are passed or the next round
     is opened, and `Complete` after the last pick of the last round. Packs
     pass to the next seat in even rounds and to the previous seat in odd
-    rounds. Raises `IllegalPickError` when a seat picks a card that is not in
-    its pack, and `InvalidDraftError` when the number of picks differs from the
+    rounds.
+
+    Raises `IllegalPickError` when a seat picks a card that is not in its
+    pack, and `InvalidDraftError` when the number of picks differs from the
     number of seats.
     """
     draft_format = state.draft_format
@@ -160,6 +164,7 @@ def _without(pack: Pack, pick: CardId, *, seat: int) -> Pack:
 def _passed(packs: tuple[Pack, ...], *, round_index: int) -> tuple[Pack, ...]:
     step = 1 if round_index % 2 == 0 else -1
     seats = len(packs)
+    # Passing to the next seat means each seat receives the pack of the seat `step` places before it.
     return tuple(packs[(seat - step) % seats] for seat in range(seats))
 
 

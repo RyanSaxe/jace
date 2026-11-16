@@ -1,16 +1,20 @@
 # Documentation
 
-Start with [The approach](concepts/approach.md). It explains what jace is
-trying to do, and the other pages build on it.
+Read [The approach](concepts/approach.md) first. It explains how jace
+learns Magic by self-play, and the other pages use its ideas without
+explaining them again.
 
 | Page                                       | What it explains                             |
 | ------------------------------------------ | -------------------------------------------- |
 | [Install](getting-started/install.md)      | Requirements, the tests and the example      |
 | [The approach](concepts/approach.md)       | The training loop and the ideas behind it    |
-| [Architecture](concepts/architecture.md)   | The modules and how games reach them         |
+| [Architecture](concepts/architecture.md)   | The modules and the interface games go through |
 | [Models](concepts/models.md)               | What each model reads and returns            |
 | [Training](concepts/training.md)           | From played games to a gradient step         |
+| [Deck building](concepts/deck-building.md) | How decks are sampled, ranked and learned from |
 | [Write a loop](guides/write-a-loop.md)     | How to assemble and change a training loop   |
 | [Run records](reference/run-records.md)    | The files a training run writes              |
+| [Data](reference/data.md)                  | The human data jace reads and its source     |
+| [Sources](reference/sources.md)            | The papers, code and data behind the design  |
 | [Status](status.md)                        | What works today and what is not built       |
 | [Contributing](contributing/README.md)     | Set-up, checks and the design rules          |

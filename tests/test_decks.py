@@ -1,27 +1,20 @@
 """Check deck building through the public interface of `jace.decks`.
 
-The tests use a twelve-card set with two basics, one non-basic land, a red
-group, a blue group and one colourless spell. Legality is judged by a helper
-written here from the rules' wording, not by the builder's own code, so a
-mistake in the builder's masks cannot hide itself. Models are tiny and real.
+Most tests use a set of twelve cards. Cards 0 and 1 are the red and blue
+basics, card 2 is a nonbasic land, cards 3 to 6 are red spells, cards 7 to 10
+are blue spells, and card 11 is a colourless spell. The test of a growing card
+pool starts from six cards of its own. A helper written here from the rules'
+wording checks which decks are legal. It shares no code with the builder's
+masks, so a mistake in those masks cannot also be in the check. The models are
+tiny and real.
 """
 
 import pytest
 import torch
 from torch import Tensor
 
-from jace.cards import CardEmbedding, Pool
-from jace.decks import (
-    BuildRules,
-    DeckBuilderModel,
-    DeckScore,
-    NoLegalDeckError,
-    build_decks,
-    improve,
-    model_proposer,
-    random_proposer,
-)
-from jace.modules import run
+from jace.cards import FIRST_PROGRAM_TOKEN, NO_PROGRAM_TOKEN, CardEncoder, CardInputs, CardTable, Pool, own_parameters
+from jace.decks import BuildRules, DeckBuilder, DeckScore, build_decks, build_log_probs, sample_builds
 
 __all__ = ()
 
@@ -29,15 +22,15 @@ CARDS = 12
 RED_BASIC, BLUE_BASIC, NONBASIC_LAND, COLOURLESS = 0, 1, 2, 11
 RED_SPELLS: Pool = (3, 3, 4, 4, 5, 6)
 BLUE_SPELLS: Pool = (7, 7, 8, 8, 9, 10)
+ROOMY_POOL: Pool = (*RED_SPELLS, *BLUE_SPELLS, NONBASIC_LAND, COLOURLESS)
 TWO_BASICS = BuildRules(
     size=10, basics=(RED_BASIC, BLUE_BASIC), nonbasic_lands=frozenset({NONBASIC_LAND}), min_lands=3, max_lands=5
 )
-NO_BASICS = BuildRules(size=10, basics=(), nonbasic_lands=frozenset({NONBASIC_LAND}), min_lands=3, max_lands=5)
 
 
-def _embedding(cards: int) -> CardEmbedding:
-    starting = torch.randn((cards, 8), generator=torch.Generator().manual_seed(cards))
-    return CardEmbedding(starting, hidden=8, offset_bound=None)
+def _embedding(cards: int) -> CardTable:
+    vectors = torch.randn((cards, 8), generator=torch.Generator().manual_seed(cards))
+    return CardTable(vectors)
 
 
 def _counts(pool: Pool) -> Tensor:
@@ -48,21 +41,27 @@ def _counts(pool: Pool) -> Tensor:
 
 
 def _legal(decks: Tensor, *, pool: Pool, rules: BuildRules) -> Tensor:
-    # decks: float [n, cards]. Returns bool [n].
+    # `decks` is float [n, cards], each deck's copies of each card. The result is bool [n], true for each
+    # legal deck.
     limit = _counts(pool)
     limit[list(rules.basics)] = rules.size
     lands = decks[:, [*rules.basics, *rules.nonbasic_lands]].sum(dim=1)
+    spells_in_pool = sum(1 for card in pool if card not in {*rules.basics, *rules.nonbasic_lands})
+    # When a pool has too few spells to fill a deck within the land range, a legal deck contains every spell in
+    # the pool, and lands in the other slots.
+    fewest = max(rules.min_lands, rules.size - spells_in_pool)
+    most = max(rules.max_lands, rules.size - spells_in_pool)
     return (
         (decks.sum(dim=1) == rules.size)
         & (decks >= 0).all(dim=1)
         & (decks <= limit).all(dim=1)
-        & (lands >= rules.min_lands)
-        & (lands <= rules.max_lands)
+        & (lands >= fewest)
+        & (lands <= most)
     )
 
 
 def _colour_scorer(decks: Tensor) -> Tensor:
-    # Rewards a deck for being one colour, blue above red, with exactly four lands.
+    # Rewards a deck for staying in one colour, blue more than red, and for having exactly four lands.
     red = decks[:, [RED_BASIC, *set(RED_SPELLS)]].sum(dim=1)
     blue = decks[:, [BLUE_BASIC, *set(BLUE_SPELLS)]].sum(dim=1)
     lands = decks[:, [RED_BASIC, BLUE_BASIC, NONBASIC_LAND]].sum(dim=1)
@@ -70,90 +69,134 @@ def _colour_scorer(decks: Tensor) -> Tensor:
 
 
 @pytest.mark.parametrize(
-    ("rules", "pool"),
+    ("pool", "spells_per_round"),
     [
-        pytest.param(TWO_BASICS, (*RED_SPELLS, *BLUE_SPELLS, NONBASIC_LAND, COLOURLESS), id="roomy pool"),
-        pytest.param(TWO_BASICS, (3, 3, 4, 7, 8, NONBASIC_LAND), id="five spells force five lands"),
-        pytest.param(NO_BASICS, (*RED_SPELLS, 7, *[NONBASIC_LAND] * 4), id="no basics and four lands"),
+        pytest.param(ROOMY_POOL, 3, id="roomy pool"),
+        pytest.param((3, 3, 4, 7, 8, NONBASIC_LAND), 2, id="five spells force five lands"),
+        pytest.param((3, 7, NONBASIC_LAND, NONBASIC_LAND), 4, id="two spells force eight lands"),
+        pytest.param((*RED_SPELLS, 7, *[NONBASIC_LAND] * 6), 1, id="more nonbasic lands than land slots"),
     ],
 )
-def test_proposed_and_improved_decks_are_legal(rules: BuildRules, pool: Pool) -> None:
-    generator = torch.Generator().manual_seed(0)
-    embedding = _embedding(CARDS)
-    builder = DeckBuilderModel(embedding, width=8, layers=1, heads=2)
-    scorer = DeckScore(embedding, width=8, layers=1, heads=2)
+def test_every_sampled_deck_is_legal_for_its_pool(pool: Pool, spells_per_round: int) -> None:
+    builder = DeckBuilder(_embedding(CARDS), width=8, layers=1, heads=2)
 
-    for propose in (
-        random_proposer(rules=rules, generator=generator),
-        model_proposer(builder, rules=rules, generator=generator),
-    ):
-        proposed = propose(_counts(pool), 24)
-        improved = improve(proposed, pool_counts=_counts(pool), score=scorer, rules=rules, rounds=3)
+    for temperature, greedy in ((1.0, False), (3.0, False), (1.0, True)):
+        builds, _ = sample_builds(
+            builder,
+            _counts(pool).expand(64, -1),
+            rules=TWO_BASICS,
+            spells_per_round=spells_per_round,
+            temperature=temperature,
+            generator=torch.Generator().manual_seed(0),
+            greedy=greedy,
+        )
 
-        assert _legal(proposed, pool=pool, rules=rules).all()
-        assert _legal(improved, pool=pool, rules=rules).all()
-        assert (run(scorer, improved) >= run(scorer, proposed) - 1e-5).all()
+        assert _legal(builds.decks, pool=pool, rules=TWO_BASICS).all()
 
 
-def test_build_decks_finds_the_best_deck_that_swaps_from_one_start_cannot_reach() -> None:
-    pool = (*RED_SPELLS, *BLUE_SPELLS, NONBASIC_LAND, COLOURLESS)
-    all_red = (*[RED_BASIC] * 4, *RED_SPELLS)
-    all_blue = (*[BLUE_BASIC] * 4, *BLUE_SPELLS)
+def test_a_pool_whose_lands_are_all_basics_still_gets_its_land_total() -> None:
+    builder = DeckBuilder(_embedding(CARDS), width=8, layers=1, heads=2)
 
-    stuck = improve(
-        _counts(all_red).unsqueeze(0), pool_counts=_counts(pool), score=_colour_scorer, rules=TWO_BASICS, rounds=20
+    builds, _ = sample_builds(
+        builder,
+        _counts((*RED_SPELLS, *BLUE_SPELLS)).expand(64, -1),
+        rules=TWO_BASICS,
+        spells_per_round=3,
+        temperature=1.0,
+        generator=torch.Generator().manual_seed(0),
     )
-    candidates = build_decks(
-        pool,
-        cards=CARDS,
-        propose=random_proposer(rules=TWO_BASICS, generator=torch.Generator().manual_seed(0)),
+
+    basics = builds.decks[:, [RED_BASIC, BLUE_BASIC]].sum(dim=1)
+    assert torch.equal(basics.long(), builds.lands)
+    assert set(builds.lands.tolist()) == {3, 4, 5}
+
+
+def test_a_sampled_decks_log_probability_is_the_one_its_build_is_scored_with() -> None:
+    builder = DeckBuilder(_embedding(CARDS), width=8, layers=1, heads=2)
+
+    builds, sampled = sample_builds(
+        builder,
+        _counts(ROOMY_POOL).expand(32, -1),
+        rules=TWO_BASICS,
+        spells_per_round=3,
+        temperature=1.5,
+        generator=torch.Generator().manual_seed(0),
+    )
+    scored, entropies = build_log_probs(builder, builds, rules=TWO_BASICS, spells_per_round=3, temperature=1.5)
+    scored.sum().backward()
+
+    assert torch.allclose(sampled, scored.detach(), atol=1e-4)
+    assert (sampled < 0).all()
+    assert (entropies > 0).all()
+    assert all(torch.isfinite(parameter.grad).all() for parameter in builder.parameters() if parameter.grad is not None)
+
+
+def test_the_search_returns_distinct_decks_best_first() -> None:
+    builder = DeckBuilder(_embedding(CARDS), width=8, layers=1, heads=2)
+
+    builds, scores = build_decks(
+        ROOMY_POOL,
+        builder=builder,
         score=_colour_scorer,
         rules=TWO_BASICS,
-        proposals=32,
-        rounds=20,
+        cards=CARDS,
+        samples=128,
+        keep=6,
+        spells_per_round=3,
+        temperature=1.0,
+        generator=torch.Generator().manual_seed(0),
     )
 
-    assert torch.equal(stuck, _counts(all_red).unsqueeze(0))
-    assert candidates[0].deck == all_blue
-    assert candidates[0].score == 150.0
-    scores = [candidate.score for candidate in candidates]
-    assert scores == sorted(scores, reverse=True)
-    assert len({candidate.deck for candidate in candidates}) == len(candidates)
+    assert len(scores) == 6
+    assert torch.equal(scores, _colour_scorer(builds.decks))
+    assert scores.tolist() == sorted(scores.tolist(), reverse=True)
+    assert len(builds.decks.unique(dim=0)) == 6
+    assert _legal(builds.decks, pool=ROOMY_POOL, rules=TWO_BASICS).all()
 
 
 def test_models_give_the_same_answers_when_the_card_pool_grows() -> None:
     small_embedding = _embedding(6)
     extra = torch.randn((9, 8), generator=torch.Generator().manual_seed(1))
-    large_embedding = CardEmbedding(torch.cat((small_embedding.starting, extra)), hidden=8, offset_bound=None)
+    large_embedding = CardTable(torch.cat((small_embedding.table, extra)))
+    rules = BuildRules(size=8, basics=(0,), nonbasic_lands=frozenset({2}), min_lands=3, max_lands=4)
     deck = torch.tensor([[2.0, 0.0, 1.0, 0.0, 3.0, 0.0]])
-    available = torch.tensor([[1.0, 2.0, 0.0, 1.0, 4.0, 0.0]])
+    pool = torch.tensor([[1.0, 2.0, 1.0, 1.0, 4.0, 1.0]])
     padding = torch.zeros((1, 9))
+    small_builder = DeckBuilder(small_embedding, width=8, layers=1, heads=2)
+    large_builder = DeckBuilder(large_embedding, width=8, layers=1, heads=2)
+    small_score = DeckScore(small_embedding, width=8, layers=1, heads=2)
+    large_score = DeckScore(large_embedding, width=8, layers=1, heads=2)
 
-    for small, large in (
-        (
-            DeckScore(small_embedding, width=8, layers=1, heads=2),
-            DeckScore(large_embedding, width=8, layers=1, heads=2),
-        ),
-        (
-            DeckBuilderModel(small_embedding, width=8, layers=1, heads=2),
-            DeckBuilderModel(large_embedding, width=8, layers=1, heads=2),
-        ),
-    ):
-        with torch.no_grad():
+    with torch.no_grad():
+        for small, large in ((small_builder, large_builder), (small_score, large_score)):
             for grown, original in zip(large.parameters(), small.parameters(), strict=True):
                 grown.copy_(original)
-            if isinstance(small, DeckScore):
-                before = run(small, deck)
-                after = run(large, torch.cat((deck, padding), dim=1))
-            else:
-                before = run(small, available, deck)
-                after = run(large, torch.cat((available, padding), dim=1), torch.cat((deck, padding), dim=1))[:, :6]
+        before = small_builder(pool, deck * (pool > 0), rules=rules)
+        after = large_builder(
+            torch.cat((pool, padding), dim=1), torch.cat((deck * (pool > 0), padding), dim=1), rules=rules
+        )
 
-        assert torch.allclose(before, after, atol=1e-5)
+        assert torch.allclose(small_score(deck), large_score(torch.cat((deck, padding), dim=1)), atol=1e-5)
+        assert torch.allclose(before.cards, after.cards[:, :6], atol=1e-5)
+        assert torch.allclose(before.lands, after.lands, atol=1e-5)
+        assert torch.allclose(before.basics, after.basics, atol=1e-5)
 
 
-def test_a_pool_with_too_few_spells_for_any_legal_deck_is_rejected() -> None:
-    propose = random_proposer(rules=TWO_BASICS, generator=torch.Generator().manual_seed(0))
+def test_a_deck_models_own_parameters_hold_none_of_the_shared_embeddings() -> None:
+    generator = torch.Generator().manual_seed(0)
+    inputs = CardInputs(
+        text=torch.randn((CARDS, 4), generator=generator),
+        program=torch.full((CARDS, 1), NO_PROGRAM_TOKEN),
+        printed=torch.randn((CARDS, 3), generator=generator),
+    )
+    embedding = CardEncoder(inputs, width=8, program_vocabulary=FIRST_PROGRAM_TOKEN, program_layers=1, heads=2)
+    shared = {id(parameter) for parameter in embedding.parameters()}
 
-    with pytest.raises(NoLegalDeckError, match="at least 8 lands and can hold at most 5"):
-        build_decks((3, 7), cards=CARDS, propose=propose, score=_colour_scorer, rules=TWO_BASICS, proposals=4, rounds=1)
+    for model in (
+        DeckScore(embedding, width=16, layers=1, heads=2),
+        DeckBuilder(embedding, width=16, layers=1, heads=2),
+    ):
+        own = own_parameters(model, embedding)
+
+        assert not shared & {id(parameter) for parameter in own}
+        assert len(own) == len(list(model.parameters())) - len(shared)

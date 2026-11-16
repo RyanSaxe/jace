@@ -1,17 +1,19 @@
 # jace
 
 jace learns to draft, build decks and play Magic: The Gathering by playing
-against itself. It plays its games on the engine from
-[manabot](https://github.com/loopflowstudio/manabot).
+against itself. It plays its games on managym, the engine of
+[manabot](https://github.com/loopflowstudio/manabot), at version 0.2.3.
 
-> **Status: early.** Every part below has a first version with tests. Nothing
-> has been trained on Magic yet. [Status](docs/status.md) says what works.
+> **Status: early.** Every part below has a first version with tests. The
+> drafter and the deck models have been trained on human data, and one short
+> run of the whole loop on real games taught a player to beat random play.
+> [Status](docs/status.md) has the measurements.
 
 ## The approach
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/approach-dark.svg">
-  <img alt="How jace trains, as a loop of four steps. Draft: the drafter picks a card from each pack. Build: the builder proposes decks and the deck score ranks them. Play: the player acts, with a guess of the opponent's cards. Learn: the game results update all five models, and the next draft uses the better models. Below the loop, one card embedding: every model reads cards through it, so a new set needs no new weights." src="assets/approach-light.svg">
+  <img alt="How jace trains, as a loop of four steps. Draft: the drafter picks a card from each pack. Build: the builder proposes decks and the deck score ranks them. Play: the player acts, with a guess of the opponent's cards. Learn: the game results update all six models, and the next draft uses the better models. Below the loop, one card embedding: every model reads cards through it, so a new set needs no new weights." src="assets/approach-light.svg">
 </picture>
 
 Limited Magic is three decisions that depend on each other: which card to
@@ -21,19 +23,26 @@ for each, and lets the result of every game teach all of them.
 | Model        | Decides                                 | Learns from                         |
 | ------------ | --------------------------------------- | ----------------------------------- |
 | Drafter      | Which card to take from a pack          | How often its decks win             |
-| Deck builder | Which 40 cards to play from a pool      | The best deck a search found        |
+| Deck builder | Which 40 cards to play from a pool      | How its decks win against its pool's other decks |
 | Deck score   | How good a deck is                      | Which decks won and lost            |
 | Guess model  | What the opponent's deck and hand hold  | The opponent's true cards           |
 | Player       | Each action in a game                   | Whether it won                      |
+| Win chance   | How likely a seat is to win, in training only | Whether the seat won          |
 
 Three ideas hold the design together:
 
 - **One card embedding.** Every model reads a card as the same vector, and
-  scores cards by that vector. A card from a new set can be drafted and
+  scores cards by that vector. An encoder makes the vector from the card's
+  printed text, its engine program and a few printed facts, all of which a
+  card has before anyone plays it. A card from a new set can be drafted and
   played without retraining an output layer.
 - **A guess of hidden cards.** A separate model predicts the opponent's deck
-  and hand from what has happened, and the player reads its guess. Self-play
-  knows the true cards, so the guess is trained on real answers.
+  and hand, and the player reads its guess. It starts from a matrix of
+  which cards decks of the format hold together, fitted only from decks it
+  could know, less the cards the opponent has shown, and learns corrections
+  from what has happened. Self-play knows the true cards, so the guess is
+  trained on real answers, and the win chance that credits the player's
+  actions reads them instead of guessing.
 - **Exploring on a schedule.** How much each model explores, and how fast it
   learns, are values a schedule sets for every round of training.
 
@@ -41,14 +50,15 @@ Three ideas hold the design together:
 
 ## Try it
 
-You need Python 3.12, [uv](https://docs.astral.sh/uv/) and a Rust toolchain,
-because installing builds manabot's engine.
+You need Python 3.13 and [uv](https://docs.astral.sh/uv/). The engine
+installs as a built package where one exists for your platform. Elsewhere
+it is built from source, which needs a Rust toolchain.
 
 ```sh
 git clone https://github.com/RyanSaxe/jace.git
 cd jace
 uv sync
-uv run pytest -q                   # 45 tests, about 3 seconds
+uv run pytest -q                   # the tests
 uv run python -m jace.loops.toy    # train a player on a toy game
 ```
 
@@ -56,9 +66,9 @@ The last command needs no game engine. The player learns a game where the
 highest card wins, and prints how often it picks its best card:
 
 ```text
-iteration  1  best card 0.36  win rate 0.56
-iteration 20  best card 0.59  win rate 0.60
-iteration 40  best card 0.78  win rate 0.74
+iteration  1  best card 0.35  win rate 0.51
+iteration 20  best card 0.63  win rate 0.72
+iteration 40  best card 0.78  win rate 0.77
 ```
 
 ## Documentation
@@ -69,8 +79,10 @@ iteration 40  best card 0.78  win rate 0.74
 | [Architecture](docs/concepts/architecture.md)  | The modules and how games reach them           |
 | [Models](docs/concepts/models.md)              | What each model reads and returns              |
 | [Training](docs/concepts/training.md)          | From played games to a gradient step           |
+| [Deck building](docs/concepts/deck-building.md) | How decks are sampled, ranked and learned from |
 | [Write a loop](docs/guides/write-a-loop.md)    | How to assemble and change a training loop     |
 | [Run records](docs/reference/run-records.md)   | The files a training run writes                |
+| [Data](docs/reference/data.md)                 | The human data jace reads and its source       |
 | [Status](docs/status.md)                       | What works today and what is not built         |
 | [Contributing](docs/contributing/README.md)    | Set-up, checks and the design rules            |
 

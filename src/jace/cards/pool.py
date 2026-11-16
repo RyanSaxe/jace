@@ -1,9 +1,10 @@
 """Card records and the pool that gives every card its id.
 
 A `CardId` is a card's position in a `CardPool`, and every tensor indexed by
-card uses that order. The pool is fixed for the life of a run, so ids saved
-in a checkpoint or a run record keep their meaning. A pool rejects two cards
-with one name, because the engine identifies cards by printed name.
+card uses that order. The pool is fixed for the life of a run, so an id
+saved in a checkpoint or a run record names the same card when it is read
+back. Building a pool with two cards of one name raises
+`DuplicateCardError`, because the engine identifies cards by printed name.
 """
 
 import enum
@@ -31,7 +32,8 @@ class CardRecord:
     set_code: str
     rarity: Rarity
     text: str
-    # The engine's typed tokens for this card, empty when the engine cannot play it.
+    # The engine's program for this card, a flat run of (kind, value) integer pairs. It is empty when the engine
+    # cannot play the card.
     program: tuple[int, ...]
 
 
@@ -43,9 +45,11 @@ class DuplicateCardError(ValueError):
 class CardPool:
     """Every card a run may use, in the fixed order that defines `CardId`.
 
-    Look cards up by id with `pool[card]` and by printed name with
-    `card_id`. `of_rarity` lists the ids of one rarity in pool order, which
-    is what booster generation samples from.
+    `pool[card]` returns a card's record, and `card_id` returns the id of
+    the card with a given printed name. `of_rarity` lists the ids of one
+    rarity in pool order, and booster generation samples from those lists.
+
+    Raises `DuplicateCardError` when two records have the same name.
     """
 
     def __init__(self, records: Sequence[CardRecord]) -> None:
