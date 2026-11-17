@@ -86,6 +86,8 @@ class GameResult:
     learner_seat: int
     # The learner's result: 1 for a win, 0.5 for a draw, 0 for a loss.
     learner_result: float
+    # True when the learner's policy played both seats.
+    self_play: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,13 +231,14 @@ def _guess(
     return guess
 
 
-def _game_result(ended: Finished, *, learner_seat: int) -> GameResult:
+def _game_result(ended: Finished, *, learner_seat: int, self_play: bool) -> GameResult:
     seat_0_result = {Outcome.SEAT_0_WON: 1.0, Outcome.SEAT_1_WON: 0.0, Outcome.DRAW: 0.5}[ended.outcome]
     return GameResult(
         game=ended.game,
         decks=ended.decks,
         learner_seat=learner_seat,
         learner_result=seat_0_result if learner_seat == 0 else 1.0 - seat_0_result,
+        self_play=self_play,
     )
 
 
@@ -311,7 +314,7 @@ def play_games(
             if ended.outcome is Outcome.ABANDONED:
                 abandoned.add(ended.game)
             else:
-                finished.append(_game_result(ended, learner_seat=int(learner_seat[ended.game])))
+                finished.append(_game_result(ended, learner_seat=int(learner_seat[ended.game]), self_play=self_play))
         pending = batch.decisions()
     rollout = _finished_rows(parts, finished, abandoned=abandoned)
     return Collected(rollout=rollout, games=tuple(finished), abandoned=len(abandoned), lost=0)

@@ -1,6 +1,6 @@
 """Check rounds of games played in worker processes, through `jace.train.workers`.
 
-Both tests start real worker processes that play the toy game. The workers
+Every test starts real worker processes that play the toy game. The workers
 share no memory, so the stalling test uses a marker file to choose which
 worker stalls. The first worker to create the file stalls. Every other
 worker, including the one started to replace it, finds the file already
@@ -16,7 +16,7 @@ import torch
 from torch import Tensor, nn
 
 from jace.engine.toy import HAND_SIZE, TOY_CARDS, ToyBatch
-from jace.play import Boards, Earlier, Guess
+from jace.play import Boards, Earlier, Guess, Policy
 from jace.train.workers import Actor, play_on_workers, start_workers, stop_workers
 
 __all__ = ()
@@ -29,12 +29,10 @@ def _blank_guesser(boards: Boards, _earlier: Earlier) -> Guess:
     return Guess(deck=torch.full((rows, TOY_CARDS), 1 / TOY_CARDS), hand=torch.full((rows, TOY_CARDS), 0.3))
 
 
-def _toy_actor(seed: int, *, stall_marker: Path | None) -> Actor:
-    # An actor that plays the toy game, four games at once. Its policy's only weights are one score for each
-    # of the three picks, so a decision's logits show which weights made it. With a marker path, the first
-    # worker to make a decision creates the file and then sleeps for ten minutes instead of returning.
-    scores = nn.Embedding(1, HAND_SIZE)
-
+def _scoring(scores: nn.Embedding, *, stall_marker: Path | None) -> Policy:
+    # A policy whose only weights are one score for each of the three picks, so a decision's logits show which
+    # weights made it. With a marker path, the first worker to make a decision creates the file and then sleeps for
+    # ten minutes instead of returning.
     def policy(boards: Boards, _guess: Guess) -> Tensor:
         if stall_marker is not None:
             try:
@@ -45,11 +43,19 @@ def _toy_actor(seed: int, *, stall_marker: Path | None) -> Actor:
                 time.sleep(600)
         return scores.weight.expand(len(boards["hand"]), -1)
 
+    return policy
+
+
+def _toy_actor(seed: int, *, stall_marker: Path | None) -> Actor:
+    # An actor that plays the toy game, four games at once, with a scoring policy and a scoring opponent.
+    scores = nn.Embedding(1, HAND_SIZE)
+    past_scores = nn.Embedding(1, HAND_SIZE)
     return Actor(
         start=lambda matchups: ToyBatch(matchups, games=4, seed=seed),
-        policy=policy,
+        policy=_scoring(scores, stall_marker=stall_marker),
+        opponent=_scoring(past_scores, stall_marker=None),
         guesser=_blank_guesser,
-        modules={"scores": scores},
+        modules={"scores": scores, "past_scores": past_scores},
         cards=TOY_CARDS,
         history=1,
     )
@@ -90,3 +96,25 @@ def test_every_decision_of_a_round_is_made_with_the_weights_sent_for_that_round(
         assert len(rollout.games.unique()) == len(matchups)
         assert bool((rollout.logits[:, 0] == score).all())
         assert bool((rollout.actions == 0).all())
+
+
+def test_a_worker_sent_a_past_player_plays_one_seat_of_its_games_with_it() -> None:
+    matchups = [((0,), (1,))] * 20
+    weights = {"scores": {"weight": torch.tensor([[0.25, -30.0, -30.0]])}}
+    past = {"past_scores": {"weight": torch.tensor([[0.75, -30.0, -30.0]])}}
+    workers = start_workers(functools.partial(_toy_actor, stall_marker=None), count=2, seed=0)
+    try:
+        collected, workers = play_on_workers(
+            workers, matchups, weights=weights, opponents=[past], stall_seconds=30.0, device=_CPU
+        )
+    finally:
+        stop_workers(workers)
+
+    # Matchup i goes to worker i % 2, so the first worker, the one sent the past player, played the even ones.
+    rollout = collected.rollout
+    against_past = rollout.games % 2 == 0
+    assert bool((rollout.logits[rollout.learner, 0] == 0.25).all())
+    assert bool((rollout.logits[~rollout.learner, 0] == 0.75).all())
+    assert bool((~rollout.learner).any())
+    assert not bool((~rollout.learner & ~against_past).any())
+    assert all(game.self_play == (game.game % 2 == 1) for game in collected.games)

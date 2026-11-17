@@ -24,6 +24,7 @@ rest itself.
 """
 
 import argparse
+import copy
 import json
 import random
 from collections.abc import Sequence
@@ -393,6 +394,8 @@ def play_actor(seed: int, *, arguments: PlayArguments, card_width: int) -> Actor
     `card_width` wide, and the weights PyTorch starts any model with. No
     game is played with these values: at the start of every round, the
     worker replaces the weights and the table with the training process's.
+    The actor's opponent is a second player, which a round loads with a past
+    player's weights under the name "past_player".
 
     Each round's games start from a new engine seed, drawn from a generator
     seeded with `seed`. The engine reports only the board arrays that the
@@ -413,11 +416,18 @@ def play_actor(seed: int, *, arguments: PlayArguments, card_width: int) -> Actor
             boards=BOARD_ARRAYS,
         )
 
+    past_player = copy.deepcopy(models.player)
     return Actor(
         start=start,
         policy=models.player.policy,
+        opponent=past_player.policy,
         guesser=models.guess.guess,
-        modules={"embedding": models.embedding, "player": models.player, "guess": models.guess},
+        modules={
+            "embedding": models.embedding,
+            "player": models.player,
+            "guess": models.guess,
+            "past_player": past_player,
+        },
         cards=len(cards.pool),
         history=arguments.history,
     )
