@@ -41,7 +41,7 @@ from jace.data import read_set
 from jace.decks import DeckBuilder, DeckScore
 from jace.draft import DrafterModel
 from jace.engine import Matchup
-from jace.loops.checked_score import FIRST_CHECK, ScoreCheck, ScoreRule
+from jace.loops.checked_score import FIRST_CHECK, ScoreCheck, ScoreRule, resumed_check
 from jace.loops.entry_points import (
     PlayArguments,
     PlayModels,
@@ -347,23 +347,6 @@ def _note_switch(iteration: int, *, before: ScoreCheck, after: ScoreCheck) -> No
         )
 
 
-def _resumed_check(curve_file: Path, *, done: int, rule: ScoreRule) -> ScoreCheck:
-    # Rebuilds the deck-score check a stopped run had reached from the test losses and the switch in its curve. The
-    # decks it played were not saved, so the learning deck score's window starts empty.
-    points = [
-        point
-        for point in json.loads(curve_file.read_text())["iterations"]
-        if point["iteration"] <= done and "deck_score/reads_learning" in point
-    ]
-    last = points[-rule.switch_iterations :]
-    return ScoreCheck(
-        recent=(),
-        human_losses=tuple(point["deck_score/human_test_loss"] for point in last),
-        learning_losses=tuple(point["deck_score/learning_test_loss"] for point in last),
-        reads_learning=any(point["deck_score/reads_learning"] > 0 for point in points),
-    )
-
-
 def main(argv: Sequence[str]) -> None:
     """Run limited training on one card set and save its record, checkpoints and curve.
 
@@ -480,7 +463,7 @@ def main(argv: Sequence[str]) -> None:
     else:
         # The resumed guess model's checkpoint already contains the meta the run had reached, so it is not set again.
         folder, curve_file = arguments.resume, arguments.resume.with_name(f"{arguments.resume.name}.curve.json")
-        check = _resumed_check(curve_file, done=done, rule=setup.score_rule)
+        check = resumed_check(curve_file, done=done, rule=setup.score_rule)
     try:
         with writing(folder, clock=clock) as run:
             _train(
