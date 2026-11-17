@@ -41,6 +41,7 @@ from jace.loops import (
     limited_iteration,
     phased_schedule,
 )
+from jace.loops.past_selves import PastSelves
 from jace.play import Boards, Earlier, Guess
 from jace.train import Collected, PlayerRule, PlayGames, play_games, select
 
@@ -238,6 +239,45 @@ def test_an_iteration_whose_games_are_all_lost_returns_no_played_decks() -> None
 
     assert len(played.decks) == 0
     assert after == check
+
+
+def test_games_against_past_selves_train_the_player_but_give_no_deck_a_record() -> None:
+    toy = _toy_loop()
+    before = _snapshot({"player": toy.trained["player"]}, embedding=toy.embedding)
+
+    def against_past_selves(matchups: Sequence[Matchup]) -> Collected:
+        collected = toy.play(matchups)
+        return replace(collected, games=tuple(replace(game, self_play=False) for game in collected.games))
+
+    _, _, played = limited_iteration(
+        toy.setup,
+        toy.learners,
+        check=FIRST_CHECK,
+        dials=phased_schedule(drafter_starts=100, pull_ends=200)(5),
+        other_seats=[],
+        play=against_past_selves,
+        rng=random.Random(0),
+    )
+
+    assert len(played.decks) == 0
+    assert _moved({"player": toy.trained["player"]}, before, embedding=toy.embedding) == {"player"}
+
+
+def test_past_selves_are_copies_kept_every_few_iterations() -> None:
+    player = nn.Linear(2, 2)
+    past = PastSelves(rng=random.Random(0), every=2, count=3)
+    assert past.draw() == []
+
+    for iteration in range(1, 6):
+        with torch.no_grad():
+            player.weight.fill_(iteration)
+        past.keep(player, iteration=iteration)
+
+    # Copies were kept at iterations 2 and 4, and later changes to the player left them as they were.
+    assert [copy["past_player"]["weight"][0, 0].item() for copy in past.kept] == [2.0, 4.0]
+    drawn = past.draw()
+    assert len(drawn) == 3
+    assert all(any(copy is kept for kept in past.kept) for copy in drawn)
 
 
 def test_each_pool_plays_each_build_once_and_every_block_mixes_every_rank() -> None:

@@ -82,8 +82,7 @@ class LimitedSetup:
     search samples `deck_samples` decks for each pool and keeps at most
     `blocks` distinct decks, the ones the deck score ranks best. The builder
     draws up to `spells_per_round` cards in each round, sampling at
-    `deck_temperature`. In each block, every deck plays `games_per_block`
-    games.
+    `deck_temperature`. Every deck plays `games_per_block` games a block.
 
     `score_rule` sets how the learning deck score trains and when the search
     switches to it. `history` is how many earlier guesses the guess model is
@@ -226,11 +225,12 @@ def _deck_records(
     schedule: Sequence[tuple[int, int]], games: Sequence[GameResult], *, decks: int
 ) -> tuple[Tensor, Tensor]:
     # `schedule` contains the two deck numbers of every game that was to be played, seat 0's first. Returns each
-    # deck's wins and games played, float [decks], over the games that finished. A draw counts as half a win for
-    # each deck. Decks are told apart by number, so two equal decks have separate records.
+    # deck's wins and games played, float [decks], over the self-play games that finished. A game against a past
+    # player depends on that player's strength as well as the decks, so it is left out. A draw counts as half a win
+    # for each deck. Decks are told apart by number, so two equal decks have separate records.
     wins = torch.zeros(decks)
     games_played = torch.zeros(decks)
-    for game in games:
+    for game in (game for game in games if game.self_play):
         learner_deck, other_deck = (schedule[game.game][seat] for seat in (game.learner_seat, 1 - game.learner_seat))
         wins[learner_deck] += game.learner_result
         wins[other_deck] += 1.0 - game.learner_result

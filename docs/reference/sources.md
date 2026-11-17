@@ -184,8 +184,9 @@ switches from the first copy to the second.
 
   In jace, every row of a rollout comes from one version of the weights,
   so no data is stale. The learning deck score, which judges decks, learns
-  alongside the models whose decks it judges. Training against past
-  checkpoints is not built.
+  alongside the models whose decks it judges. With `--past-workers`, a few
+  workers in `train_limited` play each round against a past copy of the
+  player.
 
 - [Grandmaster level in StarCraft II using multi-agent reinforcement learning](https://doi.org/10.1038/s41586-019-1724-z).
   Vinyals et al., 2019. AlphaStar starts from supervised learning on human

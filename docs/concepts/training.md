@@ -79,6 +79,15 @@ returned on `device`, the device the models train on. Each worker's
 decisions are moved there as soon as they arrive, while the other workers
 are still playing.
 
+A player that plays only its current self can chase cycles. It learns to
+beat its own latest habits and can forget how to beat a style it no longer
+plays. With `--past-workers N`, `train_limited` keeps a copy of the player
+every 10 iterations, and in each round the first N workers each play their
+share against a copy drawn at random, which `play_on_workers` takes as
+`opponents`. In those games only the current player's decisions train it.
+Their results depend on the past player's strength as well as the decks,
+so the deck records leave them out.
+
 Each worker runs on one thread. On a 16-core M3 Max, the play models'
 matrix products do not speed up with more cores. One process alone ran
 about 10,000 products of a typical size a second, and 4 to 16 processes

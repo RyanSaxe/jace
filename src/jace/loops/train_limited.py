@@ -62,6 +62,7 @@ from jace.loops.entry_points import (
 from jace.loops.formats import booster_cards, deck_rules, limited_format
 from jace.loops.limited import Learners, LimitedSetup, limited_iteration
 from jace.loops.matches import Harness
+from jace.loops.past_selves import PastSelves
 from jace.loops.schedules import phased_schedule
 from jace.play import GuessModel, PlayerModel, WinChanceModel, blend_meta
 from jace.tracking import (
@@ -82,6 +83,8 @@ __all__ = ("main",)
 # Ataraxos's player rule. The flags replace its `keep_quantile` and `normalize`, and the schedule replaces its `spread`.
 _PLAYER_RULE = PlayerRule(clip=0.2, stay=0.1, spread=0.0, keep_quantile=0.75, keep_floor=0.0, normalize=True)
 _SLICE_ROWS = 512
+# A copy of the player joins the past selves every this many iterations.
+_PAST_EVERY = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +117,7 @@ class _Arguments(PlayArguments):
     deck_heads: int
     rate: float
     player_rate: float | None
+    past_workers: int
     lam_advantage: float
     lam_value: float
     keep_quantile: float
@@ -179,6 +183,7 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     parser.add_argument("--deck-heads", type=int, default=4)
     parser.add_argument("--rate", type=float, default=1e-4, help="the learning rate of the models with no schedule")
     parser.add_argument("--player-rate", type=float, help="a fixed player learning rate in place of the schedule's")
+    parser.add_argument("--past-workers", type=int, default=0, help="workers that play each round against a past self")
     parser.add_argument("--lam-advantage", type=float, default=0.5, help="how far back a result's credit reaches")
     parser.add_argument("--lam-value", type=float, default=0.8)
     parser.add_argument("--keep-quantile", type=float, default=0.75, help="learn from decisions above this quantile")
@@ -361,12 +366,11 @@ def main(argv: Sequence[str]) -> None:
     torch.manual_seed(arguments.seed)
     data = read_set(arguments.set_code)
     cards = set_cards(data)
-    pool = cards.pool
     limited = limited_format(arguments.set_code)
     embedding, embedding_ref = load_card_table(
         arguments.embedding_run, inputs=card_inputs(data, cards, data_dir=arguments.data_dir)
     )
-    models = _build_models(arguments, embedding, pool=pool, picks=limited.picks)
+    models = _build_models(arguments, embedding, pool=cards.pool, picks=limited.picks)
     inputs = (embedding_ref, *_load_inputs(arguments, models))
     # The copies are made before a resumed run's own models are loaded, so the pulls stay toward the drafter and the
     # deck score trained on human data. Each copy gets its own card table.
@@ -385,9 +389,9 @@ def main(argv: Sequence[str]) -> None:
         if module is not models.embedding
     }
     setup = LimitedSetup(
-        pool=pool,
+        pool=cards.pool,
         limited_format=limited,
-        booster_cards=booster_cards(pool),
+        booster_cards=booster_cards(cards.pool),
         rules=deck_rules(limited, cards),
         pods=arguments.pods,
         deck_samples=arguments.deck_samples,
@@ -432,11 +436,19 @@ def main(argv: Sequence[str]) -> None:
         player=models.player, guess=models.guess, win_chance=models.win_chance, embedding=models.embedding
     )
 
+    # The past selves draw from a generator of their own, so a run deals the same drafts and games without them.
+    past = PastSelves(rng=random.Random(arguments.seed + done), every=_PAST_EVERY, count=arguments.past_workers)
+
     def play(matchups: Sequence[Matchup]) -> Collected:
         # Reuses the last call's workers, with any stalled one replaced. It returns the decisions on the models' device.
         nonlocal workers
         collected, workers = play_on_workers(
-            workers, matchups, weights=play_weights(play_models), stall_seconds=arguments.stall_seconds, device=device
+            workers,
+            matchups,
+            weights=play_weights(play_models),
+            stall_seconds=arguments.stall_seconds,
+            device=device,
+            opponents=past.draw(),
         )
         return collected
 
@@ -453,6 +465,7 @@ def main(argv: Sequence[str]) -> None:
         models.guess.set_meta(blend_meta(models.guess.meta, played.decks, decay=arguments.meta_decay))
         _note_switch(iteration, before=check, after=after)
         check = after
+        past.keep(models.player, iteration=iteration)
         return dict(metrics)
 
     clock = functools.partial(datetime.now, UTC)
