@@ -33,8 +33,10 @@ the same. On decks with few games, the learning copy therefore stays close
 to the human-trained score.
 """
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 from torch import Tensor
@@ -43,7 +45,15 @@ from torch.optim import Optimizer
 from jace.decks import DeckScore, Scorer
 from jace.train import Metrics, apply, kl_to, score_loss
 
-__all__ = ("FIRST_CHECK", "PlayedDecks", "ScoreCheck", "ScoreRule", "check_scores", "train_learning_score")
+__all__ = (
+    "FIRST_CHECK",
+    "PlayedDecks",
+    "ScoreCheck",
+    "ScoreRule",
+    "check_scores",
+    "resumed_check",
+    "train_learning_score",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,3 +197,26 @@ def train_learning_score(
         pull = kl_to(torch.stack((logits, zeros), dim=-1), human_odds).mean()
         apply(fit + rule.pull * pull, [optimizer], max_grad_norm=max_grad_norm)
     return {"deck_score/loss": float(fit.detach()), "deck_score/pull": float(pull.detach())}
+
+
+def resumed_check(curve_file: Path, *, done: int, rule: ScoreRule) -> ScoreCheck:
+    """Rebuild the deck-score check that a stopped run had reached, from the run's curve file.
+
+    `done` is the last iteration the run finished. The check has the test
+    losses of the last `rule.switch_iterations` of the iterations up to
+    `done`, and it reads the learning deck score if the search had switched
+    to it by then. The curve does not contain the played decks, so the
+    learning deck score's window starts empty.
+    """
+    points = [
+        point
+        for point in json.loads(curve_file.read_text())["iterations"]
+        if point["iteration"] <= done and "deck_score/reads_learning" in point
+    ]
+    last = points[-rule.switch_iterations :]
+    return ScoreCheck(
+        recent=(),
+        human_losses=tuple(point["deck_score/human_test_loss"] for point in last),
+        learning_losses=tuple(point["deck_score/learning_test_loss"] for point in last),
+        reads_learning=any(point["deck_score/reads_learning"] > 0 for point in points),
+    )

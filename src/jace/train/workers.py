@@ -70,15 +70,18 @@ class Actor:
     """What a worker plays with, built inside its own process.
 
     `start` makes a batch for the matchups of one round. `policy` plays both
-    seats of every game, and `guesser` makes both seats' guesses. `modules`
-    are the modules that they call, by name. At the start of each round, the
-    worker loads the state dict sent under each name into the module of that
-    name. `cards` is the number of cards in the pool, and `history` is how
+    seats of every game in self-play. In a round in which the worker is sent
+    a past player's weights, `policy` plays the learner's seat and
+    `opponent`, loaded with those weights, plays the other. `guesser` makes
+    both seats' guesses. `modules` are the modules that they call, by name.
+    At the start of each round, the worker loads the state dict sent under
+    each name into the module of that name. `cards` is the number of cards in the pool, and `history` is how
     many earlier guesses the guesser is shown.
     """
 
     start: StartBatch
     policy: Policy
+    opponent: Policy
     guesser: Guesser
     modules: Mapping[str, nn.Module]
     cards: int
@@ -151,11 +154,16 @@ def play_on_workers(
     weights: Weights,
     stall_seconds: float,
     device: torch.device,
+    opponents: Sequence[Weights] = (),
 ) -> tuple[Collected, tuple[Worker, ...]]:
     """Play every game of `matchups` on the workers and return the decisions and the workers.
 
     The matchups are dealt out to the workers in turn. Each worker loads
-    `weights` and plays its share to the end in self-play. Each game in the
+    `weights` and plays its share to the end in self-play, except for the
+    first `len(opponents)` workers. Worker i of those plays its share against
+    a past player instead. It also loads `opponents[i]`, and in each game its
+    actor's `opponent` plays one seat. Those games are not self-play, so only
+    the learner's decisions in them count as the learner's. Each game in the
     result is identified by its position in `matchups`. The decisions are
     on `device`. Each worker's decisions are moved there as soon as they
     arrive, while the other workers are still playing. Pass the returned
@@ -169,17 +177,23 @@ def play_on_workers(
 
     Raises `WorkerFailedError` when a process exits by itself or does not
     finish building its actor in time, and when every worker given a share
-    was killed.
+    was killed. Raises `ValueError` when there are more `opponents` than
+    workers.
     """
+    if len(opponents) > len(workers):
+        message = f"{len(opponents)} past players for {len(workers)} workers"
+        raise ValueError(message)
     # Sending a tensor through a connection sends a handle to shared memory, and each worker maps
     # that memory. The main process therefore sends each worker a handle, not a copy of every weight.
     shared = {name: dict(state) for name, state in weights.items()}
+    past = [{name: dict(state) for name, state in opponent.items()} for opponent in opponents]
     ready = [_await_ready(worker, stall_seconds=stall_seconds) for worker in workers]
     # Matchup i goes to worker i % workers.
     shares = [tuple(range(first, len(matchups), len(ready))) for first in range(len(ready))]
+    against = [*past, *[None] * (len(ready) - len(past))]
     states: list[Worker] = [
-        _assign(worker, weights=shared, matchups=matchups, share=share) if share else worker
-        for worker, share in zip(ready, shares, strict=True)
+        _assign(worker, weights=shared, opponent=opponent, matchups=matchups, share=share) if share else worker
+        for worker, share, opponent in zip(ready, shares, against, strict=True)
     ]
     played: list[Collected] = []
     while any(isinstance(state, Playing) for state in states):
@@ -226,9 +240,11 @@ def _await_ready(worker: Worker, *, stall_seconds: float) -> Ready:
     return Ready(child=worker.child)
 
 
-def _assign(worker: Ready, *, weights: Weights, matchups: Sequence[Matchup], share: tuple[int, ...]) -> Playing:
-    # Ready -> Playing.
-    worker.child.connection.send((weights, [matchups[position] for position in share]))
+def _assign(
+    worker: Ready, *, weights: Weights, opponent: Weights | None, matchups: Sequence[Matchup], share: tuple[int, ...]
+) -> Playing:
+    # Ready -> Playing. With `opponent`, the worker plays its share against a past player with those weights.
+    worker.child.connection.send((weights, opponent, [matchups[position] for position in share]))
     return Playing(child=worker.child, share=share, steps=worker.child.steps.value, since=time.monotonic())
 
 
@@ -306,23 +322,27 @@ def _work(connection: Connection, steps: ctypes.c_int64, *, build: BuildActor, s
     actor = build(seed)
     generator = torch.Generator().manual_seed(seed)
 
-    def counting(boards: Boards, guess: Guess) -> Tensor:
-        # The policy runs once for each step of the games, so this counts steps. The training process
-        # reads the count to find a worker whose games have stopped advancing.
-        steps.value += 1
-        return actor.policy(boards, guess)
+    def counting(policy: Policy) -> Policy:
+        def counted(boards: Boards, guess: Guess) -> Tensor:
+            # A policy runs at least once for each step of the games, so this counts steps. The training
+            # process reads the count to find a worker whose games have stopped advancing.
+            steps.value += 1
+            return policy(boards, guess)
 
+        return counted
+
+    learner, opponent = counting(actor.policy), counting(actor.opponent)
     connection.send(None)
     while True:
-        weights, matchups = connection.recv()
-        for name, state in weights.items():
+        weights, past, matchups = connection.recv()
+        for name, state in {**weights, **(past or {})}.items():
             actor.modules[name].load_state_dict(state)
         connection.send(
             play_games(
                 actor.start,
                 matchups,
-                learner=counting,
-                opponent=counting,
+                learner=learner,
+                opponent=learner if past is None else opponent,
                 guesser=actor.guesser,
                 cards=actor.cards,
                 history=actor.history,
