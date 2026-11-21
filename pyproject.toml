@@ -6,12 +6,16 @@ readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "manabot>=0.2.3",
-    "managym>=0.2.3",
+    "managym[academy]>=0.2.3",
     "numpy>=2",
     "spells-mtg>=0.18",
-    "torch>=2.10",
+    "torch>=2.15.0",
     "transformers>=5.22.2",
 ]
+
+[tool.uv.sources]
+manabot = { git = "https://github.com/loopflowstudio/manabot", rev = "2ae692ac" }
+managym = { git = "https://github.com/loopflowstudio/manabot", rev = "2ae692ac", subdirectory = "managym" }
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.14", "ty>=0.0.1a20"]
@@ -83,10 +87,6 @@ ban-relative-imports = "all"
 [tool.ruff.lint.per-file-ignores]
 ".byor/scripts/max-file-lines.py" = [
     # This check runs git with fixed arguments, never with outside input.
-    "S603",
-]
-"src/jace/loops/keep_running.py" = [
-    # It starts this package's own training command with the flags its caller typed.
     "S603",
 ]
 "tests/**/*.py" = [

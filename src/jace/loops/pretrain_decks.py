@@ -61,9 +61,9 @@ from jace.loops.entry_points import (
 )
 from jace.loops.formats import deck_rules, limited_format
 from jace.loops.schedules import RateScale, current_rates, scale_rates, warm_up_then_decay
+from jace.loops.supervised import apply, score_loss
 from jace.tracking import Running, log_update, save_checkpoint
 from jace.tracking import writing as writing_run
-from jace.train import apply, score_loss
 
 __all__ = (
     "BuilderPoint",

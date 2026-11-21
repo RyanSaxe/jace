@@ -1,0 +1,36 @@
+id: jace.no-manabot-learner-recipes
+language: Python
+severity: error
+message: Jace owns its RL algorithms in jace.rl; do not import manabot training updates, loops, or recipes.
+files:
+  - src/jace/**/*.py
+rule:
+  any:
+    - kind: import_from_statement
+      has:
+        field: module_name
+        regex: ^manabot\.(training\.(updates|loops)|recipes)(\.|$)
+    - kind: import_statement
+      has:
+        any:
+          - kind: dotted_name
+            regex: ^manabot\.(training\.(updates|loops)|recipes)(\.|$)
+          - kind: aliased_import
+            has:
+              kind: dotted_name
+              regex: ^manabot\.(training\.(updates|loops)|recipes)(\.|$)
+metadata:
+  byor:
+    rationale: >
+      Jace reuses manabot's rules engine, observation admission, ActorCritic
+      backbone, and rollout collection, while owning the RL algorithms
+      (credit assignment, advantage selection, losses, and experiment loops)
+      explicitly inside jace.rl so every RL change is readable and hackable.
+    agent_prompt: >
+      Do not import manabot.training.updates, manabot.training.loops, or
+      manabot.recipes. Implement the RL credit, selection, loss, or loop logic
+      in src/jace/rl/ instead.
+    tags:
+      - python
+      - jace
+      - boundaries

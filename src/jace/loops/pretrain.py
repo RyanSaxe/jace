@@ -41,8 +41,8 @@ from torch.optim import Optimizer
 
 from jace.cards import FIRST_PROGRAM_TOKEN, CardEncoder, Rarity, own_parameters
 from jace.data import HumanDrafts, SetCards, card_table, load_drafts, read_set
+from jace.data.catalog import engine_cards, program_vocabulary
 from jace.draft import DrafterModel
-from jace.engine.manabot import engine_cards, program_vocabulary
 from jace.loops.entry_points import (
     ADAM_BETAS,
     RunArguments,
@@ -54,8 +54,8 @@ from jace.loops.entry_points import (
 )
 from jace.loops.formats import limited_format
 from jace.loops.schedules import RateScale, current_rates, scale_rates, warm_up_then_decay
+from jace.loops.supervised import apply, choice_loss
 from jace.tracking import Running, log_update, save_checkpoint, writing
-from jace.train import apply, choice_loss
 
 __all__ = (
     "CurvePoint",
