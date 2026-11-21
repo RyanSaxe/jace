@@ -120,9 +120,9 @@ def _surrogate_and_clip(
 def damped_policy_loss(
     *,
     clip: float = 0.2,
-    collection_kl: float = 0.5,
+    collection_kl: float = 0.1,
     magnet_kl: float = 0.05,
-    value_coef: float = 0.5,
+    value_coef: float = 1.0,
 ) -> LossFn:
     """Build the damped policy-gradient loss (clipped surrogate + dual reverse KL + critic).
 

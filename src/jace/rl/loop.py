@@ -1,12 +1,13 @@
 """Self-play reinforcement learning update step and training loop on `manabot` ActorCritic.
 
 Bridges upstream `manabot` collection (`open_collector`, `collect`, `AdmittedRollout`,
-`ActorCritic`) to Jace's pure RL math (`credit`, `select`, `losses`) without importing
-any upstream learner update or recipe module. Separate `collect_device` and
+`ActorCritic`) to Jace's pure RL math (`credit`, `select`, `losses`, `pool`) without
+importing any upstream learner update or recipe module. Separate `collect_device` and
 `learn_device` settings let Apple Silicon runs collect on CPU streams while updating on
-the fastest verified device.
+MPS, and an optional historical `SnapshotPool` mixes frozen past opponents into self-play.
 """
 
+import copy
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -20,10 +21,11 @@ from manabot.backends.torch.policy import ActorCritic
 from manabot.backends.torch.rollout import AdmittedRollout
 from manabot.env.match import Match, Reward
 from manabot.env.observation import ObservationSpace
-from manabot.infra.config import RewardConfig
+from manabot.infra.config import MatchConfig, RewardConfig
 from manabot.policy.prepare import reference_distribution
 from manabot.training.decks import UniformDecks
 from manabot.training.rollout.collection import (
+    Collector,
     RolloutBatch,
     close_collector,
     collect,
@@ -33,9 +35,11 @@ from torch.optim import Optimizer
 
 from jace.rl.credit import CreditFn, Trajectory, standardize_advantages
 from jace.rl.losses import LossFn, PolicyBatch
+from jace.rl.pool import SnapshotEntry, SnapshotPool, load_snapshot
 from jace.rl.select import SelectFn
 
 __all__ = (
+    "LossScheduleFn",
     "StepRecord",
     "TrainConfig",
     "UpdateCallback",
@@ -45,12 +49,18 @@ __all__ = (
     "update_step",
 )
 
+_SCALAR_TARGET_NDIM = 2
+_CROSS_BALANCED_STRIDE = 4
+_collect_rollout: Callable[..., RolloutBatch] = collect
+_open_collector: Callable[..., Collector] = open_collector
+
 
 @dataclass(frozen=True, slots=True)
 class UpdateConfig:
-    epochs: int = 2
+    epochs: int = 1
     minibatch_size: int = 256
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = 0.267
+    normalize_advantages: bool = False
     reference: Literal["uniform", "action_type_uniform"] = "action_type_uniform"
     device: str = "cpu"
 
@@ -80,6 +90,9 @@ class TrainConfig:
     update: UpdateConfig = UpdateConfig()
     games_path: Path | None = None
     record_fraction: float = 0.0
+    snapshot_fraction: float = 0.0
+    snapshot_every: int = 10
+    snapshot_pool_size: int = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,9 +101,13 @@ class StepRecord:
     stats: UpdateStats
     collect_s: float
     learn_s: float
+    learning_rate: float = 0.0
+    magnet_tau: float = 0.0
+    opponent: str = "self"
 
 
 type UpdateCallback = Callable[[StepRecord], None]
+type LossScheduleFn = Callable[[int], tuple[float, float, LossFn]]
 
 
 def _bootstrap_values(
@@ -168,8 +185,75 @@ def _minibatch_step(
     return metrics, grad_norm
 
 
-_SCALAR_TARGET_NDIM = 2
-_collect_rollout: Callable[..., RolloutBatch] = collect
+def _set_optimizer_lr(optimizer: Optimizer, lr: float) -> None:
+    for group in optimizer.param_groups:
+        group["lr"] = lr
+
+
+def _current_optimizer_lr(optimizer: Optimizer) -> float:
+    return float(optimizer.param_groups[0]["lr"]) if optimizer.param_groups else 0.0
+
+
+def _should_use_snapshot(update_idx: int, *, fraction: float, pool_size: int) -> bool:
+    if pool_size <= 0 or fraction <= 0.0:
+        return False
+    interval = max(1, round(1.0 / fraction))
+    return update_idx % interval == 0
+
+
+def _sample_pair_match(deck_source: UniformDecks, rng: np.random.Generator) -> Match:
+    players = deck_source.players()
+    hero = players[int(rng.integers(0, len(players)))]
+    villain = players[int(rng.integers(0, len(players)))]
+    disclosure: Literal["open", "closed"] = "open" if deck_source.decklists == "open" else "closed"
+    return Match(
+        MatchConfig(
+            world="world",
+            decklists=disclosure,
+            hero_deck=dict(hero.decklist),
+            hero_sideboard=dict(hero.sideboard),
+            villain_deck=dict(villain.decklist),
+            villain_sideboard=dict(villain.sideboard),
+        )
+    )
+
+
+def _collect_against_snapshot(
+    agent: ActorCritic,
+    opponent: ActorCritic,
+    *,
+    entry: SnapshotEntry,
+    obs_space: ObservationSpace,
+    deck_source: UniformDecks,
+    reward: Reward,
+    config: TrainConfig,
+    seed: int,
+    rng: np.random.Generator,
+) -> RolloutBatch:
+    load_snapshot(opponent, entry)
+    opponent.to(torch.device(config.collect_device))
+    pair_match = _sample_pair_match(deck_source, rng)
+    curriculum: Literal["cross-balanced", "fixed"] = (
+        "cross-balanced" if config.num_envs % _CROSS_BALANCED_STRIDE == 0 else "fixed"
+    )
+    session = CollectionSession(device=config.collect_device, seed=seed)
+    collector = _open_collector(
+        obs_space,
+        pair_match,
+        reward,
+        num_envs=config.num_envs,
+        seed=seed,
+        opponent_mode="frozen",
+        opponent_agent=opponent,
+        numerics=session,
+        learning_seats="one",
+        matchup_curriculum=curriculum,
+        batch_closure="complete-games",
+    )
+    try:
+        return _collect_rollout(collector, agent, config.steps_per_env)
+    finally:
+        close_collector(collector)
 
 
 def update_step(
@@ -182,12 +266,14 @@ def update_step(
     loss: LossFn,
     config: UpdateConfig,
     rng: np.random.Generator,
+    learning_seats: Literal["both", "one"] = "both",
 ) -> UpdateStats:
     """Run one on-policy RL update over a collected `RolloutBatch`.
 
     Computes advantages and value targets with `credit`, selects policy rows with
-    `select` while keeping every row for critic supervision, admits observations once,
-    and runs `config.epochs` shuffled minibatch passes using `loss`.
+    `select` while keeping every row for critic supervision, leaves advantages at their
+    raw win-probability scale unless `config.normalize_advantages` is set, admits
+    observations once, and runs `config.epochs` shuffled minibatch passes using `loss`.
     """
     device = torch.device(config.device)
     agent.to(device)
@@ -201,7 +287,7 @@ def update_step(
     targets = credit(_trajectory_from_batch(batch, next_value=next_value, next_outcomes=next_outcomes))
     raw_flat = targets.raw_advantages.reshape(-1)
     selected_mask = select(raw_flat).bool()
-    adv_flat = standardize_advantages(raw_flat, mask=selected_mask)
+    adv_flat = standardize_advantages(raw_flat, mask=selected_mask) if config.normalize_advantages else raw_flat
     value_targets = targets.value_targets.reshape(raw_flat.shape[0], -1)
     if targets.value_targets.ndim == _SCALAR_TARGET_NDIM:
         value_targets = targets.value_targets.reshape(-1)
@@ -252,10 +338,11 @@ def update_step(
                 steps += 1
 
     denom = max(steps, 1)
+    seats_per_game = 2 if learning_seats == "both" else 1
     return UpdateStats(
         rows=total_rows,
         selected_rows=int(selected_mask.sum().item()),
-        completed_games=int(batch.dones.sum()) // 2,
+        completed_games=int(batch.dones.sum()) // seats_per_game,
         policy_loss=totals["policy_loss"] / denom,
         value_loss=totals["value_loss"] / denom,
         collection_kl=totals["collection_kl"] / denom,
@@ -265,6 +352,20 @@ def update_step(
         grad_norm=totals["grad_norm"] / denom,
         mean_advantage_abs=float(raw_flat.abs().mean().item()),
     )
+
+
+def _resolve_update_loss(
+    update_idx: int,
+    *,
+    optimizer: Optimizer,
+    default_loss: LossFn,
+    loss_schedule: LossScheduleFn | None,
+) -> tuple[float, float, LossFn]:
+    if loss_schedule is None:
+        return _current_optimizer_lr(optimizer), 0.0, default_loss
+    lr, tau, scheduled_loss = loss_schedule(update_idx)
+    _set_optimizer_lr(optimizer, lr)
+    return lr, tau, scheduled_loss
 
 
 def train_self_play(
@@ -277,13 +378,15 @@ def train_self_play(
     select: SelectFn,
     loss: LossFn,
     config: TrainConfig,
+    loss_schedule: LossScheduleFn | None = None,
     on_update: UpdateCallback | None = None,
 ) -> list[UpdateStats]:
     """Run complete-game self-play training over `deck_source` using Jace's RL pipeline.
 
     Collects both seats under the current frozen policy via `manabot`'s native collector,
-    applies `update_step` for `config.updates` iterations, and invokes `on_update` after
-    each update so callers can log metrics, run forensics, or write checkpoints.
+    optionally mixes 1-seat updates against sampled historical checkpoints when
+    `config.snapshot_fraction > 0`, applies `loss_schedule` and `update_step` for
+    `config.updates` iterations, and invokes `on_update` after each update.
     """
     deck_source.check()
     match = Match(deck_source.match_config())
@@ -304,14 +407,44 @@ def train_self_play(
         record_fraction=config.record_fraction,
     )
     rng = np.random.default_rng(config.seed + 101)
+    pool = SnapshotPool(max_size=config.snapshot_pool_size) if config.snapshot_fraction > 0.0 else None
+    frozen_opponent = copy.deepcopy(agent).to(config.collect_device).eval() if pool is not None else None
     history: list[UpdateStats] = []
     collect_device = torch.device(config.collect_device)
     try:
         for update_idx in range(1, config.updates + 1):
+            lr, tau, step_loss = _resolve_update_loss(
+                update_idx,
+                optimizer=optimizer,
+                default_loss=loss,
+                loss_schedule=loss_schedule,
+            )
             agent.to(collect_device)
             agent.eval()
             t_collect = time.perf_counter()
-            batch = _collect_rollout(collector, agent, config.steps_per_env)
+            if (
+                pool is not None
+                and frozen_opponent is not None
+                and _should_use_snapshot(update_idx, fraction=config.snapshot_fraction, pool_size=len(pool))
+            ):
+                entry = pool.sample(rng)
+                batch = _collect_against_snapshot(
+                    agent,
+                    frozen_opponent,
+                    entry=entry,
+                    obs_space=obs_space,
+                    deck_source=deck_source,
+                    reward=reward,
+                    config=config,
+                    seed=config.seed + 10_000 + update_idx,
+                    rng=rng,
+                )
+                seats: Literal["both", "one"] = "one"
+                opponent_label = f"snapshot@u{entry.update}"
+            else:
+                batch = _collect_rollout(collector, agent, config.steps_per_env)
+                seats = "both"
+                opponent_label = "self"
             collect_s = time.perf_counter() - t_collect
 
             t_learn = time.perf_counter()
@@ -321,14 +454,27 @@ def train_self_play(
                 batch=batch,
                 credit=credit,
                 select=select,
-                loss=loss,
+                loss=step_loss,
                 config=config.update,
                 rng=rng,
+                learning_seats=seats,
             )
             learn_s = time.perf_counter() - t_learn
+            if pool is not None and update_idx % max(config.snapshot_every, 1) == 0:
+                pool.add(agent, update=update_idx)
             history.append(stats)
             if on_update is not None:
-                on_update(StepRecord(update=update_idx, stats=stats, collect_s=collect_s, learn_s=learn_s))
+                on_update(
+                    StepRecord(
+                        update=update_idx,
+                        stats=stats,
+                        collect_s=collect_s,
+                        learn_s=learn_s,
+                        learning_rate=lr,
+                        magnet_tau=tau,
+                        opponent=opponent_label,
+                    )
+                )
     finally:
         close_collector(collector)
     return history

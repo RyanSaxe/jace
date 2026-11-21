@@ -2,9 +2,8 @@
 
 Wires `jace.rl`, `jace.eval`, and `jace.runs` over the ten closed-decklist `elemental-world-v2`
 decks using upstream `manabot` v11 observations and `ActorCritic` (`policy_film=True`,
-`categorical_wdl`, `masked_mean`). Periodically saves portable `.safetensors` checkpoints
-plus Academy `PolicySpec` files, audits 40-game decision forensics against
-`managym.Heuristic`, and diffs fixed held-out probe states against the initial policy.
+`categorical_wdl`, `masked_mean`). Supports decaying damped-KL schedules, raw unnormalized
+win-probability advantages, a historical snapshot opponent pool, and full Academy replays.
 """
 
 import argparse
@@ -32,7 +31,9 @@ from jace.eval import (
 )
 from jace.rl import (
     CreditFn,
+    DampedSchedule,
     LossFn,
+    LossScheduleFn,
     SelectFn,
     StepRecord,
     TrainConfig,
@@ -67,27 +68,35 @@ class LabConfig:
     runs_dir: Path
     experiment: str
     run_id: str
-    updates: int = 80
+    updates: int = 150
     num_envs: int = 32
     steps_per_env: int = 64
-    epochs: int = 2
+    epochs: int = 1
     minibatch_size: int = 512
-    learning_rate: float = 3e-4
+    learning_rate: float = 1e-4
+    max_grad_norm: float = 0.267
     hidden_dim: int = 64
     attention_layers: int = 2
     credit_kind: str = "gae"
     lam_policy: float = 0.5
     lam_value: float = 0.8
     select_kind: str = "top25"
+    min_advantage: float = 0.01
     loss_kind: str = "damped"
-    collection_kl: float = 0.5
+    collection_kl: float = 0.1
     magnet_kl: float = 0.05
+    value_coef: float = 1.0
+    normalize_advantages: bool | None = None
+    use_schedule: bool = True
+    snapshot_fraction: float = 0.25
+    snapshot_every: int = 10
+    snapshot_pool_size: int = 16
     collect_device: str = "cpu"
     learn_device: str = "mps"
-    eval_every: int = 20
+    eval_every: int = 25
     eval_deals: int = 20
     probe_count: int = 64
-    record_train_fraction: float = 0.05
+    record_train_fraction: float = 0.02
     seed: int = 1
 
 
@@ -123,24 +132,49 @@ def build_agent(
     return agent, obs_space
 
 
-def _select_components(cfg: LabConfig) -> tuple[CreditFn, SelectFn, LossFn]:
+def _resolve_normalize_advantages(cfg: LabConfig) -> bool:
+    if cfg.normalize_advantages is not None:
+        return cfg.normalize_advantages
+    return cfg.loss_kind == "ppo"
+
+
+def _select_components(cfg: LabConfig) -> tuple[CreditFn, SelectFn, LossFn, LossScheduleFn | None]:
     credit: CreditFn = (
         monte_carlo
         if cfg.credit_kind == "mc"
         else gae_wdl(gamma=1.0, lam_policy=cfg.lam_policy, lam_value=cfg.lam_value)
     )
-    select: SelectFn = all_rows if cfg.select_kind == "all" else top_fraction(0.25)
-    loss: LossFn = (
-        ppo_loss(clip=0.2, entropy_coef=0.01, value_coef=0.5)
-        if cfg.loss_kind == "ppo"
-        else damped_policy_loss(
-            clip=0.2,
-            collection_kl=cfg.collection_kl,
-            magnet_kl=cfg.magnet_kl,
-            value_coef=0.5,
-        )
+    select: SelectFn = all_rows if cfg.select_kind == "all" else top_fraction(0.25, minimum=cfg.min_advantage)
+    if cfg.loss_kind == "ppo":
+        return credit, select, ppo_loss(clip=0.2, entropy_coef=0.01, value_coef=cfg.value_coef), None
+    default_loss = damped_policy_loss(
+        clip=0.2,
+        collection_kl=cfg.collection_kl,
+        magnet_kl=cfg.magnet_kl,
+        value_coef=cfg.value_coef,
     )
-    return credit, select, loss
+    if not cfg.use_schedule:
+        return credit, select, default_loss, None
+    schedule = DampedSchedule(
+        total_updates=cfg.updates,
+        lr_max=cfg.learning_rate,
+        tau_scale=cfg.magnet_kl,
+    )
+
+    def loss_for_update(update_idx: int) -> tuple[float, float, LossFn]:
+        lr, tau = schedule.rates(update_idx)
+        return (
+            lr,
+            tau,
+            damped_policy_loss(
+                clip=0.2,
+                collection_kl=cfg.collection_kl,
+                magnet_kl=tau,
+                value_coef=cfg.value_coef,
+            ),
+        )
+
+    return credit, select, default_loss, loss_for_update
 
 
 def _evaluate_and_save(
@@ -207,8 +241,8 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
     """Run the 10-deck TLA self-play lab and persist all Academy-native artifacts.
 
     Evaluates update 0 before training, runs `cfg.updates` self-play updates on the ten
-    closed-decklist decks, and evaluates every `cfg.eval_every` updates plus the final
-    checkpoint, recording native Academy replay files on the final evaluation.
+    closed-decklist decks (optionally mixing frozen historical snapshots), and evaluates
+    every `cfg.eval_every` updates plus the final checkpoint with Academy replay logs.
     """
     logging.getLogger("manabot").setLevel(logging.WARNING)
     torch.manual_seed(cfg.seed)
@@ -225,7 +259,8 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
         live_tokens=False,
     )
     baseline = copy.deepcopy(agent).to("cpu").eval()
-    credit, select, loss = _select_components(cfg)
+    credit, select, loss, loss_schedule = _select_components(cfg)
+    normalize_advantages = _resolve_normalize_advantages(cfg)
 
     layout = create_run(
         runs_dir=cfg.runs_dir,
@@ -241,15 +276,23 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
             "epochs": cfg.epochs,
             "minibatch_size": cfg.minibatch_size,
             "learning_rate": cfg.learning_rate,
+            "max_grad_norm": cfg.max_grad_norm,
             "hidden_dim": cfg.hidden_dim,
             "attention_layers": cfg.attention_layers,
             "credit_kind": cfg.credit_kind,
             "lam_policy": cfg.lam_policy,
             "lam_value": cfg.lam_value,
             "select_kind": cfg.select_kind,
+            "min_advantage": cfg.min_advantage,
             "loss_kind": cfg.loss_kind,
             "collection_kl": cfg.collection_kl,
             "magnet_kl": cfg.magnet_kl,
+            "value_coef": cfg.value_coef,
+            "normalize_advantages": normalize_advantages,
+            "use_schedule": cfg.use_schedule,
+            "snapshot_fraction": cfg.snapshot_fraction,
+            "snapshot_every": cfg.snapshot_every,
+            "snapshot_pool_size": cfg.snapshot_pool_size,
             "collect_device": cfg.collect_device,
             "learn_device": cfg.learn_device,
             "params": sum(p.numel() for p in agent.parameters()),
@@ -280,6 +323,9 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
             {
                 "kind": "train",
                 "update": record.update,
+                "opponent": record.opponent,
+                "lr": round(record.learning_rate, 7),
+                "tau": round(record.magnet_tau, 6),
                 "rows": stats.rows,
                 "selected_rows": stats.selected_rows,
                 "completed_games": stats.completed_games,
@@ -307,7 +353,7 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
                 deals=deals,
                 probes=probes,
                 seed=cfg.seed,
-                record_games=record.update == cfg.updates,
+                record_games=True,
             )
 
     train_self_play(
@@ -318,6 +364,7 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
         credit=credit,
         select=select,
         loss=loss,
+        loss_schedule=loss_schedule,
         config=TrainConfig(
             updates=cfg.updates,
             num_envs=cfg.num_envs,
@@ -327,10 +374,15 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
             update=UpdateConfig(
                 epochs=cfg.epochs,
                 minibatch_size=cfg.minibatch_size,
+                max_grad_norm=cfg.max_grad_norm,
+                normalize_advantages=normalize_advantages,
                 device=cfg.learn_device,
             ),
             games_path=layout.train_games_path(),
             record_fraction=cfg.record_train_fraction,
+            snapshot_fraction=cfg.snapshot_fraction,
+            snapshot_every=cfg.snapshot_every,
+            snapshot_pool_size=cfg.snapshot_pool_size,
         ),
         on_update=on_update,
     )
@@ -342,27 +394,35 @@ def _parse_args(argv: Sequence[str] | None) -> LabConfig:
     parser.add_argument("--runs-dir", type=Path, default=Path("../jace-runs"))
     parser.add_argument("--experiment", default="v2-ten-deck-lab")
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--updates", type=int, default=80)
+    parser.add_argument("--updates", type=int, default=150)
     parser.add_argument("--num-envs", type=int, default=32)
     parser.add_argument("--steps-per-env", type=int, default=64)
-    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--minibatch-size", type=int, default=512)
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--max-grad-norm", type=float, default=0.267)
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--attention-layers", type=int, default=2)
     parser.add_argument("--credit", choices=("gae", "mc"), default="gae")
     parser.add_argument("--lam-policy", type=float, default=0.5)
     parser.add_argument("--lam-value", type=float, default=0.8)
     parser.add_argument("--select", choices=("top25", "all"), default="top25")
+    parser.add_argument("--min-advantage", type=float, default=0.01)
     parser.add_argument("--loss", choices=("damped", "ppo"), default="damped")
-    parser.add_argument("--collection-kl", type=float, default=0.5)
+    parser.add_argument("--collection-kl", type=float, default=0.1)
     parser.add_argument("--magnet-kl", type=float, default=0.05)
+    parser.add_argument("--value-coef", type=float, default=1.0)
+    parser.add_argument("--normalize-advantages", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--schedule", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--snapshot-fraction", type=float, default=0.25)
+    parser.add_argument("--snapshot-every", type=int, default=10)
+    parser.add_argument("--snapshot-pool-size", type=int, default=16)
     parser.add_argument("--collect-device", default="cpu")
     parser.add_argument("--learn-device", default="mps" if torch.backends.mps.is_available() else "cpu")
-    parser.add_argument("--eval-every", type=int, default=20)
+    parser.add_argument("--eval-every", type=int, default=25)
     parser.add_argument("--eval-deals", type=int, default=20)
     parser.add_argument("--probe-count", type=int, default=64)
-    parser.add_argument("--record-train-fraction", type=float, default=0.05)
+    parser.add_argument("--record-train-fraction", type=float, default=0.02)
     parser.add_argument("--seed", type=int, default=1)
     ns = parser.parse_args(argv)
     return LabConfig(
@@ -375,15 +435,23 @@ def _parse_args(argv: Sequence[str] | None) -> LabConfig:
         epochs=ns.epochs,
         minibatch_size=ns.minibatch_size,
         learning_rate=ns.lr,
+        max_grad_norm=ns.max_grad_norm,
         hidden_dim=ns.hidden_dim,
         attention_layers=ns.attention_layers,
         credit_kind=ns.credit,
         lam_policy=ns.lam_policy,
         lam_value=ns.lam_value,
         select_kind=ns.select,
+        min_advantage=ns.min_advantage,
         loss_kind=ns.loss,
         collection_kl=ns.collection_kl,
         magnet_kl=ns.magnet_kl,
+        value_coef=ns.value_coef,
+        normalize_advantages=ns.normalize_advantages,
+        use_schedule=ns.schedule,
+        snapshot_fraction=ns.snapshot_fraction,
+        snapshot_every=ns.snapshot_every,
+        snapshot_pool_size=ns.snapshot_pool_size,
         collect_device=ns.collect_device,
         learn_device=ns.learn_device,
         eval_every=ns.eval_every,
