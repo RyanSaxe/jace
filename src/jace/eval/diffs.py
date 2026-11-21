@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import managym
 from manabot.backends.torch.policy import ActorCritic
 from manabot.env.observation import ObservationSpace
-from managym.enums import ActionSpaceEnum
+from managym.enums import ActionEnum, ActionSpaceEnum
 
 from jace.eval.deals import Deal, PolicyPlayer
 
@@ -96,6 +96,15 @@ class DiffSummary:
         }
 
 
+def _action_label(action: managym.Action) -> str:
+    if action.description is not None and action.description != "":
+        return str(action.description)
+    kind = ActionEnum(int(action.action_type)).name.lower()
+    if int(action.action_type) in (int(ActionEnum.DECLARE_ATTACKER), int(ActionEnum.DECLARE_BLOCKER)):
+        return f"{kind}:{'yes' if action.declared is True else 'no'}"
+    return kind
+
+
 def _replay_probe(probe: ProbeState) -> managym.Observation:
     env = managym.Env(seed=probe.deal.seed, skip_trivial=True)
     obs, _ = env.reset(probe.deal.game_setup(swapped=False))
@@ -132,7 +141,7 @@ def capture_probes(
                         prefix_actions=tuple(prefix),
                         action_space_kind=_ACTION_SPACE_NAMES.get(space_type, f"kind_{space_type}"),
                         turn=int(obs.turn.turn_number),
-                        action_labels=tuple(str(a.description) for a in actions),
+                        action_labels=tuple(_action_label(a) for a in actions),
                     )
                 )
                 captured += 1

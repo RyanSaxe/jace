@@ -151,6 +151,33 @@ def test_damped_and_ppo_losses_mask_illegal_and_backpropagate() -> None:
     assert logits2.grad is not None
 
 
+def test_losses_run_on_mps_when_available() -> None:
+    if not torch.backends.mps.is_available():
+        return
+    dev = torch.device("mps")
+    logits = torch.tensor([[1.0, 0.0, 99.0], [0.5, -0.5, 99.0]], device=dev, requires_grad=True)
+    value_logits = torch.tensor([[0.1, 0.0, 0.2], [-0.1, 0.0, 0.3]], device=dev, requires_grad=True)
+    legal = torch.tensor([[True, True, False], [True, True, False]], device=dev)
+    beh_logs = policy_log_probs(logits.detach(), legal)
+    ref = torch.tensor([[0.5, 0.5, 0.0], [0.5, 0.5, 0.0]], device=dev)
+    batch = PolicyBatch(
+        logits=logits,
+        value_output=value_logits,
+        actions=torch.tensor([0, 1], device=dev),
+        advantages=torch.tensor([1.0, -1.0], device=dev),
+        value_targets=torch.tensor([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]], device=dev),
+        behavior_logs=beh_logs,
+        reference_probs=ref,
+        legal_mask=legal,
+        policy_mask=torch.tensor([True, True], device=dev),
+    )
+    out = damped_policy_loss()(batch)
+    assert torch.isfinite(out.total)
+    out.total.backward()
+    assert logits.grad is not None
+    assert value_logits.grad is not None
+
+
 def test_train_self_play_runs_end_to_end_on_real_v11_rollout() -> None:
     keys = list(managym.authored_deck_keys("elemental-world-v2"))[:2]
     decks = tuple(

@@ -148,7 +148,7 @@ def damped_policy_loss(
         policy_rows = surrogate + collection_kl * _host_double(beh_kl) + magnet_kl * _host_double(mag_kl)
         policy_term = _masked_mean(policy_rows, batch.policy_mask)
         value_term = _value_loss_rows(batch.value_output, batch.value_targets).mean()
-        total = policy_term + value_coef * value_term.to(policy_term.device, dtype=policy_term.dtype)
+        total = policy_term + value_coef * _host_double(value_term)
         return LossBreakdown(
             total=total,
             policy=float(_masked_mean(surrogate.detach(), batch.policy_mask).item()),
@@ -182,7 +182,7 @@ def ppo_loss(
         policy_rows = surrogate - entropy_coef * _host_double(ent)
         policy_term = _masked_mean(policy_rows, batch.policy_mask)
         value_term = _value_loss_rows(batch.value_output, batch.value_targets).mean()
-        total = policy_term + value_coef * value_term.to(policy_term.device, dtype=policy_term.dtype)
+        total = policy_term + value_coef * _host_double(value_term)
         return LossBreakdown(
             total=total,
             policy=float(_masked_mean(surrogate.detach(), batch.policy_mask).item()),

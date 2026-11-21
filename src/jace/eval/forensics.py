@@ -134,18 +134,18 @@ def _target_side(obs: managym.Observation, action_index: int) -> str | None:
     return None
 
 
-def _audit_attack(state: _AuditState, *, chosen_type: int, heur_type: int, agreed: bool, ent: float) -> None:
+def _audit_attack(state: _AuditState, *, chosen_declared: bool, heur_declared: bool, agreed: bool, ent: float) -> None:
     state.attack_decisions += 1
     state.attack_entropy_sum += ent
-    state.attack_chosen += int(chosen_type == int(ActionEnum.DECLARE_ATTACKER))
-    state.heuristic_attack_chosen += int(heur_type == int(ActionEnum.DECLARE_ATTACKER))
+    state.attack_chosen += int(chosen_declared)
+    state.heuristic_attack_chosen += int(heur_declared)
     state.attack_agreed += int(agreed)
 
 
-def _audit_block(state: _AuditState, *, chosen_type: int, heur_type: int, agreed: bool) -> None:
+def _audit_block(state: _AuditState, *, chosen_declared: bool, heur_declared: bool, agreed: bool) -> None:
     state.block_decisions += 1
-    state.block_chosen += int(chosen_type == int(ActionEnum.DECLARE_BLOCKER))
-    state.heuristic_block_chosen += int(heur_type == int(ActionEnum.DECLARE_BLOCKER))
+    state.block_chosen += int(chosen_declared)
+    state.heuristic_block_chosen += int(heur_declared)
     state.block_agreed += int(agreed)
 
 
@@ -192,12 +192,12 @@ def _record_decision(
     state.kind_entropy[kind] += ent
     state.kind_agree[kind] += int(agreed)
 
-    chosen_type = int(actions[action].action_type)
-    heur_type = int(actions[heur_action].action_type)
+    chosen_declared = bool(actions[action].declared)
+    heur_declared = bool(actions[heur_action].declared)
     if space_type == int(ActionSpaceEnum.DECLARE_ATTACKER):
-        _audit_attack(state, chosen_type=chosen_type, heur_type=heur_type, agreed=agreed, ent=ent)
+        _audit_attack(state, chosen_declared=chosen_declared, heur_declared=heur_declared, agreed=agreed, ent=ent)
     elif space_type == int(ActionSpaceEnum.DECLARE_BLOCKER):
-        _audit_block(state, chosen_type=chosen_type, heur_type=heur_type, agreed=agreed)
+        _audit_block(state, chosen_declared=chosen_declared, heur_declared=heur_declared, agreed=agreed)
     elif space_type == int(ActionSpaceEnum.PRIORITY):
         _audit_land_drop(state, obs, action=action)
     elif space_type == int(ActionSpaceEnum.CHOOSE_TARGET):

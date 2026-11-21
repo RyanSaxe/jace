@@ -9,6 +9,7 @@ plus Academy `PolicySpec` files, audits 40-game decision forensics against
 
 import argparse
 import copy
+import logging
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -209,6 +210,7 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
     closed-decklist decks, and evaluates every `cfg.eval_every` updates plus the final
     checkpoint, recording native Academy replay files on the final evaluation.
     """
+    logging.getLogger("manabot").setLevel(logging.WARNING)
     torch.manual_seed(cfg.seed)
     named_decks = elemental_decks()
     deck_source = UniformDecks(
