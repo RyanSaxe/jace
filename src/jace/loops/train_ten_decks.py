@@ -11,7 +11,7 @@ import copy
 import logging
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
@@ -32,6 +32,7 @@ from jace.eval import (
 from jace.rl import (
     CreditFn,
     DampedSchedule,
+    DecaySchedule,
     LossFn,
     LossScheduleFn,
     SelectFn,
@@ -83,11 +84,13 @@ class LabConfig:
     select_kind: str = "top25"
     min_advantage: float = 0.01
     loss_kind: str = "damped"
+    clip: float = 0.2
     collection_kl: float = 0.1
     magnet_kl: float = 0.05
     value_coef: float = 1.0
     normalize_advantages: bool | None = None
-    use_schedule: bool = True
+    schedule_kind: str = "damped"
+    schedule_decay: float = 9.0
     snapshot_fraction: float = 0.25
     snapshot_every: int = 10
     snapshot_pool_size: int = 16
@@ -138,28 +141,48 @@ def _resolve_normalize_advantages(cfg: LabConfig) -> bool:
     return cfg.loss_kind == "ppo"
 
 
+def _build_select(cfg: LabConfig) -> SelectFn:
+    if cfg.select_kind == "all":
+        return all_rows
+    fraction = 0.5 if cfg.select_kind == "top50" else 0.25
+    return top_fraction(fraction, minimum=cfg.min_advantage)
+
+
+def _build_schedule(cfg: LabConfig) -> DampedSchedule | DecaySchedule | None:
+    if cfg.schedule_kind == "none":
+        return None
+    if cfg.schedule_kind == "decay":
+        return DecaySchedule(
+            total_updates=cfg.updates,
+            lr_initial=cfg.learning_rate,
+            tau_initial=cfg.magnet_kl,
+            decay=cfg.schedule_decay,
+        )
+    return DampedSchedule(
+        total_updates=cfg.updates,
+        lr_max=cfg.learning_rate,
+        tau_scale=cfg.magnet_kl,
+    )
+
+
 def _select_components(cfg: LabConfig) -> tuple[CreditFn, SelectFn, LossFn, LossScheduleFn | None]:
     credit: CreditFn = (
         monte_carlo
         if cfg.credit_kind == "mc"
         else gae_wdl(gamma=1.0, lam_policy=cfg.lam_policy, lam_value=cfg.lam_value)
     )
-    select: SelectFn = all_rows if cfg.select_kind == "all" else top_fraction(0.25, minimum=cfg.min_advantage)
+    select = _build_select(cfg)
     if cfg.loss_kind == "ppo":
-        return credit, select, ppo_loss(clip=0.2, entropy_coef=0.01, value_coef=cfg.value_coef), None
+        return credit, select, ppo_loss(clip=cfg.clip, entropy_coef=0.01, value_coef=cfg.value_coef), None
     default_loss = damped_policy_loss(
-        clip=0.2,
+        clip=cfg.clip,
         collection_kl=cfg.collection_kl,
         magnet_kl=cfg.magnet_kl,
         value_coef=cfg.value_coef,
     )
-    if not cfg.use_schedule:
+    schedule = _build_schedule(cfg)
+    if schedule is None:
         return credit, select, default_loss, None
-    schedule = DampedSchedule(
-        total_updates=cfg.updates,
-        lr_max=cfg.learning_rate,
-        tau_scale=cfg.magnet_kl,
-    )
 
     def loss_for_update(update_idx: int) -> tuple[float, float, LossFn]:
         lr, tau = schedule.rates(update_idx)
@@ -167,7 +190,7 @@ def _select_components(cfg: LabConfig) -> tuple[CreditFn, SelectFn, LossFn, Loss
             lr,
             tau,
             damped_policy_loss(
-                clip=0.2,
+                clip=cfg.clip,
                 collection_kl=cfg.collection_kl,
                 magnet_kl=tau,
                 value_coef=cfg.value_coef,
@@ -262,42 +285,20 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
     credit, select, loss, loss_schedule = _select_components(cfg)
     normalize_advantages = _resolve_normalize_advantages(cfg)
 
+    run_config: dict[str, object] = {
+        **asdict(cfg),
+        "runs_dir": str(cfg.runs_dir),
+        "decks": [name for name, _ in named_decks],
+        "decklists": "closed",
+        "policy_input_version": 11,
+        "normalize_advantages": normalize_advantages,
+        "params": sum(p.numel() for p in agent.parameters()),
+    }
     layout = create_run(
         runs_dir=cfg.runs_dir,
         experiment=cfg.experiment,
         run_id=cfg.run_id,
-        config={
-            "decks": [name for name, _ in named_decks],
-            "decklists": "closed",
-            "policy_input_version": 11,
-            "updates": cfg.updates,
-            "num_envs": cfg.num_envs,
-            "steps_per_env": cfg.steps_per_env,
-            "epochs": cfg.epochs,
-            "minibatch_size": cfg.minibatch_size,
-            "learning_rate": cfg.learning_rate,
-            "max_grad_norm": cfg.max_grad_norm,
-            "hidden_dim": cfg.hidden_dim,
-            "attention_layers": cfg.attention_layers,
-            "credit_kind": cfg.credit_kind,
-            "lam_policy": cfg.lam_policy,
-            "lam_value": cfg.lam_value,
-            "select_kind": cfg.select_kind,
-            "min_advantage": cfg.min_advantage,
-            "loss_kind": cfg.loss_kind,
-            "collection_kl": cfg.collection_kl,
-            "magnet_kl": cfg.magnet_kl,
-            "value_coef": cfg.value_coef,
-            "normalize_advantages": normalize_advantages,
-            "use_schedule": cfg.use_schedule,
-            "snapshot_fraction": cfg.snapshot_fraction,
-            "snapshot_every": cfg.snapshot_every,
-            "snapshot_pool_size": cfg.snapshot_pool_size,
-            "collect_device": cfg.collect_device,
-            "learn_device": cfg.learn_device,
-            "params": sum(p.numel() for p in agent.parameters()),
-            "seed": cfg.seed,
-        },
+        config=run_config,
     )
 
     deals = build_deals(named_decks, count=cfg.eval_deals, seed=cfg.seed + 10_000, decklists="closed")
@@ -406,14 +407,16 @@ def _parse_args(argv: Sequence[str] | None) -> LabConfig:
     parser.add_argument("--credit", choices=("gae", "mc"), default="gae")
     parser.add_argument("--lam-policy", type=float, default=0.5)
     parser.add_argument("--lam-value", type=float, default=0.8)
-    parser.add_argument("--select", choices=("top25", "all"), default="top25")
+    parser.add_argument("--select", choices=("top25", "top50", "all"), default="top25")
     parser.add_argument("--min-advantage", type=float, default=0.01)
     parser.add_argument("--loss", choices=("damped", "ppo"), default="damped")
+    parser.add_argument("--clip", type=float, default=0.2)
     parser.add_argument("--collection-kl", type=float, default=0.1)
     parser.add_argument("--magnet-kl", type=float, default=0.05)
     parser.add_argument("--value-coef", type=float, default=1.0)
     parser.add_argument("--normalize-advantages", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--schedule", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--schedule-kind", choices=("damped", "decay", "none"), default="damped")
+    parser.add_argument("--schedule-decay", type=float, default=9.0)
     parser.add_argument("--snapshot-fraction", type=float, default=0.25)
     parser.add_argument("--snapshot-every", type=int, default=10)
     parser.add_argument("--snapshot-pool-size", type=int, default=16)
@@ -444,11 +447,13 @@ def _parse_args(argv: Sequence[str] | None) -> LabConfig:
         select_kind=ns.select,
         min_advantage=ns.min_advantage,
         loss_kind=ns.loss,
+        clip=ns.clip,
         collection_kl=ns.collection_kl,
         magnet_kl=ns.magnet_kl,
         value_coef=ns.value_coef,
         normalize_advantages=ns.normalize_advantages,
-        use_schedule=ns.schedule,
+        schedule_kind=ns.schedule_kind,
+        schedule_decay=ns.schedule_decay,
         snapshot_fraction=ns.snapshot_fraction,
         snapshot_every=ns.snapshot_every,
         snapshot_pool_size=ns.snapshot_pool_size,

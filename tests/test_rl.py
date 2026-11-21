@@ -21,6 +21,7 @@ from torch import nn
 
 from jace.rl import (
     DampedSchedule,
+    DecaySchedule,
     LossBreakdown,
     LossFn,
     PolicyBatch,
@@ -108,6 +109,20 @@ def test_damped_schedule_decays_monotonically_within_bounds() -> None:
     assert tau1 > tau75 > tau150 > 0.0
     assert pytest.approx(0.5 / (10_000**1.1), rel=1e-5) == lr150
     assert pytest.approx(0.05 / (10_000**0.3), rel=1e-5) == tau150
+
+
+def test_decay_schedule_decays_cleanly_across_horizon() -> None:
+    schedule = DecaySchedule(total_updates=75, lr_initial=2.5e-4, tau_initial=0.01, decay=9.0)
+    lr1, tau1 = schedule.rates(1)
+    lr38, tau38 = schedule.rates(38)
+    lr75, tau75 = schedule.rates(75)
+
+    assert pytest.approx(2.5e-4) == lr1
+    assert pytest.approx(0.01) == tau1
+    assert lr1 > lr38 > lr75
+    assert tau1 > tau38 > tau75
+    assert pytest.approx(2.5e-5, rel=1e-5) == lr75
+    assert pytest.approx(0.001, rel=1e-5) == tau75
 
 
 def test_snapshot_pool_clones_and_bounds_history() -> None:

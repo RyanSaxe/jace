@@ -27,13 +27,14 @@ from jace.rl.losses import (
     ppo_loss,
     reverse_kl,
 )
-from jace.rl.pool import DampedSchedule, SnapshotEntry, SnapshotPool, load_snapshot
+from jace.rl.pool import DampedSchedule, DecaySchedule, SnapshotEntry, SnapshotPool, load_snapshot
 from jace.rl.select import SelectFn, all_rows, top_fraction
 
 __all__ = (
     "CreditFn",
     "CreditTargets",
     "DampedSchedule",
+    "DecaySchedule",
     "LossBreakdown",
     "LossFn",
     "LossScheduleFn",
