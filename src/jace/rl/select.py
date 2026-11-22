@@ -9,12 +9,14 @@ without touching collection or loss code.
 import math
 from collections.abc import Callable
 
+import numpy as np
 import torch
 from torch import Tensor
 
 __all__ = (
     "SelectFn",
     "all_rows",
+    "bucketed_minibatch_order",
     "top_fraction",
 )
 
@@ -55,3 +57,25 @@ def top_fraction(fraction: float, *, minimum: float = 0.0) -> SelectFn:
         return mask.reshape_as(advantages)
 
     return select
+
+
+def bucketed_minibatch_order(
+    total_rows: int,
+    *,
+    minibatch_size: int,
+    row_sizes: np.ndarray | None,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Return a row permutation grouped into length-coherent minibatches.
+
+    When `row_sizes` is supplied, shuffles rows first so equal-size ties break
+    randomly, sorts into `minibatch_size` buckets by board size to avoid padding
+    early-game rows to stalemate lengths on MPS, and shuffles the bucket order.
+    """
+    perm = rng.permutation(total_rows).astype(np.int64)
+    if row_sizes is None or total_rows <= minibatch_size:
+        return perm
+    sorted_perm = perm[np.argsort(row_sizes[perm], kind="mergesort")]
+    buckets = [sorted_perm[start : start + minibatch_size] for start in range(0, total_rows, minibatch_size)]
+    rng.shuffle(buckets)
+    return np.concatenate(buckets)

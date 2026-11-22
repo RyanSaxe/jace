@@ -8,6 +8,7 @@ Magic games. Upstream `manabot` learner updates and recipes remain banned by AST
 
 from jace.rl.credit import CreditFn, CreditTargets, Trajectory, gae_wdl, monte_carlo, standardize_advantages
 from jace.rl.loop import (
+    CollectFn,
     LossScheduleFn,
     StepRecord,
     TrainConfig,
@@ -28,9 +29,10 @@ from jace.rl.losses import (
     reverse_kl,
 )
 from jace.rl.pool import DampedSchedule, DecaySchedule, SnapshotEntry, SnapshotPool, load_snapshot
-from jace.rl.select import SelectFn, all_rows, top_fraction
+from jace.rl.select import SelectFn, all_rows, bucketed_minibatch_order, top_fraction
 
 __all__ = (
+    "CollectFn",
     "CreditFn",
     "CreditTargets",
     "DampedSchedule",
@@ -49,6 +51,7 @@ __all__ = (
     "UpdateConfig",
     "UpdateStats",
     "all_rows",
+    "bucketed_minibatch_order",
     "categorical_value_loss",
     "damped_policy_loss",
     "gae_wdl",

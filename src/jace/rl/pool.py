@@ -8,17 +8,27 @@ matches the power-law learning-rate and magnet-KL decay curves of damped policy 
 
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
 from torch import Tensor, nn
+from torch.optim import Optimizer
 
 __all__ = (
     "DampedSchedule",
     "DecaySchedule",
     "SnapshotEntry",
     "SnapshotPool",
+    "StepRecord",
+    "TrainConfig",
+    "UpdateConfig",
+    "UpdateStats",
+    "current_optimizer_lr",
     "load_snapshot",
+    "set_optimizer_lr",
+    "should_use_snapshot",
 )
 
 _MIN_REFERENCE_STEPS = 2
@@ -140,3 +150,70 @@ def load_snapshot(target: nn.Module, entry: SnapshotEntry) -> None:
     with torch.no_grad():
         target.load_state_dict(entry.state)
     target.eval()
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateConfig:
+    epochs: int = 1
+    minibatch_size: int = 256
+    max_grad_norm: float = 0.267
+    normalize_advantages: bool = False
+    reference: Literal["uniform", "action_type_uniform"] = "action_type_uniform"
+    device: str = "cpu"
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateStats:
+    rows: int
+    selected_rows: int
+    completed_games: int
+    policy_loss: float
+    value_loss: float
+    collection_kl: float
+    magnet_kl: float
+    entropy: float
+    clip_fraction: float
+    grad_norm: float
+    mean_advantage_abs: float
+
+
+@dataclass(frozen=True, slots=True)
+class TrainConfig:
+    updates: int
+    num_envs: int = 16
+    steps_per_env: int = 64
+    seed: int = 1
+    collect_device: str = "cpu"
+    update: UpdateConfig = UpdateConfig()
+    games_path: Path | None = None
+    record_fraction: float = 0.0
+    snapshot_fraction: float = 0.0
+    snapshot_every: int = 10
+    snapshot_pool_size: int = 16
+
+
+@dataclass(frozen=True, slots=True)
+class StepRecord:
+    update: int
+    stats: UpdateStats
+    collect_s: float
+    learn_s: float
+    learning_rate: float = 0.0
+    magnet_tau: float = 0.0
+    opponent: str = "self"
+
+
+def set_optimizer_lr(optimizer: Optimizer, lr: float) -> None:
+    for group in optimizer.param_groups:
+        group["lr"] = lr
+
+
+def current_optimizer_lr(optimizer: Optimizer) -> float:
+    return float(optimizer.param_groups[0]["lr"]) if optimizer.param_groups else 0.0
+
+
+def should_use_snapshot(update_idx: int, *, fraction: float, pool_size: int) -> bool:
+    if pool_size <= 0 or fraction <= 0.0:
+        return False
+    interval = max(1, round(1.0 / fraction))
+    return update_idx % interval == 0

@@ -11,6 +11,7 @@ import copy
 import logging
 import sys
 from collections.abc import Sequence
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -29,7 +30,9 @@ from jace.eval import (
     elemental_decks,
     run_forensics,
 )
+from jace.loops.collect_pool import MultiProcessCollector, WorkerPoolConfig
 from jace.rl import (
+    CollectFn,
     CreditFn,
     DampedSchedule,
     DecaySchedule,
@@ -94,6 +97,7 @@ class LabConfig:
     snapshot_fraction: float = 0.25
     snapshot_every: int = 10
     snapshot_pool_size: int = 16
+    collect_workers: int = 0
     collect_device: str = "cpu"
     learn_device: str = "mps"
     eval_every: int = 25
@@ -357,36 +361,53 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
                 record_games=True,
             )
 
-    train_self_play(
-        agent,
-        optimizer,
-        obs_space=obs_space,
-        deck_source=deck_source,
-        credit=credit,
-        select=select,
-        loss=loss,
-        loss_schedule=loss_schedule,
-        config=TrainConfig(
-            updates=cfg.updates,
-            num_envs=cfg.num_envs,
-            steps_per_env=cfg.steps_per_env,
-            seed=cfg.seed,
-            collect_device=cfg.collect_device,
-            update=UpdateConfig(
-                epochs=cfg.epochs,
-                minibatch_size=cfg.minibatch_size,
-                max_grad_norm=cfg.max_grad_norm,
-                normalize_advantages=normalize_advantages,
-                device=cfg.learn_device,
-            ),
-            games_path=layout.train_games_path(),
-            record_fraction=cfg.record_train_fraction,
-            snapshot_fraction=cfg.snapshot_fraction,
-            snapshot_every=cfg.snapshot_every,
-            snapshot_pool_size=cfg.snapshot_pool_size,
+    train_cfg = TrainConfig(
+        updates=cfg.updates,
+        num_envs=cfg.num_envs,
+        steps_per_env=cfg.steps_per_env,
+        seed=cfg.seed,
+        collect_device=cfg.collect_device,
+        update=UpdateConfig(
+            epochs=cfg.epochs,
+            minibatch_size=cfg.minibatch_size,
+            max_grad_norm=cfg.max_grad_norm,
+            normalize_advantages=normalize_advantages,
+            device=cfg.learn_device,
         ),
-        on_update=on_update,
+        games_path=layout.train_games_path(),
+        record_fraction=cfg.record_train_fraction,
+        snapshot_fraction=cfg.snapshot_fraction,
+        snapshot_every=cfg.snapshot_every,
+        snapshot_pool_size=cfg.snapshot_pool_size,
     )
+    with ExitStack() as stack:
+        collect_fn: CollectFn | None = None
+        if cfg.collect_workers > 0:
+            pool_cfg = WorkerPoolConfig(
+                num_workers=cfg.collect_workers,
+                envs_per_worker=max(1, cfg.num_envs // cfg.collect_workers),
+                steps_per_env=cfg.steps_per_env,
+                hidden_dim=cfg.hidden_dim,
+                attention_layers=cfg.attention_layers,
+                seed=cfg.seed,
+                games_path=layout.train_games_path(),
+                record_fraction=cfg.record_train_fraction,
+                enable_snapshots=cfg.snapshot_fraction > 0.0,
+            )
+            collect_fn = stack.enter_context(MultiProcessCollector(pool_cfg)).collect
+        train_self_play(
+            agent,
+            optimizer,
+            obs_space=obs_space,
+            deck_source=deck_source,
+            credit=credit,
+            select=select,
+            loss=loss,
+            loss_schedule=loss_schedule,
+            config=train_cfg,
+            collect_fn=collect_fn,
+            on_update=on_update,
+        )
     return layout
 
 
@@ -400,16 +421,16 @@ def _parse_args(argv: Sequence[str] | None) -> LabConfig:
     parser.add_argument("--steps-per-env", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--minibatch-size", type=int, default=512)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", dest="learning_rate", type=float, default=1e-4)
     parser.add_argument("--max-grad-norm", type=float, default=0.267)
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--attention-layers", type=int, default=2)
-    parser.add_argument("--credit", choices=("gae", "mc"), default="gae")
+    parser.add_argument("--credit", dest="credit_kind", choices=("gae", "mc"), default="gae")
     parser.add_argument("--lam-policy", type=float, default=0.5)
     parser.add_argument("--lam-value", type=float, default=0.8)
-    parser.add_argument("--select", choices=("top25", "top50", "all"), default="top25")
+    parser.add_argument("--select", dest="select_kind", choices=("top25", "top50", "all"), default="top25")
     parser.add_argument("--min-advantage", type=float, default=0.01)
-    parser.add_argument("--loss", choices=("damped", "ppo"), default="damped")
+    parser.add_argument("--loss", dest="loss_kind", choices=("damped", "ppo"), default="damped")
     parser.add_argument("--clip", type=float, default=0.2)
     parser.add_argument("--collection-kl", type=float, default=0.1)
     parser.add_argument("--magnet-kl", type=float, default=0.05)
@@ -420,6 +441,7 @@ def _parse_args(argv: Sequence[str] | None) -> LabConfig:
     parser.add_argument("--snapshot-fraction", type=float, default=0.25)
     parser.add_argument("--snapshot-every", type=int, default=10)
     parser.add_argument("--snapshot-pool-size", type=int, default=16)
+    parser.add_argument("--collect-workers", type=int, default=0)
     parser.add_argument("--collect-device", default="cpu")
     parser.add_argument("--learn-device", default="mps" if torch.backends.mps.is_available() else "cpu")
     parser.add_argument("--eval-every", type=int, default=25)
@@ -427,44 +449,7 @@ def _parse_args(argv: Sequence[str] | None) -> LabConfig:
     parser.add_argument("--probe-count", type=int, default=64)
     parser.add_argument("--record-train-fraction", type=float, default=0.02)
     parser.add_argument("--seed", type=int, default=1)
-    ns = parser.parse_args(argv)
-    return LabConfig(
-        runs_dir=ns.runs_dir,
-        experiment=ns.experiment,
-        run_id=ns.run_id,
-        updates=ns.updates,
-        num_envs=ns.num_envs,
-        steps_per_env=ns.steps_per_env,
-        epochs=ns.epochs,
-        minibatch_size=ns.minibatch_size,
-        learning_rate=ns.lr,
-        max_grad_norm=ns.max_grad_norm,
-        hidden_dim=ns.hidden_dim,
-        attention_layers=ns.attention_layers,
-        credit_kind=ns.credit,
-        lam_policy=ns.lam_policy,
-        lam_value=ns.lam_value,
-        select_kind=ns.select,
-        min_advantage=ns.min_advantage,
-        loss_kind=ns.loss,
-        clip=ns.clip,
-        collection_kl=ns.collection_kl,
-        magnet_kl=ns.magnet_kl,
-        value_coef=ns.value_coef,
-        normalize_advantages=ns.normalize_advantages,
-        schedule_kind=ns.schedule_kind,
-        schedule_decay=ns.schedule_decay,
-        snapshot_fraction=ns.snapshot_fraction,
-        snapshot_every=ns.snapshot_every,
-        snapshot_pool_size=ns.snapshot_pool_size,
-        collect_device=ns.collect_device,
-        learn_device=ns.learn_device,
-        eval_every=ns.eval_every,
-        eval_deals=ns.eval_deals,
-        probe_count=ns.probe_count,
-        record_train_fraction=ns.record_train_fraction,
-        seed=ns.seed,
-    )
+    return LabConfig(**vars(parser.parse_args(argv)))
 
 
 def main(argv: Sequence[str] | None = None) -> int:

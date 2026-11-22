@@ -9,16 +9,25 @@ scale, and end-to-end self-play plus frozen historical snapshot rollouts on v11 
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import managym
 import numpy as np
 import pytest
 import torch
+from manabot.backends.torch.collection import CollectionSession
 from manabot.backends.torch.policy import ActorCritic
+from manabot.env.match import Match, Reward
 from manabot.env.observation import ObservationSpace
-from manabot.infra.config import ModelConfig, ObservationConfig
+from manabot.infra.config import ModelConfig, ObservationConfig, RewardConfig
 from manabot.training.decks import UniformDecks
+from manabot.training.rollout.collection import RolloutBatch, close_collector, collect, open_collector
 from torch import nn
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+from jace.loops.collect_pool import merge_rollout_batches
 from jace.rl import (
     DampedSchedule,
     DecaySchedule,
@@ -31,6 +40,7 @@ from jace.rl import (
     Trajectory,
     UpdateConfig,
     all_rows,
+    bucketed_minibatch_order,
     damped_policy_loss,
     gae_wdl,
     load_snapshot,
@@ -41,6 +51,8 @@ from jace.rl import (
     top_fraction,
     train_self_play,
 )
+
+_collect_rollout: Callable[..., RolloutBatch] = collect
 
 
 def test_gae_wdl_cuts_credit_strictly_at_episode_boundaries() -> None:
@@ -301,3 +313,113 @@ def test_train_self_play_supports_unnormalized_damped_schedule_and_snapshot_pool
         assert np.isfinite(stats.policy_loss)
         assert np.isfinite(stats.value_loss)
         assert np.isfinite(stats.grad_norm)
+
+
+def test_bucketed_minibatch_order_groups_similar_sizes_and_preserves_permutation() -> None:
+    rng = np.random.default_rng(123)
+    sizes = np.array([10] * 16 + [200] * 16, dtype=np.int64)
+    order = bucketed_minibatch_order(len(sizes), minibatch_size=16, row_sizes=sizes, rng=rng)
+    assert sorted(order.tolist()) == list(range(len(sizes)))
+    # Each 16-row bucket should contain purely short or purely long rows, never mixed.
+    first_bucket = sizes[order[:16]]
+    second_bucket = sizes[order[16:]]
+    assert {int(first_bucket.max()), int(second_bucket.max())} == {10, 200}
+    assert {int(first_bucket.min()), int(second_bucket.min())} == {10, 200}
+
+
+def test_merge_rollout_batches_preserves_rows_and_packed_actions() -> None:
+    obs_space = ObservationSpace(
+        ObservationConfig(policy_input_version=11, max_cards_per_player=40, max_permanents_per_player=32)
+    )
+    agent = ActorCritic(
+        obs_space,
+        ModelConfig(
+            world="world",
+            hidden_dim=32,
+            attention_layers=1,
+            num_attention_heads=4,
+            policy_film=True,
+            value_kind="categorical_wdl",
+            value_aggregation="masked_mean",
+        ),
+        bucketed_shapes=True,
+        live_tokens=False,
+    ).eval()
+    deck = managym.Deck({"Mountain": 24, "Llanowar Elves": 16})
+    source = UniformDecks(decks=(deck, deck), decklists="closed", sampling="uniform-independent-v1")
+    reward = Reward(RewardConfig())
+    batches = []
+    for seed in (1, 2):
+        collector = open_collector(
+            obs_space,
+            Match(source.match_config()),
+            reward,
+            num_envs=2,
+            seed=seed,
+            opponent_mode="self",
+            numerics=CollectionSession(device="cpu", seed=seed),
+            learning_seats="both",
+            batch_closure="complete-games",
+            deck_source=source,
+        )
+        try:
+            batches.append(_collect_rollout(collector, agent, 4))
+        finally:
+            close_collector(collector)
+
+    merged = merge_rollout_batches(batches)
+    expected_rows = sum(int(batch.actions.size) for batch in batches)
+    assert int(merged.actions.size) == expected_rows
+    assert int(merged.dones.sum()) == sum(int(batch.dones.sum()) for batch in batches)
+    np.testing.assert_array_equal(merged.actions, np.concatenate([b.actions for b in batches], axis=0))
+    obs_last = merged.observations(np.array([expected_rows - 1], dtype=np.int64))
+    obs_orig = batches[-1].observations(np.array([int(batches[-1].actions.size) - 1], dtype=np.int64))
+    np.testing.assert_array_equal(obs_last.log_probabilities, obs_orig.log_probabilities)
+
+
+def test_epoch_catalog_cache_updates_semantic_card_weights() -> None:
+    obs_space = ObservationSpace(
+        ObservationConfig(policy_input_version=11, max_cards_per_player=40, max_permanents_per_player=32)
+    )
+    agent = ActorCritic(
+        obs_space,
+        ModelConfig(
+            world="world",
+            hidden_dim=32,
+            attention_layers=1,
+            num_attention_heads=4,
+            policy_film=True,
+            value_kind="categorical_wdl",
+            value_aggregation="masked_mean",
+        ),
+        bucketed_shapes=True,
+        live_tokens=False,
+    )
+    assert agent.semantic_cards is not None
+    before = {name: param.detach().clone() for name, param in agent.semantic_cards.named_parameters()}
+    deck = managym.Deck({"Mountain": 24, "Llanowar Elves": 16})
+    source = UniformDecks(decks=(deck, deck), decklists="closed", sampling="uniform-independent-v1")
+    optimizer = torch.optim.Adam(agent.parameters(), lr=1e-3)
+    train_self_play(
+        agent,
+        optimizer,
+        obs_space=obs_space,
+        deck_source=source,
+        credit=gae_wdl(gamma=1.0, lam_policy=0.95, lam_value=0.9),
+        select=all_rows,
+        loss=damped_policy_loss(),
+        config=TrainConfig(
+            updates=1,
+            num_envs=2,
+            steps_per_env=6,
+            seed=3,
+            collect_device="cpu",
+            update=UpdateConfig(epochs=1, minibatch_size=64, max_grad_norm=0.267, device="cpu"),
+        ),
+    )
+    deltas = [
+        float((param.detach() - before[name]).abs().max().item())
+        for name, param in agent.semantic_cards.named_parameters()
+    ]
+    assert max(deltas) > 0.0
+    assert all(np.isfinite(delta) for delta in deltas)
