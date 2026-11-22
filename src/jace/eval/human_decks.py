@@ -38,7 +38,13 @@ __all__ = (
     "top_card_pool",
 )
 
-_BASIC_LANDS = frozenset({"Plains", "Island", "Swamp", "Mountain", "Forest"})
+_BASIC_LAND_ORDER = ("Plains", "Island", "Swamp", "Mountain", "Forest")
+_BASIC_LANDS = frozenset(_BASIC_LAND_ORDER)
+_MIN_SECOND_COLOR_LANDS = 3
+_NUM_COLOR_PAIRS = 10
+_MONO_GROUP = 10
+_CANDIDATES_PER_PAIR = 250
+_BALANCE_SMOOTH = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,13 +113,68 @@ def row_to_deck(main_row: Tensor, sideboard_row: Tensor, *, card_names: Sequence
     return managym.Deck(main, sideboard)
 
 
-def top_card_pool(catalog: HumanDeckCatalog, *, card_count: int) -> frozenset[str]:
-    """Select `card_count` cards maximizing the number of fitting human training decks.
+def _deck_color_pair_groups(decks: Tensor, *, card_names: Sequence[str]) -> Tensor:
+    name_to_idx = {name: idx for idx, name in enumerate(card_names)}
+    basic_counts = torch.stack(
+        [
+            decks[:, name_to_idx[land]].float()
+            if land in name_to_idx
+            else torch.zeros(decks.shape[0], dtype=torch.float32)
+            for land in _BASIC_LAND_ORDER
+        ],
+        dim=1,
+    )
+    order = basic_counts.argsort(dim=1, descending=True, stable=True)
+    first, second = order[:, 0], order[:, 1]
+    low, high = torch.minimum(first, second), torch.maximum(first, second)
+    pair_map = torch.full((len(_BASIC_LAND_ORDER), len(_BASIC_LAND_ORDER)), _MONO_GROUP, dtype=torch.long)
+    color_pairs = [(i, j) for i in range(len(_BASIC_LAND_ORDER)) for j in range(i + 1, len(_BASIC_LAND_ORDER))]
+    for pair_id, (first_c, second_c) in enumerate(color_pairs):
+        pair_map[first_c, second_c] = pair_id
+    second_lands = basic_counts.gather(1, second[:, None]).squeeze(1)
+    return torch.where(second_lands >= _MIN_SECOND_COLOR_LANDS, pair_map[low, high], _MONO_GROUP)
 
-    Keeps every basic land present in `catalog` and greedily peels non-basic cards one
-    at a time, removing whichever card drops the fewest surviving training decks (with
-    total deck frequency breaking ties). This preserves thousands of complete human decks
-    at small pool sizes (e.g. ~4,081 decks at 90 cards) instead of scattering across rares.
+
+def _stratified_candidates(possible: Tensor, *, missing_counts: Tensor, arch: Tensor) -> Tensor:
+    buckets: list[Tensor] = []
+    for pair_id in range(_NUM_COLOR_PAIRS):
+        subset = possible[arch[possible] == pair_id]
+        if subset.numel() > 0:
+            buckets.append(subset[missing_counts[subset].argsort()[:_CANDIDATES_PER_PAIR]])
+    if buckets:
+        return torch.cat(buckets)
+    return possible[missing_counts[possible].argsort()[:1000]]
+
+
+def _grow_balanced_pool(present: Tensor, *, arch: Tensor, target: int) -> Tensor:
+    groups = torch.nn.functional.one_hot(arch, _NUM_COLOR_PAIRS + 1).float()
+    in_pool = torch.zeros(present.shape[1], dtype=torch.bool)
+    while int(in_pool.sum().item()) < target:
+        missing = present * (~in_pool).float()[None, :]
+        counts = missing.sum(dim=1)
+        room = target - int(in_pool.sum().item())
+        possible = torch.nonzero((counts > 0) & (counts <= room), as_tuple=False).flatten()
+        if possible.numel() == 0:
+            break
+        candidates = _stratified_candidates(possible, missing_counts=counts, arch=arch)
+        relevant = torch.nonzero((counts > 0) & (counts <= counts[candidates].max()), as_tuple=False).flatten()
+        completes = ((missing[relevant] @ (1.0 - missing[candidates]).T) == 0).float()
+        fitting = (groups * (counts == 0).float()[:, None]).sum(dim=0)[:_NUM_COLOR_PAIRS]
+        gain = (completes.T @ groups[relevant])[:, :_NUM_COLOR_PAIRS]
+        balance = (fitting[None, :] + gain + _BALANCE_SMOOTH).log() - (fitting[None, :] + _BALANCE_SMOOTH).log()
+        best = candidates[int((balance.sum(dim=1) / counts[candidates]).argmax().item())]
+        in_pool |= present[best] > 0
+    return in_pool
+
+
+def top_card_pool(catalog: HumanDeckCatalog, *, card_count: int) -> frozenset[str]:
+    """Select `card_count` cards via color-pair-balanced deck-completing growth.
+
+    Keeps every basic land in `catalog` and grows the non-basic pool one fitting deck at
+    a time, choosing whichever deck maximizes per-card log-balanced gain across the ten
+    two-color pairs (`v1` `nested_pools` objective with per-pair candidate stratification).
+    This keeps all five colors represented at small pool sizes (e.g. 915 decks across
+    W/U/B/R/G inside 90 cards) instead of collapsing into a single two-color pair.
     """
     if card_count < 1:
         msg = f"card_count must be >= 1, got {card_count}"
@@ -122,19 +183,12 @@ def top_card_pool(catalog: HumanDeckCatalog, *, card_count: int) -> frozenset[st
         return frozenset(catalog.card_names)
     basics = [idx for idx, name in enumerate(catalog.card_names) if name in _BASIC_LANDS]
     non_basics = [idx for idx, name in enumerate(catalog.card_names) if name not in _BASIC_LANDS]
-    keep_non_basics = max(0, card_count - len(basics))
-    if keep_non_basics == 0:
+    target = max(0, card_count - len(basics))
+    if target == 0:
         return frozenset(catalog.card_names[idx] for idx in basics[:card_count])
     present = (catalog.train_decks[:, non_basics] > 0).float()
-    usage = present.sum(dim=0)
-    tie_break = 1e-6 * usage / torch.clamp(usage.max(), min=1.0)
-    in_pool = torch.ones(len(non_basics), dtype=torch.bool)
-    alive = torch.ones(present.shape[0], dtype=torch.float32)
-    for _ in range(len(non_basics) - keep_non_basics):
-        lost = torch.where(in_pool, present.T @ alive + tie_break, float("inf"))
-        drop = int(lost.argmin().item())
-        in_pool[drop] = False
-        alive = alive * (1.0 - present[:, drop])
+    arch = _deck_color_pair_groups(catalog.train_decks, card_names=catalog.card_names)
+    in_pool = _grow_balanced_pool(present, arch=arch, target=target)
     kept = [non_basics[pos] for pos, active in enumerate(in_pool.tolist()) if active]
     return frozenset(catalog.card_names[idx] for idx in (*basics, *kept))
 
