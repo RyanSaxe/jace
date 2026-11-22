@@ -6,6 +6,7 @@ When `games_path` is provided, every completed game is written through `managym`
 native `ScalarCapture` so it opens directly in `uv run managym academy replay`.
 """
 
+import logging
 import math
 import random
 from collections.abc import Callable, Sequence
@@ -34,6 +35,12 @@ __all__ = (
 )
 
 _WILSON_Z = 1.959963984540054
+_LOGGER = logging.getLogger(__name__)
+
+
+def _eval_engine_errors() -> tuple[type[BaseException], ...]:
+    panics = tuple(cls for cls in BaseException.__subclasses__() if cls.__name__ == "PanicException")
+    return (*panics, ValueError, RuntimeError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +253,7 @@ def _play_leg(
     )
     decisions = 0
     turns = 0
+    winner: int | None = None
     try:
         obs, _ = capture.reset(env, setup) if capture is not None else env.reset(setup)
         terminal = False
@@ -257,6 +265,11 @@ def _play_leg(
             decisions += 1
             turns = max(turns, int(obs.turn.turn_number))
         winner = env.winner_index() if terminal else None
+    except _eval_engine_errors() as exc:
+        if isinstance(exc, ValueError) and "Observation capacity exceeded" not in str(exc):
+            raise
+        _LOGGER.warning("eval leg seed=%d aborted (%s): %s", deal.seed, type(exc).__name__, exc)
+        winner = None
     finally:
         if capture is not None:
             capture.close()

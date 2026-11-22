@@ -7,6 +7,7 @@ main-phase land drops with an empty stack, and per-decision-kind entropy includi
 `attack_declare_spread`.
 """
 
+import logging
 import math
 from collections import defaultdict
 from collections.abc import Sequence
@@ -28,6 +29,12 @@ __all__ = (
 
 _ACTION_SPACE_NAMES = {int(member): member.name.lower() for member in ActionSpaceEnum}
 _MIN_PROB = 1e-12
+_LOGGER = logging.getLogger(__name__)
+
+
+def _forensics_engine_errors() -> tuple[type[BaseException], ...]:
+    panics = tuple(cls for cls in BaseException.__subclasses__() if cls.__name__ == "PanicException")
+    return (*panics, ValueError, RuntimeError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +235,7 @@ def _play_audited_leg(
         if games_path is not None
         else None
     )
+    winner: int | None = None
     try:
         obs, _ = capture.reset(env, setup) if capture is not None else env.reset(setup)
         terminal = False
@@ -244,6 +252,11 @@ def _play_audited_leg(
             obs, _, terminal, truncated, _ = capture.step(env, action) if capture is not None else env.step(action)
             steps += 1
         winner = env.winner_index() if terminal else None
+    except _forensics_engine_errors() as exc:
+        if isinstance(exc, ValueError) and "Observation capacity exceeded" not in str(exc):
+            raise
+        _LOGGER.warning("forensics leg seed=%d aborted (%s): %s", deal.seed, type(exc).__name__, exc)
+        winner = None
     finally:
         if capture is not None:
             capture.close()
