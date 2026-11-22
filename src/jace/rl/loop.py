@@ -190,7 +190,7 @@ def _minibatch_step(
     if aux_loss is not None:
         aux = aux_loss()
         if aux is not None:
-            total = total + aux.to(device=total.device, dtype=total.dtype)
+            total = total + aux.to(device=total.device).to(dtype=total.dtype)
     if catalog_pair is not None:
         catalog_pair[0].grad = None
     optimizer.zero_grad(set_to_none=True)
