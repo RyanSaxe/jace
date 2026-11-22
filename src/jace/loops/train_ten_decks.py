@@ -32,6 +32,7 @@ from jace.eval import (
     run_forensics,
 )
 from jace.loops.collect_pool import MultiProcessCollector, WorkerPoolConfig
+from jace.loops.forks import ForkCollectorPool, ForkConfig
 from jace.rl import (
     CollectFn,
     CreditFn,
@@ -106,6 +107,7 @@ class LabConfig:
     probe_count: int = 64
     record_train_fraction: float = 0.02
     init_checkpoint: Path | None = None
+    fork_config: ForkConfig | None = None
     seed: int = 1
 
 
@@ -266,6 +268,37 @@ def _evaluate_and_save(
     return payload
 
 
+def _open_pools(
+    stack: ExitStack, *, cfg: LabConfig, layout: RunLayout
+) -> tuple[CollectFn | None, ForkCollectorPool | None]:
+    collect_fn: CollectFn | None = None
+    if cfg.collect_workers > 0:
+        pool_cfg = WorkerPoolConfig(
+            num_workers=cfg.collect_workers,
+            envs_per_worker=max(1, cfg.num_envs // cfg.collect_workers),
+            steps_per_env=cfg.steps_per_env,
+            hidden_dim=cfg.hidden_dim,
+            attention_layers=cfg.attention_layers,
+            seed=cfg.seed,
+            games_path=layout.train_games_path(),
+            record_fraction=cfg.record_train_fraction,
+            enable_snapshots=cfg.snapshot_fraction > 0.0,
+        )
+        collect_fn = stack.enter_context(MultiProcessCollector(pool_cfg)).collect
+    fork_pool = (
+        stack.enter_context(
+            ForkCollectorPool(
+                hidden_dim=cfg.hidden_dim,
+                attention_layers=cfg.attention_layers,
+                num_workers=cfg.fork_config.num_workers,
+            )
+        )
+        if cfg.fork_config is not None
+        else None
+    )
+    return collect_fn, fork_pool
+
+
 def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
     """Run the 10-deck TLA self-play lab and persist all Academy-native artifacts.
 
@@ -326,6 +359,7 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
     )
 
     optimizer = torch.optim.Adam(agent.parameters(), lr=cfg.learning_rate)
+    fork_pool: ForkCollectorPool | None = None
 
     def on_update(record: StepRecord) -> None:
         stats = record.stats
@@ -353,6 +387,15 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
                 "tps": round(stats.rows / max(record.collect_s + record.learn_s, 1e-6), 1),
             },
         )
+        if cfg.fork_config is not None and fork_pool is not None:
+            f_stats = fork_pool.collect_and_update(
+                agent,
+                optimizer,
+                config=cfg.fork_config,
+                device=torch.device(cfg.learn_device),
+                seed=cfg.seed * 10_000 + record.update * 97,
+            )
+            append_metric(layout, {"kind": "fork", "update": record.update, **asdict(f_stats)})
         should_eval = record.update % cfg.eval_every == 0 or record.update == cfg.updates
         if should_eval:
             _evaluate_and_save(
@@ -387,20 +430,7 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
         snapshot_pool_size=cfg.snapshot_pool_size,
     )
     with ExitStack() as stack:
-        collect_fn: CollectFn | None = None
-        if cfg.collect_workers > 0:
-            pool_cfg = WorkerPoolConfig(
-                num_workers=cfg.collect_workers,
-                envs_per_worker=max(1, cfg.num_envs // cfg.collect_workers),
-                steps_per_env=cfg.steps_per_env,
-                hidden_dim=cfg.hidden_dim,
-                attention_layers=cfg.attention_layers,
-                seed=cfg.seed,
-                games_path=layout.train_games_path(),
-                record_fraction=cfg.record_train_fraction,
-                enable_snapshots=cfg.snapshot_fraction > 0.0,
-            )
-            collect_fn = stack.enter_context(MultiProcessCollector(pool_cfg)).collect
+        collect_fn, fork_pool = _open_pools(stack, cfg=cfg, layout=layout)
         train_self_play(
             agent,
             optimizer,

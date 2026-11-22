@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Literal
 import torch
 
 from jace.eval import AdaptiveEvalConfig, AdaptiveEvalResult, play_adaptive_parallel
+from jace.loops.forks import ForkConfig
 from jace.loops.train_ten_decks import LabConfig, run_ten_deck_lab
 
 if TYPE_CHECKING:
@@ -148,6 +149,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--magnet-kl", type=float, default=0.005)
     parser.add_argument("--snapshot-fraction", type=float, default=0.10)
     parser.add_argument("--stages", default="100,200,500", help="Comma-separated mirrored deal counts.")
+    parser.add_argument("--forks-per-update", type=int, default=0, help="Counterfactual forks collected per update.")
+    parser.add_argument("--fork-playouts", type=int, default=4, help="Paired playouts per option (R).")
+    parser.add_argument("--fork-kinds", default="declare_attacker", help="Comma-separated decision kinds, or 'all'.")
+    parser.add_argument("--fork-weight", type=float, default=0.25)
+    parser.add_argument("--fork-anchor-kl", type=float, default=0.2)
     parser.add_argument("--skip-heuristic", action="store_true")
     parser.add_argument("--seed", type=int, default=1)
     return parser
@@ -155,6 +161,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _parse_stages(raw: str) -> tuple[int, ...]:
     return tuple(int(part.strip()) for part in raw.split(",") if part.strip())
+
+
+def _build_fork_config(ns: argparse.Namespace) -> ForkConfig | None:
+    if ns.forks_per_update <= 0:
+        return None
+    raw = str(ns.fork_kinds).strip().lower()
+    kinds = None if raw in ("", "all") else tuple(part.strip() for part in raw.split(",") if part.strip())
+    return ForkConfig(
+        forks_per_update=ns.forks_per_update,
+        playouts_per_action=ns.fork_playouts,
+        decision_kinds=kinds,
+        num_workers=ns.collect_workers,
+        fork_weight=ns.fork_weight,
+        anchor_kl=ns.fork_anchor_kl,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -200,6 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             probe_count=64,
             record_train_fraction=0.0,
             init_checkpoint=ns.init_checkpoint,
+            fork_config=_build_fork_config(ns),
             learn_device="mps" if torch.backends.mps.is_available() else "cpu",
             seed=ns.seed,
         )

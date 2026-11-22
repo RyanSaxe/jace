@@ -13,17 +13,21 @@ import torch
 from torch import Tensor
 
 __all__ = (
+    "ForkLossBreakdown",
     "LossBreakdown",
     "LossFn",
     "PolicyBatch",
     "categorical_value_loss",
     "damped_policy_loss",
+    "fork_pairwise_loss",
+    "fork_targets_from_returns",
     "policy_log_probs",
     "ppo_loss",
     "reverse_kl",
 )
 
 _MATRIX_NDIM = 2
+_PAIR_WIDTH = 2
 _WDL_CLASSES = 3
 
 
@@ -49,6 +53,15 @@ class LossBreakdown:
     magnet_kl: float
     entropy: float
     clip_fraction: float
+
+
+@dataclass(frozen=True, slots=True)
+class ForkLossBreakdown:
+    total: Tensor
+    cross_entropy: float
+    anchor_kl: float
+    active_count: int
+    mean_gap: float
 
 
 type LossFn = Callable[[PolicyBatch], LossBreakdown]
@@ -194,3 +207,77 @@ def ppo_loss(
         )
 
     return compute
+
+
+def fork_targets_from_returns(
+    pair_returns: Tensor,
+    *,
+    temperature: float = 0.25,
+    min_gap: float = 0.25,
+) -> tuple[Tensor, Tensor]:
+    """Turn paired counterfactual rollout returns `[B, 2]` into regularized targets and weights.
+
+    Follows regularized policy optimization for small simulation budgets (Grill et al.,
+    2020): applies `softmax(pair_returns / temperature)` over the two compared actions
+    and assigns weight equal to `|q_0 - q_1|` when the gap reaches `min_gap`, zeroing out
+    tied or noisy forks so they contribute zero gradient.
+    """
+    if pair_returns.ndim != _MATRIX_NDIM or pair_returns.shape[-1] != _PAIR_WIDTH:
+        msg = f"expected [B, 2] pair_returns, got {tuple(pair_returns.shape)}"
+        raise ValueError(msg)
+    if temperature <= 0.0 or min_gap < 0.0:
+        msg = "temperature must be positive and min_gap must be non-negative"
+        raise ValueError(msg)
+    gap = (pair_returns[:, 0] - pair_returns[:, 1]).abs()
+    targets = (pair_returns.detach() / temperature).softmax(dim=-1)
+    weights = torch.where(gap >= min_gap, gap, torch.zeros_like(gap))
+    return targets, weights
+
+
+def fork_pairwise_loss(
+    logits: Tensor,
+    *,
+    action_pairs: Tensor,
+    pair_returns: Tensor,
+    legal_mask: Tensor,
+    reference_logs: Tensor | None = None,
+    temperature: float = 0.25,
+    min_gap: float = 0.25,
+    anchor_kl: float = 0.1,
+) -> ForkLossBreakdown:
+    """Compute bounded pairwise cross-entropy loss over counterfactual fork comparisons.
+
+    Restricts the softmax to the two compared actions `action_pairs` (`[B, 2]`), which
+    equals the full action space for binary decisions like `declare_attacker` and avoids
+    distorting un-forked actions on wider spaces. Because cross-entropy has gradient
+    `p - target`, it stays full-strength even when a collapsed policy assigns `p = 0.999`
+    to the losing action. Optionally adds `anchor_kl` times full-action reverse KL to
+    `reference_logs` to protect unrelated decisions sharing trunk features.
+    """
+    if action_pairs.ndim != _MATRIX_NDIM or action_pairs.shape[-1] != _PAIR_WIDTH:
+        msg = f"expected [B, 2] action_pairs, got {tuple(action_pairs.shape)}"
+        raise ValueError(msg)
+    targets, weights = fork_targets_from_returns(pair_returns, temperature=temperature, min_gap=min_gap)
+    pair_logits = logits.gather(-1, action_pairs.long())
+    pair_logs = pair_logits.log_softmax(dim=-1)
+    ce_rows = -(targets.detach() * pair_logs).sum(dim=-1)
+    active_mask = weights > 0.0
+    active_count = int(active_mask.sum().item())
+    if active_count == 0:
+        zero = logits.sum() * 0.0
+        return ForkLossBreakdown(total=zero, cross_entropy=0.0, anchor_kl=0.0, active_count=0, mean_gap=0.0)
+    denom = weights.sum().clamp_min(1e-6)
+    ce_loss = (ce_rows * weights.detach()).sum() / denom
+    kl_loss = logits.sum() * 0.0
+    if reference_logs is not None and anchor_kl > 0.0:
+        full_logs = policy_log_probs(logits, legal_mask)
+        kl_rows = reverse_kl(full_logs, reference_logs, legal_mask=legal_mask)
+        kl_loss = kl_rows[active_mask].mean()
+    total = ce_loss + anchor_kl * kl_loss
+    return ForkLossBreakdown(
+        total=total,
+        cross_entropy=float(ce_loss.detach().item()),
+        anchor_kl=float(kl_loss.detach().item()),
+        active_count=active_count,
+        mean_gap=float(weights[active_mask].mean().item()),
+    )
