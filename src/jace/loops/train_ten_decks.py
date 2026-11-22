@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
+from manabot.backends.torch.checkpoint import load_checkpoint
 from manabot.backends.torch.policy import ActorCritic
 from manabot.env.observation import ObservationSpace
 from manabot.infra.config import ModelConfig, ObservationConfig
@@ -104,6 +105,7 @@ class LabConfig:
     eval_deals: int = 20
     probe_count: int = 64
     record_train_fraction: float = 0.02
+    init_checkpoint: Path | None = None
     seed: int = 1
 
 
@@ -285,6 +287,9 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
         bucketed_shapes=True,
         live_tokens=False,
     )
+    if cfg.init_checkpoint is not None:
+        loaded_policy = load_checkpoint(str(cfg.init_checkpoint))[0]
+        agent.load_state_dict(loaded_policy.state_dict())
     baseline = copy.deepcopy(agent).to("cpu").eval()
     credit, select, loss, loss_schedule = _select_components(cfg)
     normalize_advantages = _resolve_normalize_advantages(cfg)
@@ -292,6 +297,7 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
     run_config: dict[str, object] = {
         **asdict(cfg),
         "runs_dir": str(cfg.runs_dir),
+        "init_checkpoint": None if cfg.init_checkpoint is None else str(cfg.init_checkpoint),
         "decks": [name for name, _ in named_decks],
         "decklists": "closed",
         "policy_input_version": 11,
@@ -448,6 +454,7 @@ def _parse_args(argv: Sequence[str] | None) -> LabConfig:
     parser.add_argument("--eval-deals", type=int, default=20)
     parser.add_argument("--probe-count", type=int, default=64)
     parser.add_argument("--record-train-fraction", type=float, default=0.02)
+    parser.add_argument("--init-checkpoint", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=1)
     return LabConfig(**vars(parser.parse_args(argv)))
 

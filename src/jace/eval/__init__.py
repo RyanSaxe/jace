@@ -21,23 +21,43 @@ from jace.eval.deals import (
 )
 from jace.eval.diffs import DecisionShift, DiffSummary, ProbeState, capture_probes, diff_checkpoints
 from jace.eval.forensics import ForensicsReport, run_forensics
+from jace.eval.parallel import (
+    AdaptiveEvalConfig,
+    AdaptiveEvalResult,
+    PairedDealResult,
+    PairedMatchScore,
+    PlayerSpec,
+    evaluate_adaptive,
+    play_adaptive_parallel,
+    play_deals_parallel,
+    summarize_paired_deals,
+)
 
 __all__ = (
+    "AdaptiveEvalConfig",
+    "AdaptiveEvalResult",
     "Deal",
     "DecisionShift",
     "DiffSummary",
     "ForensicsReport",
     "MatchScore",
+    "PairedDealResult",
+    "PairedMatchScore",
     "PlayerFn",
+    "PlayerSpec",
     "PolicyPlayer",
     "ProbeState",
     "build_deals",
     "capture_probes",
     "diff_checkpoints",
     "elemental_decks",
+    "evaluate_adaptive",
     "heuristic_player",
+    "play_adaptive_parallel",
+    "play_deals_parallel",
     "play_match",
     "random_player",
     "run_forensics",
+    "summarize_paired_deals",
     "wilson_interval",
 )
