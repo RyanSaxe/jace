@@ -1,30 +1,27 @@
 """Self-play reinforcement learning update step and training loop on `manabot` ActorCritic.
 
-Bridges upstream `manabot` collection (`open_collector`, `collect`, `AdmittedRollout`,
-`ActorCritic`) to Jace's pure RL math (`credit`, `select`, `losses`, `pool`) without
-importing any upstream learner update or recipe module. Separate `collect_device` and
-`learn_device` settings let Apple Silicon runs collect on CPU streams (or an injected
-multi-process worker pool) while updating on MPS with length-bucketed minibatches and
-once-per-epoch catalog program encoding.
+Bridges upstream `manabot` collection (`AdmittedRollout`, `ActorCritic`) to Jace's pure
+RL math (`credit`, `select`, `losses`, `pool`, `diagnostics`) without importing any
+upstream learner update or recipe module. Separate `collect_device` and `learn_device`
+settings let Apple Silicon runs collect on CPU streams while updating on MPS with
+length-bucketed minibatches and once-per-epoch catalog program encoding.
 """
+
+from __future__ import annotations
 
 import copy
 import time
-from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import numpy as np
 import torch
 from manabot.backends.torch.arrays import on_device
 from manabot.backends.torch.collection import CollectionSession
-from manabot.backends.torch.policy import ActorCritic
 from manabot.backends.torch.rollout import AdmittedRollout
 from manabot.env.match import Match, Reward
-from manabot.env.observation import ObservationSpace
 from manabot.infra.config import MatchConfig, RewardConfig
 from manabot.policy.prepare import catalog_programs, reference_distribution
-from manabot.training.decks import UniformDecks
 from manabot.training.rollout.collection import (
     Collector,
     RolloutBatch,
@@ -33,9 +30,9 @@ from manabot.training.rollout.collection import (
     collect_pair,
     open_collector,
 )
-from torch.optim import Optimizer
 
 from jace.rl.credit import CreditFn, Trajectory, standardize_advantages
+from jace.rl.diagnostics import GradientAgreementTracker, snapshot_win_rate
 from jace.rl.losses import LossFn, PolicyBatch
 from jace.rl.pool import (
     SnapshotEntry,
@@ -50,6 +47,14 @@ from jace.rl.pool import (
     should_use_snapshot,
 )
 from jace.rl.select import SelectFn, bucketed_minibatch_order
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
+
+    from manabot.backends.torch.policy import ActorCritic
+    from manabot.env.observation import ObservationSpace
+    from manabot.training.decks import UniformDecks
+    from torch.optim import Optimizer
 
 __all__ = (
     "AuxLossFn",
@@ -85,11 +90,7 @@ class CollectFn(Protocol):
 
 
 def _bootstrap_values(
-    agent: ActorCritic,
-    rollout: AdmittedRollout,
-    *,
-    device: torch.device,
-    chunk_size: int,
+    agent: ActorCritic, rollout: AdmittedRollout, *, device: torch.device, chunk_size: int
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     values: list[torch.Tensor] = []
     outcomes: list[torch.Tensor] = []
@@ -109,9 +110,7 @@ def _bootstrap_values(
     finally:
         if was_training:
             agent.train()
-    next_value = torch.cat(values, dim=0)
-    next_outcomes = torch.cat(outcomes, dim=0) if outcomes else None
-    return next_value, next_outcomes
+    return torch.cat(values, dim=0), (torch.cat(outcomes, dim=0) if outcomes else None)
 
 
 def _trajectory_from_batch(
@@ -134,28 +133,16 @@ def _trajectory_from_batch(
 
 @contextmanager
 def _epoch_catalog_cache(
-    agent: ActorCritic,
-    optimizer: Optimizer,
-    *,
-    device: torch.device,
-    max_grad_norm: float,
+    agent: ActorCritic, optimizer: Optimizer, *, device: torch.device, max_grad_norm: float
 ) -> Generator[tuple[torch.Tensor, torch.Tensor] | None]:
-    """Encode the semantic card catalog once per epoch and accumulate its gradient.
-
-    Upstream `SemanticCardEncoder.definitions` runs a packed `nn.GRU` over hundreds of
-    card programs on every minibatch, which dominates MPS step time. Encoding the full
-    catalog once into a detached leaf `defs_leaf`, summing `defs_leaf.grad` across every
-    minibatch, and backpropagating once at epoch end preserves exact catalog gradients
-    while cutting GRU calls by the number of minibatches per epoch.
-    """
+    # Encode the semantic catalog once per epoch and accumulate gradients across minibatches.
     semantic = agent.semantic_cards
     if semantic is None:
         yield None
         return
     tokens_np = semantic.get_buffer("tokens").detach().cpu().numpy()
     lengths_np = semantic.get_buffer("lengths").detach().cpu().numpy()
-    full_programs = on_device(catalog_programs(tokens_np, lengths_np), device)
-    full_defs = semantic.definitions(full_programs)
+    full_defs = semantic.definitions(on_device(catalog_programs(tokens_np, lengths_np), device))
     defs_leaf = full_defs.detach().clone()
     defs_leaf.requires_grad = True
     defs_grad = torch.zeros_like(defs_leaf)
@@ -184,6 +171,7 @@ def _minibatch_step(
     max_grad_norm: float,
     catalog_pair: tuple[torch.Tensor, torch.Tensor] | None = None,
     aux_loss: AuxLossFn | None = None,
+    grad_tracker: GradientAgreementTracker | None = None,
 ) -> tuple[dict[str, float], float]:
     breakdown = loss_fn(batch)
     total = breakdown.total
@@ -197,19 +185,19 @@ def _minibatch_step(
     total.backward()
     if catalog_pair is not None and catalog_pair[0].grad is not None:
         catalog_pair[1].add_(catalog_pair[0].grad)
+    if grad_tracker is not None:
+        grad_tracker.accumulate(agent.parameters())
     grad_norm = float(torch.nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm).item())
     optimizer.step()
-    return (
-        {
-            "policy_loss": breakdown.policy,
-            "value_loss": breakdown.value,
-            "collection_kl": breakdown.collection_kl,
-            "magnet_kl": breakdown.magnet_kl,
-            "entropy": breakdown.entropy,
-            "clip_fraction": breakdown.clip_fraction,
-        },
-        grad_norm,
-    )
+    metrics = {
+        "policy_loss": breakdown.policy,
+        "value_loss": breakdown.value,
+        "collection_kl": breakdown.collection_kl,
+        "magnet_kl": breakdown.magnet_kl,
+        "entropy": breakdown.entropy,
+        "clip_fraction": breakdown.clip_fraction,
+    }
+    return metrics, grad_norm
 
 
 def _collect_against_snapshot(
@@ -229,16 +217,8 @@ def _collect_against_snapshot(
     opponent.cache_programs()
     players = deck_source.players()
     hero, villain = players[int(rng.integers(0, len(players)))], players[int(rng.integers(0, len(players)))]
-    match = Match(
-        MatchConfig(
-            world="world",
-            decklists="open" if deck_source.decklists == "open" else "closed",
-            hero_deck=dict(hero.decklist),
-            hero_sideboard=dict(hero.sideboard),
-            villain_deck=dict(villain.decklist),
-            villain_sideboard=dict(villain.sideboard),
-        )
-    )
+    disclosure: Literal["open", "closed"] = "open" if deck_source.decklists == "open" else "closed"
+    match = Match(MatchConfig.from_players(hero, villain, decklists=disclosure))
     curriculum: Literal["cross-balanced", "fixed"] = (
         "cross-balanced" if config.num_envs % _CROSS_BALANCED_STRIDE == 0 else "fixed"
     )
@@ -261,25 +241,40 @@ def _collect_against_snapshot(
         close_collector(collector)
 
 
-def _make_local_collector(
+def _open_local_collector(
+    agent: ActorCritic,
     *,
     obs_space: ObservationSpace,
     deck_source: UniformDecks,
-    reward: Reward,
     config: TrainConfig,
-    collector: Collector,
-    frozen_opponent: ActorCritic | None,
+    enable_snapshots: bool,
     rng: np.random.Generator,
-) -> CollectFn:
+) -> tuple[Collector, CollectFn]:
+    reward = Reward(RewardConfig())
+    collector = _open_collector(
+        obs_space,
+        Match(deck_source.match_config()),
+        reward,
+        num_envs=config.num_envs,
+        seed=config.seed,
+        opponent_mode="self",
+        numerics=CollectionSession(device=config.collect_device, seed=config.seed),
+        learning_seats="both",
+        batch_closure="complete-games",
+        deck_source=deck_source,
+        games_path=config.games_path,
+        record_fraction=config.record_fraction,
+    )
+    frozen = copy.deepcopy(agent).to(config.collect_device).eval() if enable_snapshots else None
     collect_device = torch.device(config.collect_device)
 
     def _collect(agent: ActorCritic, *, opponent_entry: SnapshotEntry | None, update_idx: int) -> RolloutBatch:
         agent.to(collect_device)
         agent.eval()
-        if opponent_entry is not None and frozen_opponent is not None:
+        if opponent_entry is not None and frozen is not None:
             return _collect_against_snapshot(
                 agent,
-                frozen_opponent,
+                frozen,
                 entry=opponent_entry,
                 obs_space=obs_space,
                 deck_source=deck_source,
@@ -290,7 +285,7 @@ def _make_local_collector(
             )
         return _collect_rollout(collector, agent, config.steps_per_env)
 
-    return _collect
+    return collector, _collect
 
 
 def update_step(
@@ -305,6 +300,7 @@ def update_step(
     rng: np.random.Generator,
     learning_seats: Literal["both", "one"] = "both",
     aux_loss: AuxLossFn | None = None,
+    grad_tracker: GradientAgreementTracker | None = None,
 ) -> UpdateStats:
     """Run one on-policy RL update over a collected `RolloutBatch`.
 
@@ -322,19 +318,21 @@ def update_step(
     raw_flat = targets.raw_advantages.reshape(-1)
     selected_mask = select(raw_flat).bool()
     adv_flat = standardize_advantages(raw_flat, mask=selected_mask) if config.normalize_advantages else raw_flat
-    value_targets = targets.value_targets.reshape(raw_flat.shape[0], -1)
-    if targets.value_targets.ndim == _SCALAR_TARGET_NDIM:
-        value_targets = targets.value_targets.reshape(-1)
-
+    value_targets = (
+        targets.value_targets.reshape(-1)
+        if targets.value_targets.ndim == _SCALAR_TARGET_NDIM
+        else targets.value_targets.reshape(raw_flat.shape[0], -1)
+    )
     total_rows = int(batch.actions.size)
     all_indexes = np.arange(total_rows, dtype=np.int64)
     rollout.admit_rows(all_indexes, chunk_rows=config.minibatch_size)
     raw_needs = batch.recorded.gather_needs(all_indexes)
     row_sizes = None if raw_needs is None else raw_needs.sum(axis=1)
     flat_actions = batch.actions.reshape(-1)
-
     totals = dict.fromkeys(_METRIC_KEYS, 0.0)
     steps = 0
+    if grad_tracker is not None:
+        grad_tracker.begin_update()
     agent.train()
     for _ in range(config.epochs):
         order = bucketed_minibatch_order(total_rows, minibatch_size=config.minibatch_size, row_sizes=row_sizes, rng=rng)
@@ -364,12 +362,12 @@ def update_step(
                     max_grad_norm=config.max_grad_norm,
                     catalog_pair=catalog_pair,
                     aux_loss=aux_loss,
+                    grad_tracker=grad_tracker,
                 )
                 for key, value in metrics.items():
                     totals[key] += value
                 totals["grad_norm"] += grad_norm
                 steps += 1
-
     if device.type == "mps":
         torch.mps.empty_cache()
     denom = max(steps, 1)
@@ -393,6 +391,29 @@ def _resolve_update_loss(
     return lr, tau, scheduled_loss
 
 
+def _resolve_pool(snapshot_pool: SnapshotPool | None, *, config: TrainConfig) -> SnapshotPool | None:
+    if snapshot_pool is not None or config.snapshot_fraction <= 0.0:
+        return snapshot_pool
+    return SnapshotPool(max_size=config.snapshot_pool_size, matching=config.snapshot_matching)
+
+
+def _update_pool(
+    pool: SnapshotPool | None,
+    agent: ActorCritic,
+    *,
+    entry: SnapshotEntry | None,
+    snap_wr: float | None,
+    update_idx: int,
+    snapshot_every: int,
+) -> None:
+    if pool is None:
+        return
+    if entry is not None and snap_wr is not None:
+        pool.record_outcome(entry.update, win_rate=snap_wr)
+    if update_idx % max(snapshot_every, 1) == 0:
+        pool.add(agent, update=update_idx)
+
+
 def train_self_play(
     agent: ActorCritic,
     optimizer: Optimizer,
@@ -407,49 +428,33 @@ def train_self_play(
     collect_fn: CollectFn | None = None,
     prepare_aux: PrepareAuxFn | None = None,
     on_update: UpdateCallback | None = None,
+    snapshot_pool: SnapshotPool | None = None,
 ) -> list[UpdateStats]:
     """Run complete-game self-play training over `deck_source` using Jace's RL pipeline.
 
-    Collects both seats under the current frozen policy via `manabot`'s native collector
-    (or an injected `collect_fn`, such as a multi-process CPU worker pool), optionally
-    mixes 1-seat updates against sampled historical checkpoints when
-    `config.snapshot_fraction > 0`, applies `loss_schedule` and `update_step` for
-    `config.updates` iterations, and invokes `on_update` after each update.
+    Collects both seats under the current frozen policy (or via an injected `collect_fn`),
+    mixes optional 1-seat snapshot updates (uniform or even-odds), logs optional gradient
+    cosine agreement across consecutive updates, and invokes `on_update` per step.
     """
     deck_source.check()
     rng = np.random.default_rng(config.seed + 101)
-    pool = SnapshotPool(max_size=config.snapshot_pool_size) if config.snapshot_fraction > 0.0 else None
+    pool = _resolve_pool(snapshot_pool, config=config)
+    grad_tracker = GradientAgreementTracker() if config.log_grad_agreement else None
     collector: Collector | None = None
     if collect_fn is None:
-        reward = Reward(RewardConfig())
-        collector = open_collector(
-            obs_space,
-            Match(deck_source.match_config()),
-            reward,
-            num_envs=config.num_envs,
-            seed=config.seed,
-            opponent_mode="self",
-            numerics=CollectionSession(device=config.collect_device, seed=config.seed),
-            learning_seats="both",
-            batch_closure="complete-games",
-            deck_source=deck_source,
-            games_path=config.games_path,
-            record_fraction=config.record_fraction,
-        )
-        active_collect = _make_local_collector(
+        collector, active_collect = _open_local_collector(
+            agent,
             obs_space=obs_space,
             deck_source=deck_source,
-            reward=reward,
             config=config,
-            collector=collector,
-            frozen_opponent=copy.deepcopy(agent).to(config.collect_device).eval() if pool is not None else None,
+            enable_snapshots=pool is not None,
             rng=rng,
         )
     else:
         active_collect = collect_fn
     history: list[UpdateStats] = []
     try:
-        for update_idx in range(1, config.updates + 1):
+        for update_idx in range(config.start_update, config.updates + 1):
             lr, tau, step_loss = _resolve_update_loss(
                 update_idx, optimizer=optimizer, default_loss=loss, loss_schedule=loss_schedule
             )
@@ -462,6 +467,7 @@ def train_self_play(
             t_collect = time.perf_counter()
             batch = active_collect(agent, opponent_entry=entry, update_idx=update_idx)
             collect_s = time.perf_counter() - t_collect
+            snap_wr = snapshot_win_rate(batch.rewards, batch.dones) if entry is not None else None
             aux_loss = prepare_aux(agent, update_idx) if prepare_aux is not None else None
             t_learn = time.perf_counter()
             stats = update_step(
@@ -475,24 +481,17 @@ def train_self_play(
                 rng=rng,
                 learning_seats="one" if entry is not None else "both",
                 aux_loss=aux_loss,
+                grad_tracker=grad_tracker,
             )
             learn_s = time.perf_counter() - t_learn
-            if pool is not None and update_idx % max(config.snapshot_every, 1) == 0:
-                pool.add(agent, update=update_idx)
+            grad_cosine = grad_tracker.finish_update() if grad_tracker is not None else None
+            _update_pool(
+                pool, agent, entry=entry, snap_wr=snap_wr, update_idx=update_idx, snapshot_every=config.snapshot_every
+            )
             history.append(stats)
             if on_update is not None:
                 opp = f"snapshot@u{entry.update}" if entry is not None else "self"
-                on_update(
-                    StepRecord(
-                        update=update_idx,
-                        stats=stats,
-                        collect_s=collect_s,
-                        learn_s=learn_s,
-                        learning_rate=lr,
-                        magnet_tau=tau,
-                        opponent=opp,
-                    )
-                )
+                on_update(StepRecord(update_idx, stats, collect_s, learn_s, lr, tau, opp, grad_cosine, snap_wr))
     finally:
         if collector is not None:
             close_collector(collector)

@@ -8,14 +8,22 @@ Checkpoints are stored as portable `.safetensors` containers beside companion
 structured metrics and forensics stay plain JSON for lightweight inspection.
 """
 
+from __future__ import annotations
+
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from manabot.backends.torch.checkpoint import save_checkpoint
-from manabot.backends.torch.policy import ActorCritic
-from manabot.env.observation import ObservationSpace
+import torch
+from manabot.backends.torch.checkpoint import load_checkpoint, save_checkpoint
+
+if TYPE_CHECKING:
+    from manabot.backends.torch.policy import ActorCritic
+    from manabot.env.observation import ObservationSpace
+
+    from jace.rl.pool import SnapshotPool
 
 __all__ = (
     "RunExistsError",
@@ -23,9 +31,13 @@ __all__ = (
     "academy_commands",
     "append_metric",
     "create_run",
+    "load_resume_state",
     "save_forensics",
     "save_policy_checkpoint",
+    "save_resume_state",
 )
+
+_RESUME_FILENAME = "resume-state.pt"
 
 
 class RunExistsError(FileExistsError):
@@ -43,7 +55,7 @@ class RunLayout:
     forensics_dir: Path
 
     @classmethod
-    def for_root(cls, root: Path) -> "RunLayout":
+    def for_root(cls, root: Path) -> RunLayout:
         resolved = root.resolve()
         return cls(
             root=resolved,
@@ -134,3 +146,48 @@ def academy_commands(layout: RunLayout, *, iteration: int) -> dict[str, str]:
         "replay_train": f"uv run managym academy replay {layout.train_games_path()}",
         "replay_eval": f"uv run managym academy replay {layout.eval_games_path(iteration)}",
     }
+
+
+def save_resume_state(
+    layout: RunLayout,
+    *,
+    iteration: int,
+    optimizer: torch.optim.Optimizer,
+    snapshot_pool: SnapshotPool | None,
+) -> Path:
+    payload: dict[str, object] = {
+        "iteration": iteration,
+        "checkpoint": str(layout.checkpoint_path(iteration)),
+        "optimizer": optimizer.state_dict(),
+        "snapshot_pool": None if snapshot_pool is None else snapshot_pool.export_state(),
+    }
+    target = layout.checkpoints_dir / _RESUME_FILENAME
+    partial = target.with_suffix(".pt.partial")
+    torch.save(payload, partial)
+    partial.rename(target)
+    return target
+
+
+def load_resume_state(
+    layout: RunLayout,
+    *,
+    agent: ActorCritic,
+    optimizer: torch.optim.Optimizer,
+    snapshot_pool: SnapshotPool | None,
+    device: str | torch.device | None = None,
+) -> int:
+    path = layout.checkpoints_dir / _RESUME_FILENAME
+    if not path.exists():
+        msg = f"resume state not found: {path}"
+        raise FileNotFoundError(msg)
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    iteration = int(state["iteration"])
+    ckpt_path = Path(str(state["checkpoint"]))
+    agent.load_state_dict(load_checkpoint(str(ckpt_path))[0].state_dict())
+    if device is not None:
+        agent.to(device)
+    optimizer.load_state_dict(state["optimizer"])
+    pool_state = state.get("snapshot_pool")
+    if snapshot_pool is not None and isinstance(pool_state, Mapping):
+        snapshot_pool.restore_state(pool_state)
+    return iteration

@@ -14,7 +14,9 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Self
+from functools import partial
+from queue import Empty
+from typing import TYPE_CHECKING, Literal, Self
 
 import numpy as np
 import torch
@@ -34,8 +36,15 @@ from manabot.training.rollout.collection import (
     collect_pair,
     open_collector,
 )
+from manabot.training.state.game_errors import GameAttempt, GameErrorPolicy, GameErrorState, settle
 
-from jace.eval import elemental_decks
+from jace.eval import (
+    HumanDeckCatalog,
+    build_human_deck_source,
+    elemental_decks,
+    load_human_deck_catalog,
+    top_card_pool,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -51,12 +60,27 @@ __all__ = (
 )
 
 _MIN_CROSS_BALANCED_ENVS = 4
+_POLL_TIMEOUT_S = 5.0
+_ERROR_TUPLE_LEN = 3
+_GAME_ERROR_POLICY = GameErrorPolicy(threshold=0.05, window=200, warmup=100, recover_capacity=True)
+_LOGGER = logging.getLogger(__name__)
 _collect_rollout: Callable[..., RolloutBatch] = collect
 _collect_pair_rollout: Callable[..., tuple[RolloutBatch, RolloutBatch]] = collect_pair
 _open_collector: Callable[..., Collector] = open_collector
 
 type _WorkerTask = tuple[int, dict[str, torch.Tensor], dict[str, torch.Tensor] | None] | None
-type _WorkerResult = tuple[int, RolloutBatch] | tuple[str, int]
+type _WorkerResult = tuple[int, RolloutBatch] | tuple[Literal["ready"], int] | tuple[Literal["error"], int, str]
+
+
+def _worker_error_types() -> tuple[type[BaseException], ...]:
+    panic_types = tuple(cls for cls in BaseException.__subclasses__() if cls.__name__ == "PanicException")
+    return (*panic_types, Exception)
+
+
+def _record_game_attempt(state: GameErrorState, attempt: GameAttempt, *, rank: int) -> GameErrorState:
+    if attempt.outcome != "completed":
+        _LOGGER.warning("worker %d isolated %s (seed=%d): %s", rank, attempt.outcome, attempt.seed, attempt.error)
+    return settle(state, attempt, _GAME_ERROR_POLICY)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +94,10 @@ class WorkerPoolConfig:
     games_path: Path | None = None
     record_fraction: float = 0.0
     enable_snapshots: bool = False
+    human_decks_path: Path | None = None
+    shard_size: int = 512
+    shard_refresh_every: int = 50
+    card_pool_size: int | None = None
 
 
 def _merge_recorded(batches: Sequence[RolloutBatch]) -> RecordedObservations:
@@ -172,6 +200,7 @@ def _collect_snapshot_on_worker(
     reward: Reward,
     cfg: WorkerPoolConfig,
     seed: int,
+    rank: int,
     rng: np.random.Generator,
 ) -> RolloutBatch:
     pair_match = _sample_pair_match(deck_source, rng)
@@ -190,6 +219,8 @@ def _collect_snapshot_on_worker(
         matchup_curriculum=curriculum,
         batch_closure="complete-games",
         workers=1,
+        game_errors=_GAME_ERROR_POLICY,
+        record_attempt=partial(_record_game_attempt, rank=rank),
     )
     try:
         return _collect_pair_rollout(collector, agent, cfg.steps_per_env)[0]
@@ -197,33 +228,45 @@ def _collect_snapshot_on_worker(
         close_collector(collector)
 
 
-def _worker_main(
-    rank: int,
+def _build_worker_deck_source(
     cfg: WorkerPoolConfig,
     *,
-    req_queue: mp.Queue[_WorkerTask],
-    res_queue: mp.Queue[_WorkerResult],
-) -> None:
-    logging.getLogger("manabot").setLevel(logging.WARNING)
-    torch.set_num_threads(1)
+    catalog: HumanDeckCatalog | None,
+    allowed_cards: frozenset[str] | None,
+    seed: int,
+) -> UniformDecks:
+    if catalog is not None:
+        return build_human_deck_source(
+            catalog,
+            count=cfg.shard_size,
+            seed=seed,
+            allowed_cards=allowed_cards,
+            decklists="closed",
+        )
     named_decks = elemental_decks()
-    deck_source = UniformDecks(
+    return UniformDecks(
         decks=tuple(deck for _, deck in named_decks),
         decklists="closed",
         sampling="uniform-independent-v1",
     )
-    agent, obs_space = _build_worker_agent(cfg)
-    opponent = _build_worker_agent(cfg)[0] if cfg.enable_snapshots else None
-    worker_seed = cfg.seed + rank * 1000
-    rng = np.random.default_rng(worker_seed + 500)
-    reward = Reward(RewardConfig())
-    # Only rank 0 writes Academy training replays so processes never interleave JSONL lines.
-    games_path = cfg.games_path if rank == 0 else None
-    record_fraction = min(1.0, cfg.record_fraction * cfg.num_workers) if rank == 0 else 0.0
+
+
+def _open_worker_collector(
+    obs_space: ObservationSpace,
+    *,
+    deck_source: UniformDecks,
+    reward: Reward,
+    cfg: WorkerPoolConfig,
+    worker_seed: int,
+    rank: int,
+    games_path: Path | None,
+    record_fraction: float,
+) -> Collector:
+    match = Match(deck_source.match_config())
     session = CollectionSession(device="cpu", seed=worker_seed)
-    collector = _open_collector(
+    return _open_collector(
         obs_space,
-        Match(deck_source.match_config()),
+        match,
         reward,
         num_envs=cfg.envs_per_worker,
         seed=worker_seed,
@@ -233,6 +276,51 @@ def _worker_main(
         batch_closure="complete-games",
         deck_source=deck_source,
         workers=1,
+        game_errors=_GAME_ERROR_POLICY,
+        record_attempt=partial(_record_game_attempt, rank=rank),
+        games_path=games_path,
+        record_fraction=record_fraction,
+    )
+
+
+def _should_refresh_shard(cfg: WorkerPoolConfig, *, has_catalog: bool, update_idx: int) -> bool:
+    return (
+        has_catalog
+        and cfg.shard_refresh_every > 0
+        and update_idx > 1
+        and (update_idx - 1) % cfg.shard_refresh_every == 0
+    )
+
+
+def _run_worker_loop(
+    rank: int,
+    cfg: WorkerPoolConfig,
+    *,
+    req_queue: mp.Queue[_WorkerTask],
+    res_queue: mp.Queue[_WorkerResult],
+) -> None:
+    catalog = load_human_deck_catalog(cfg.human_decks_path) if cfg.human_decks_path is not None else None
+    allowed_cards = (
+        top_card_pool(catalog, card_count=cfg.card_pool_size)
+        if catalog is not None and cfg.card_pool_size is not None
+        else None
+    )
+    worker_seed = cfg.seed + rank * 1000
+    deck_source = _build_worker_deck_source(cfg, catalog=catalog, allowed_cards=allowed_cards, seed=worker_seed)
+    agent, obs_space = _build_worker_agent(cfg)
+    opponent = _build_worker_agent(cfg)[0] if cfg.enable_snapshots else None
+    rng = np.random.default_rng(worker_seed + 500)
+    reward = Reward(RewardConfig())
+    # Only rank 0 writes Academy training replays so processes never interleave JSONL lines.
+    games_path = cfg.games_path if rank == 0 else None
+    record_fraction = min(1.0, cfg.record_fraction * cfg.num_workers) if rank == 0 else 0.0
+    collector = _open_worker_collector(
+        obs_space,
+        deck_source=deck_source,
+        reward=reward,
+        cfg=cfg,
+        worker_seed=worker_seed,
+        rank=rank,
         games_path=games_path,
         record_fraction=record_fraction,
     )
@@ -243,6 +331,22 @@ def _worker_main(
             if task is None:
                 break
             update_idx, agent_weights, opp_weights = task
+            if _should_refresh_shard(cfg, has_catalog=catalog is not None, update_idx=update_idx):
+                close_collector(collector)
+                refresh_seed = worker_seed + update_idx * 37
+                deck_source = _build_worker_deck_source(
+                    cfg, catalog=catalog, allowed_cards=allowed_cards, seed=refresh_seed
+                )
+                collector = _open_worker_collector(
+                    obs_space,
+                    deck_source=deck_source,
+                    reward=reward,
+                    cfg=cfg,
+                    worker_seed=refresh_seed,
+                    rank=rank,
+                    games_path=games_path,
+                    record_fraction=record_fraction,
+                )
             agent.load_state_dict(agent_weights)
             agent.clear_cache()
             if opp_weights is not None and opponent is not None:
@@ -256,6 +360,7 @@ def _worker_main(
                     reward=reward,
                     cfg=cfg,
                     seed=worker_seed + 10_000 + update_idx,
+                    rank=rank,
                     rng=rng,
                 )
             else:
@@ -263,6 +368,21 @@ def _worker_main(
             res_queue.put((rank, batch))
     finally:
         close_collector(collector)
+
+
+def _worker_main(
+    rank: int,
+    cfg: WorkerPoolConfig,
+    *,
+    req_queue: mp.Queue[_WorkerTask],
+    res_queue: mp.Queue[_WorkerResult],
+) -> None:
+    logging.getLogger("manabot").setLevel(logging.WARNING)
+    torch.set_num_threads(1)
+    try:
+        _run_worker_loop(rank, cfg, req_queue=req_queue, res_queue=res_queue)
+    except _worker_error_types() as exc:
+        res_queue.put(("error", rank, f"{type(exc).__name__}: {exc}"))
 
 
 class MultiProcessCollector:
@@ -299,8 +419,31 @@ class MultiProcessCollector:
         self._closed = False
         for proc in self._procs:
             proc.start()
-        for _ in range(cfg.num_workers):
-            self._res_queue.get()
+        try:
+            for _ in range(cfg.num_workers):
+                self._get_result()
+        except RuntimeError:
+            self.close()
+            raise
+
+    def _get_result(self) -> _WorkerResult:
+        while True:
+            try:
+                item = self._res_queue.get(timeout=_POLL_TIMEOUT_S)
+            except Empty:
+                dead = [
+                    (rank, proc.exitcode)
+                    for rank, proc in enumerate(self._procs)
+                    if not proc.is_alive() and proc.exitcode not in (None, 0)
+                ]
+                if dead:
+                    msg = f"rollout worker exited unexpectedly: {dead}"
+                    raise RuntimeError(msg) from None
+                continue
+            if len(item) == _ERROR_TUPLE_LEN:
+                msg = f"rollout worker {item[1]} failed: {item[2]}"
+                raise RuntimeError(msg)
+            return item
 
     def collect(
         self,
@@ -322,9 +465,9 @@ class MultiProcessCollector:
             queue.put((update_idx, agent_weights, opp_weights))
         ordered: dict[int, RolloutBatch] = {}
         for _ in range(self._cfg.num_workers):
-            rank_or_tag, payload = self._res_queue.get()
-            if isinstance(rank_or_tag, int) and isinstance(payload, RolloutBatch):
-                ordered[rank_or_tag] = payload
+            item = self._get_result()
+            if isinstance(item[0], int):
+                ordered[item[0]] = item[1]
         return merge_rollout_batches([ordered[rank] for rank in sorted(ordered)])
 
     def close(self) -> None:
