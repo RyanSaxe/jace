@@ -40,9 +40,11 @@ from manabot.training.state.game_errors import GameAttempt, GameErrorPolicy, Gam
 
 from jace.eval import (
     HumanDeckCatalog,
+    build_curriculum_deck_source,
     build_human_deck_source,
     elemental_decks,
     load_human_deck_catalog,
+    needs_curriculum_refresh,
     top_card_pool,
 )
 
@@ -98,6 +100,9 @@ class WorkerPoolConfig:
     shard_size: int = 512
     shard_refresh_every: int = 50
     card_pool_size: int | None = None
+    curriculum_pools: tuple[tuple[int, int, frozenset[str]], ...] = ()
+    curriculum_blend_updates: int = 10
+    start_update: int = 1
 
 
 def _merge_recorded(batches: Sequence[RolloutBatch]) -> RecordedObservations:
@@ -234,20 +239,22 @@ def _build_worker_deck_source(
     catalog: HumanDeckCatalog | None,
     allowed_cards: frozenset[str] | None,
     seed: int,
+    update_idx: int,
 ) -> UniformDecks:
-    if catalog is not None:
-        return build_human_deck_source(
+    if catalog is not None and cfg.curriculum_pools:
+        return build_curriculum_deck_source(
             catalog,
             count=cfg.shard_size,
             seed=seed,
-            allowed_cards=allowed_cards,
-            decklists="closed",
+            update_idx=update_idx,
+            stage_pools=cfg.curriculum_pools,
+            blend_updates=cfg.curriculum_blend_updates,
         )
+    if catalog is not None:
+        return build_human_deck_source(catalog, count=cfg.shard_size, seed=seed, allowed_cards=allowed_cards)
     named_decks = elemental_decks()
     return UniformDecks(
-        decks=tuple(deck for _, deck in named_decks),
-        decklists="closed",
-        sampling="uniform-independent-v1",
+        decks=tuple(deck for _, deck in named_decks), decklists="closed", sampling="uniform-independent-v1"
     )
 
 
@@ -284,12 +291,13 @@ def _open_worker_collector(
 
 
 def _should_refresh_shard(cfg: WorkerPoolConfig, *, has_catalog: bool, update_idx: int) -> bool:
-    return (
-        has_catalog
-        and cfg.shard_refresh_every > 0
-        and update_idx > 1
-        and (update_idx - 1) % cfg.shard_refresh_every == 0
-    )
+    if not has_catalog or update_idx <= 1:
+        return False
+    if cfg.curriculum_pools:
+        stages = [(size, start_u) for size, start_u, _ in cfg.curriculum_pools]
+        if needs_curriculum_refresh(update_idx, stages=stages, blend_updates=cfg.curriculum_blend_updates):
+            return True
+    return cfg.shard_refresh_every > 0 and (update_idx - 1) % cfg.shard_refresh_every == 0
 
 
 def _run_worker_loop(
@@ -302,11 +310,13 @@ def _run_worker_loop(
     catalog = load_human_deck_catalog(cfg.human_decks_path) if cfg.human_decks_path is not None else None
     allowed_cards = (
         top_card_pool(catalog, card_count=cfg.card_pool_size)
-        if catalog is not None and cfg.card_pool_size is not None
+        if catalog is not None and cfg.card_pool_size is not None and not cfg.curriculum_pools
         else None
     )
     worker_seed = cfg.seed + rank * 1000
-    deck_source = _build_worker_deck_source(cfg, catalog=catalog, allowed_cards=allowed_cards, seed=worker_seed)
+    deck_source = _build_worker_deck_source(
+        cfg, catalog=catalog, allowed_cards=allowed_cards, seed=worker_seed, update_idx=cfg.start_update
+    )
     agent, obs_space = _build_worker_agent(cfg)
     opponent = _build_worker_agent(cfg)[0] if cfg.enable_snapshots else None
     rng = np.random.default_rng(worker_seed + 500)
@@ -335,7 +345,7 @@ def _run_worker_loop(
                 close_collector(collector)
                 refresh_seed = worker_seed + update_idx * 37
                 deck_source = _build_worker_deck_source(
-                    cfg, catalog=catalog, allowed_cards=allowed_cards, seed=refresh_seed
+                    cfg, catalog=catalog, allowed_cards=allowed_cards, seed=refresh_seed, update_idx=update_idx
                 )
                 collector = _open_worker_collector(
                     obs_space,

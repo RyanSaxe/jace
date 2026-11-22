@@ -16,6 +16,7 @@ import logging
 import sys
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -26,6 +27,7 @@ from jace.eval import (
     Deal,
     HumanDeckCatalog,
     ProbeState,
+    build_curriculum_stage_pools,
     build_human_deals,
     build_human_deck_source,
     capture_probes,
@@ -116,6 +118,8 @@ class FullDataConfig:
     shard_size: int = 512
     shard_refresh_every: int = 50
     card_pool_size: int | None = None
+    curriculum_stages: str | None = None
+    curriculum_blend_updates: int = 10
     collect_device: str = "cpu"
     learn_device: str = "mps"
     eval_every: int = 40
@@ -317,7 +321,12 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
     logging.getLogger("manabot").setLevel(logging.WARNING)
     torch.manual_seed(cfg.seed)
     catalog = load_human_deck_catalog(cfg.decks_path)
-    allowed_cards = top_card_pool(catalog, card_count=cfg.card_pool_size) if cfg.card_pool_size is not None else None
+    curriculum_pools = build_curriculum_stage_pools(catalog, spec=cfg.curriculum_stages)
+    allowed_cards = (
+        curriculum_pools[0][2]
+        if curriculum_pools
+        else (top_card_pool(catalog, card_count=cfg.card_pool_size) if cfg.card_pool_size is not None else None)
+    )
     reference_source = build_human_deck_source(
         catalog, count=min(cfg.shard_size, 64), seed=cfg.seed, allowed_cards=allowed_cards
     )
@@ -337,39 +346,27 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
     held_out_deals = build_human_deals(catalog, split="held_out", count=cfg.eval_deals, seed=cfg.seed + 20_000)
     forensics_deals = held_out_deals[: cfg.forensics_deals]
     probes = capture_probes(forensics_deals, max_probes=cfg.probe_count)
+
+    run_eval = partial(
+        _evaluate_full_data,
+        agent,
+        baseline,
+        obs_space=obs_space,
+        layout=layout,
+        held_out_deals=held_out_deals,
+        forensics_deals=forensics_deals,
+        probes=probes,
+        cfg=cfg,
+        optimizer=optimizer,
+        snapshot_pool=pool,
+    )
     if start_update == 1:
-        _evaluate_full_data(
-            agent,
-            baseline,
-            obs_space=obs_space,
-            layout=layout,
-            iteration=0,
-            held_out_deals=held_out_deals,
-            forensics_deals=forensics_deals,
-            probes=probes,
-            cfg=cfg,
-            optimizer=optimizer,
-            snapshot_pool=pool,
-            record_games=False,
-        )
+        run_eval(iteration=0, record_games=False)
 
     def on_update(record: StepRecord) -> None:
         _log_train_step(layout, record)
         if record.update % cfg.eval_every == 0 or record.update == cfg.updates:
-            _evaluate_full_data(
-                agent,
-                baseline,
-                obs_space=obs_space,
-                layout=layout,
-                iteration=record.update,
-                held_out_deals=held_out_deals,
-                forensics_deals=forensics_deals,
-                probes=probes,
-                cfg=cfg,
-                optimizer=optimizer,
-                snapshot_pool=pool,
-                record_games=True,
-            )
+            run_eval(iteration=record.update, record_games=True)
 
     train_cfg = TrainConfig(
         updates=cfg.updates,
@@ -411,6 +408,9 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
                         shard_size=cfg.shard_size,
                         shard_refresh_every=cfg.shard_refresh_every,
                         card_pool_size=cfg.card_pool_size,
+                        curriculum_pools=curriculum_pools,
+                        curriculum_blend_updates=cfg.curriculum_blend_updates,
+                        start_update=start_update,
                     )
                 )
             ).collect
@@ -469,6 +469,8 @@ def _parse_args(argv: Sequence[str] | None) -> FullDataConfig:
     parser.add_argument("--shard-size", type=int, default=512)
     parser.add_argument("--shard-refresh-every", type=int, default=50)
     parser.add_argument("--card-pool-size", type=int, default=None)
+    parser.add_argument("--curriculum-stages", type=str, default=None)
+    parser.add_argument("--curriculum-blend-updates", type=int, default=10)
     parser.add_argument("--collect-device", default="cpu")
     parser.add_argument("--learn-device", default="mps" if torch.backends.mps.is_available() else "cpu")
     parser.add_argument("--eval-every", type=int, default=40)

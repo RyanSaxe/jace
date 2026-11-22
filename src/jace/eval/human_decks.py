@@ -30,9 +30,15 @@ if TYPE_CHECKING:
 
 __all__ = (
     "HumanDeckCatalog",
+    "build_curriculum_deck_source",
+    "build_curriculum_stage_pools",
     "build_human_deals",
     "build_human_deck_source",
+    "curriculum_blend_spec",
     "load_human_deck_catalog",
+    "needs_curriculum_refresh",
+    "nested_card_pools",
+    "parse_curriculum_stages",
     "row_to_deck",
     "sample_human_decks",
     "top_card_pool",
@@ -146,9 +152,15 @@ def _stratified_candidates(possible: Tensor, *, missing_counts: Tensor, arch: Te
     return possible[missing_counts[possible].argsort()[:1000]]
 
 
-def _grow_balanced_pool(present: Tensor, *, arch: Tensor, target: int) -> Tensor:
+def _grow_balanced_pool(
+    present: Tensor,
+    *,
+    arch: Tensor,
+    target: int,
+    start: Tensor | None = None,
+) -> Tensor:
     groups = torch.nn.functional.one_hot(arch, _NUM_COLOR_PAIRS + 1).float()
-    in_pool = torch.zeros(present.shape[1], dtype=torch.bool)
+    in_pool = torch.zeros(present.shape[1], dtype=torch.bool) if start is None else start.clone()
     while int(in_pool.sum().item()) < target:
         missing = present * (~in_pool).float()[None, :]
         counts = missing.sum(dim=1)
@@ -167,6 +179,33 @@ def _grow_balanced_pool(present: Tensor, *, arch: Tensor, target: int) -> Tensor
     return in_pool
 
 
+def nested_card_pools(catalog: HumanDeckCatalog, *, sizes: Sequence[int]) -> dict[int, frozenset[str]]:
+    if not sizes:
+        return {}
+    ordered = sorted(set(sizes))
+    if ordered[0] < 1:
+        msg = f"pool sizes must be >= 1, got {ordered[0]}"
+        raise ValueError(msg)
+    basics = [idx for idx, name in enumerate(catalog.card_names) if name in _BASIC_LANDS]
+    non_basics = [idx for idx, name in enumerate(catalog.card_names) if name not in _BASIC_LANDS]
+    present = (catalog.train_decks[:, non_basics] > 0).float()
+    arch = _deck_color_pair_groups(catalog.train_decks, card_names=catalog.card_names)
+    in_pool = torch.zeros(len(non_basics), dtype=torch.bool)
+    pools: dict[int, frozenset[str]] = {}
+    for size in ordered:
+        if size >= len(catalog.card_names):
+            pools[size] = frozenset(catalog.card_names)
+            continue
+        target = max(0, size - len(basics))
+        if target == 0:
+            pools[size] = frozenset(catalog.card_names[idx] for idx in basics[:size])
+            continue
+        in_pool = _grow_balanced_pool(present, arch=arch, target=target, start=in_pool)
+        kept = [non_basics[pos] for pos, active in enumerate(in_pool.tolist()) if active]
+        pools[size] = frozenset(catalog.card_names[idx] for idx in (*basics, *kept))
+    return pools
+
+
 def top_card_pool(catalog: HumanDeckCatalog, *, card_count: int) -> frozenset[str]:
     """Select `card_count` cards via color-pair-balanced deck-completing growth.
 
@@ -176,21 +215,48 @@ def top_card_pool(catalog: HumanDeckCatalog, *, card_count: int) -> frozenset[st
     This keeps all five colors represented at small pool sizes (e.g. 915 decks across
     W/U/B/R/G inside 90 cards) instead of collapsing into a single two-color pair.
     """
-    if card_count < 1:
-        msg = f"card_count must be >= 1, got {card_count}"
+    return nested_card_pools(catalog, sizes=(card_count,))[card_count]
+
+
+def parse_curriculum_stages(spec: str) -> tuple[tuple[int, int], ...]:
+    stages: list[tuple[int, int]] = []
+    for part in spec.split(","):
+        cleaned = part.strip()
+        if not cleaned:
+            continue
+        cards_str, start_str = cleaned.split(":", maxsplit=1)
+        stages.append((int(cards_str), int(start_str)))
+    if not stages:
+        msg = f"empty curriculum stages spec: {spec!r}"
         raise ValueError(msg)
-    if card_count >= len(catalog.card_names):
-        return frozenset(catalog.card_names)
-    basics = [idx for idx, name in enumerate(catalog.card_names) if name in _BASIC_LANDS]
-    non_basics = [idx for idx, name in enumerate(catalog.card_names) if name not in _BASIC_LANDS]
-    target = max(0, card_count - len(basics))
-    if target == 0:
-        return frozenset(catalog.card_names[idx] for idx in basics[:card_count])
-    present = (catalog.train_decks[:, non_basics] > 0).float()
-    arch = _deck_color_pair_groups(catalog.train_decks, card_names=catalog.card_names)
-    in_pool = _grow_balanced_pool(present, arch=arch, target=target)
-    kept = [non_basics[pos] for pos, active in enumerate(in_pool.tolist()) if active]
-    return frozenset(catalog.card_names[idx] for idx in (*basics, *kept))
+    return tuple(sorted(stages, key=lambda item: item[1]))
+
+
+def curriculum_blend_spec(
+    update_idx: int,
+    *,
+    stages: Sequence[tuple[int, int]],
+    blend_updates: int = 10,
+) -> tuple[int, int, float]:
+    active_idx = 0
+    for idx, (_, start_u) in enumerate(stages):
+        if update_idx > start_u or idx == 0:
+            active_idx = idx
+    next_size, start_u = stages[active_idx]
+    if active_idx == 0 or blend_updates <= 0:
+        return next_size, next_size, 1.0
+    prev_size = stages[active_idx - 1][0]
+    progress = min(1.0, max(0.0, float(update_idx - start_u) / float(blend_updates)))
+    return prev_size, next_size, progress
+
+
+def needs_curriculum_refresh(
+    update_idx: int,
+    *,
+    stages: Sequence[tuple[int, int]],
+    blend_updates: int = 10,
+) -> bool:
+    return any(start_u < update_idx <= start_u + max(1, blend_updates) for _, start_u in stages[1:])
 
 
 def _eligible_indices(
@@ -292,6 +358,50 @@ def build_human_deck_source(
     return UniformDecks(
         decks=tuple(deck for _, deck in sampled),
         entry_ids=tuple(name for name, _ in sampled),
+        decklists=decklists,
+        sampling="uniform-independent-v1",
+    )
+
+
+def build_curriculum_stage_pools(
+    catalog: HumanDeckCatalog, *, spec: str | None
+) -> tuple[tuple[int, int, frozenset[str]], ...]:
+    if spec is None or not spec.strip():
+        return ()
+    stages = parse_curriculum_stages(spec)
+    pools = nested_card_pools(catalog, sizes=[size for size, _ in stages])
+    return tuple((size, start_u, pools[size]) for size, start_u in stages)
+
+
+def build_curriculum_deck_source(
+    catalog: HumanDeckCatalog,
+    *,
+    count: int,
+    seed: int,
+    update_idx: int,
+    stage_pools: Sequence[tuple[int, int, frozenset[str]]],
+    blend_updates: int = 10,
+    decklists: DecklistDisclosure = "closed",
+) -> UniformDecks:
+    stages = [(size, start_u) for size, start_u, _ in stage_pools]
+    pool_map = {size: cards for size, _, cards in stage_pools}
+    prev_size, next_size, next_share = curriculum_blend_spec(update_idx, stages=stages, blend_updates=blend_updates)
+    next_count = round(count * next_share)
+    prev_count = count - next_count
+    sampled: list[tuple[str, managym.Deck]] = []
+    if prev_count > 0:
+        sampled.extend(
+            sample_human_decks(catalog, split="train", count=prev_count, seed=seed, allowed_cards=pool_map[prev_size])
+        )
+    if next_count > 0:
+        sampled.extend(
+            sample_human_decks(
+                catalog, split="train", count=next_count, seed=seed + 17, allowed_cards=pool_map[next_size]
+            )
+        )
+    return UniformDecks(
+        decks=tuple(deck for _, deck in sampled),
+        entry_ids=tuple(f"{name}-c{pos}" for pos, (name, _) in enumerate(sampled)),
         decklists=decklists,
         sampling="uniform-independent-v1",
     )

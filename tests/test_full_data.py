@@ -16,9 +16,14 @@ import torch
 from torch import nn
 
 from jace.eval.human_decks import (
+    build_curriculum_deck_source,
     build_human_deals,
     build_human_deck_source,
+    curriculum_blend_spec,
     load_human_deck_catalog,
+    needs_curriculum_refresh,
+    nested_card_pools,
+    parse_curriculum_stages,
     row_to_deck,
     sample_human_decks,
     top_card_pool,
@@ -179,3 +184,24 @@ def test_multiprocess_collector_surfaces_worker_error(tmp_path: Path) -> None:
     )
     with pytest.raises(RuntimeError, match="FileNotFoundError"):
         MultiProcessCollector(cfg)
+
+
+def test_nested_curriculum_pools_and_smooth_blending(tmp_path: Path) -> None:
+    cache = _write_synthetic_decks_pt(tmp_path / "decks.pt")
+    catalog = load_human_deck_catalog(cache, held_out_share=0.1)
+    stages = parse_curriculum_stages("3:0,4:10,5:25")
+    assert stages == ((3, 0), (4, 10), (5, 25))
+    pools = nested_card_pools(catalog, sizes=(3, 4, 5))
+    assert pools[3] <= pools[4] <= pools[5]
+
+    assert curriculum_blend_spec(10, stages=stages, blend_updates=10) == (3, 3, 1.0)
+    assert curriculum_blend_spec(15, stages=stages, blend_updates=10) == (3, 4, pytest.approx(0.5))
+    assert curriculum_blend_spec(20, stages=stages, blend_updates=10) == (3, 4, pytest.approx(1.0))
+    assert needs_curriculum_refresh(15, stages=stages, blend_updates=10)
+    assert not needs_curriculum_refresh(21, stages=stages, blend_updates=10)
+
+    stage_pools = tuple((size, start_u, pools[size]) for size, start_u in stages)
+    blended = build_curriculum_deck_source(
+        catalog, count=10, seed=3, update_idx=15, stage_pools=stage_pools, blend_updates=10
+    )
+    assert len(blended.decks) == 10
