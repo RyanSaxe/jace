@@ -52,6 +52,7 @@ from jace.rl import (
     top_fraction,
     train_self_play,
 )
+from jace.rl.loop import AuxLossFn
 from jace.runs import (
     RunLayout,
     academy_commands,
@@ -112,18 +113,10 @@ class LabConfig:
 
 
 def build_agent(
-    *,
-    hidden_dim: int = 64,
-    attention_layers: int = 2,
-    bucketed_shapes: bool = True,
-    live_tokens: bool = False,
+    *, hidden_dim: int = 64, attention_layers: int = 2, bucketed_shapes: bool = True, live_tokens: bool = False
 ) -> tuple[ActorCritic, ObservationSpace]:
     obs_space = ObservationSpace(
-        ObservationConfig(
-            policy_input_version=11,
-            max_cards_per_player=80,
-            max_permanents_per_player=64,
-        )
+        ObservationConfig(policy_input_version=11, max_cards_per_player=80, max_permanents_per_player=64)
     )
     model_cfg = ModelConfig(
         world="world",
@@ -134,26 +127,13 @@ def build_agent(
         value_kind="categorical_wdl",
         value_aggregation="masked_mean",
     )
-    agent = ActorCritic(
-        obs_space,
-        model_cfg,
-        bucketed_shapes=bucketed_shapes,
-        live_tokens=live_tokens,
-    )
-    return agent, obs_space
-
-
-def _resolve_normalize_advantages(cfg: LabConfig) -> bool:
-    if cfg.normalize_advantages is not None:
-        return cfg.normalize_advantages
-    return cfg.loss_kind == "ppo"
+    return ActorCritic(obs_space, model_cfg, bucketed_shapes=bucketed_shapes, live_tokens=live_tokens), obs_space
 
 
 def _build_select(cfg: LabConfig) -> SelectFn:
     if cfg.select_kind == "all":
         return all_rows
-    fraction = 0.5 if cfg.select_kind == "top50" else 0.25
-    return top_fraction(fraction, minimum=cfg.min_advantage)
+    return top_fraction(0.5 if cfg.select_kind == "top50" else 0.25, minimum=cfg.min_advantage)
 
 
 def _build_schedule(cfg: LabConfig) -> DampedSchedule | DecaySchedule | None:
@@ -166,11 +146,7 @@ def _build_schedule(cfg: LabConfig) -> DampedSchedule | DecaySchedule | None:
             tau_initial=cfg.magnet_kl,
             decay=cfg.schedule_decay,
         )
-    return DampedSchedule(
-        total_updates=cfg.updates,
-        lr_max=cfg.learning_rate,
-        tau_scale=cfg.magnet_kl,
-    )
+    return DampedSchedule(total_updates=cfg.updates, lr_max=cfg.learning_rate, tau_scale=cfg.magnet_kl)
 
 
 def _select_components(cfg: LabConfig) -> tuple[CreditFn, SelectFn, LossFn, LossScheduleFn | None]:
@@ -271,20 +247,25 @@ def _evaluate_and_save(
 def _open_pools(
     stack: ExitStack, *, cfg: LabConfig, layout: RunLayout
 ) -> tuple[CollectFn | None, ForkCollectorPool | None]:
-    collect_fn: CollectFn | None = None
-    if cfg.collect_workers > 0:
-        pool_cfg = WorkerPoolConfig(
-            num_workers=cfg.collect_workers,
-            envs_per_worker=max(1, cfg.num_envs // cfg.collect_workers),
-            steps_per_env=cfg.steps_per_env,
-            hidden_dim=cfg.hidden_dim,
-            attention_layers=cfg.attention_layers,
-            seed=cfg.seed,
-            games_path=layout.train_games_path(),
-            record_fraction=cfg.record_train_fraction,
-            enable_snapshots=cfg.snapshot_fraction > 0.0,
-        )
-        collect_fn = stack.enter_context(MultiProcessCollector(pool_cfg)).collect
+    collect_fn = (
+        stack.enter_context(
+            MultiProcessCollector(
+                WorkerPoolConfig(
+                    num_workers=cfg.collect_workers,
+                    envs_per_worker=max(1, cfg.num_envs // cfg.collect_workers),
+                    steps_per_env=cfg.steps_per_env,
+                    hidden_dim=cfg.hidden_dim,
+                    attention_layers=cfg.attention_layers,
+                    seed=cfg.seed,
+                    games_path=layout.train_games_path(),
+                    record_fraction=cfg.record_train_fraction,
+                    enable_snapshots=cfg.snapshot_fraction > 0.0,
+                )
+            )
+        ).collect
+        if cfg.collect_workers > 0
+        else None
+    )
     fork_pool = (
         stack.enter_context(
             ForkCollectorPool(
@@ -325,7 +306,7 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
         agent.load_state_dict(loaded_policy.state_dict())
     baseline = copy.deepcopy(agent).to("cpu").eval()
     credit, select, loss, loss_schedule = _select_components(cfg)
-    normalize_advantages = _resolve_normalize_advantages(cfg)
+    normalize_advantages = cfg.loss_kind == "ppo" if cfg.normalize_advantages is None else cfg.normalize_advantages
 
     run_config: dict[str, object] = {
         **asdict(cfg),
@@ -387,17 +368,7 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
                 "tps": round(stats.rows / max(record.collect_s + record.learn_s, 1e-6), 1),
             },
         )
-        if cfg.fork_config is not None and fork_pool is not None:
-            f_stats = fork_pool.collect_and_update(
-                agent,
-                optimizer,
-                config=cfg.fork_config,
-                device=torch.device(cfg.learn_device),
-                seed=cfg.seed * 10_000 + record.update * 97,
-            )
-            append_metric(layout, {"kind": "fork", "update": record.update, **asdict(f_stats)})
-        should_eval = record.update % cfg.eval_every == 0 or record.update == cfg.updates
-        if should_eval:
+        if record.update % cfg.eval_every == 0 or record.update == cfg.updates:
             _evaluate_and_save(
                 agent,
                 baseline,
@@ -431,6 +402,19 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
     )
     with ExitStack() as stack:
         collect_fn, fork_pool = _open_pools(stack, cfg=cfg, layout=layout)
+
+        def prepare_aux(cur_agent: ActorCritic, update_idx: int) -> AuxLossFn | None:
+            if cfg.fork_config is None or fork_pool is None:
+                return None
+            aux_fn, f_stats = fork_pool.prepare_joint_aux(
+                cur_agent,
+                config=cfg.fork_config,
+                device=torch.device(cfg.learn_device),
+                seed=cfg.seed * 10_000 + update_idx * 97,
+            )
+            append_metric(layout, {"kind": "fork", "update": update_idx, **asdict(f_stats)})
+            return aux_fn
+
         train_self_play(
             agent,
             optimizer,
@@ -442,6 +426,7 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
             loss_schedule=loss_schedule,
             config=train_cfg,
             collect_fn=collect_fn,
+            prepare_aux=prepare_aux if cfg.fork_config is not None else None,
             on_update=on_update,
         )
     return layout

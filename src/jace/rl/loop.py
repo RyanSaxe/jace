@@ -52,8 +52,10 @@ from jace.rl.pool import (
 from jace.rl.select import SelectFn, bucketed_minibatch_order
 
 __all__ = (
+    "AuxLossFn",
     "CollectFn",
     "LossScheduleFn",
+    "PrepareAuxFn",
     "StepRecord",
     "TrainConfig",
     "UpdateCallback",
@@ -65,12 +67,15 @@ __all__ = (
 
 _SCALAR_TARGET_NDIM = 2
 _CROSS_BALANCED_STRIDE = 4
+_METRIC_KEYS = ("policy_loss", "value_loss", "collection_kl", "magnet_kl", "entropy", "clip_fraction", "grad_norm")
 _collect_rollout: Callable[..., RolloutBatch] = collect
 _collect_pair_rollout: Callable[..., tuple[RolloutBatch, RolloutBatch]] = collect_pair
 _open_collector: Callable[..., Collector] = open_collector
 
 type UpdateCallback = Callable[[StepRecord], None]
 type LossScheduleFn = Callable[[int], tuple[float, float, LossFn]]
+type AuxLossFn = Callable[[], torch.Tensor | None]
+type PrepareAuxFn = Callable[[ActorCritic, int], AuxLossFn | None]
 
 
 class CollectFn(Protocol):
@@ -110,15 +115,12 @@ def _bootstrap_values(
 
 
 def _trajectory_from_batch(
-    batch: RolloutBatch,
-    *,
-    next_value: torch.Tensor,
-    next_outcomes: torch.Tensor | None,
+    batch: RolloutBatch, *, next_value: torch.Tensor, next_outcomes: torch.Tensor | None
 ) -> Trajectory:
     outcome_probs = (
-        torch.as_tensor(batch.outcome_probabilities, dtype=torch.float32)
-        if batch.outcome_probabilities is not None
-        else None
+        None
+        if batch.outcome_probabilities is None
+        else torch.as_tensor(batch.outcome_probabilities, dtype=torch.float32)
     )
     return Trajectory(
         rewards=torch.as_tensor(batch.rewards, dtype=torch.float32),
@@ -181,39 +183,32 @@ def _minibatch_step(
     loss_fn: LossFn,
     max_grad_norm: float,
     catalog_pair: tuple[torch.Tensor, torch.Tensor] | None = None,
+    aux_loss: AuxLossFn | None = None,
 ) -> tuple[dict[str, float], float]:
     breakdown = loss_fn(batch)
+    total = breakdown.total
+    if aux_loss is not None:
+        aux = aux_loss()
+        if aux is not None:
+            total = total + aux.to(device=total.device, dtype=total.dtype)
     if catalog_pair is not None:
         catalog_pair[0].grad = None
     optimizer.zero_grad(set_to_none=True)
-    breakdown.total.backward()
+    total.backward()
     if catalog_pair is not None and catalog_pair[0].grad is not None:
         catalog_pair[1].add_(catalog_pair[0].grad)
     grad_norm = float(torch.nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm).item())
     optimizer.step()
-    metrics = {
-        "policy_loss": breakdown.policy,
-        "value_loss": breakdown.value,
-        "collection_kl": breakdown.collection_kl,
-        "magnet_kl": breakdown.magnet_kl,
-        "entropy": breakdown.entropy,
-        "clip_fraction": breakdown.clip_fraction,
-    }
-    return metrics, grad_norm
-
-
-def _sample_pair_match(deck_source: UniformDecks, rng: np.random.Generator) -> Match:
-    players = deck_source.players()
-    hero, villain = players[int(rng.integers(0, len(players)))], players[int(rng.integers(0, len(players)))]
-    return Match(
-        MatchConfig(
-            world="world",
-            decklists="open" if deck_source.decklists == "open" else "closed",
-            hero_deck=dict(hero.decklist),
-            hero_sideboard=dict(hero.sideboard),
-            villain_deck=dict(villain.decklist),
-            villain_sideboard=dict(villain.sideboard),
-        )
+    return (
+        {
+            "policy_loss": breakdown.policy,
+            "value_loss": breakdown.value,
+            "collection_kl": breakdown.collection_kl,
+            "magnet_kl": breakdown.magnet_kl,
+            "entropy": breakdown.entropy,
+            "clip_fraction": breakdown.clip_fraction,
+        },
+        grad_norm,
     )
 
 
@@ -232,12 +227,24 @@ def _collect_against_snapshot(
     load_snapshot(opponent, entry)
     opponent.to(torch.device(config.collect_device))
     opponent.cache_programs()
+    players = deck_source.players()
+    hero, villain = players[int(rng.integers(0, len(players)))], players[int(rng.integers(0, len(players)))]
+    match = Match(
+        MatchConfig(
+            world="world",
+            decklists="open" if deck_source.decklists == "open" else "closed",
+            hero_deck=dict(hero.decklist),
+            hero_sideboard=dict(hero.sideboard),
+            villain_deck=dict(villain.decklist),
+            villain_sideboard=dict(villain.sideboard),
+        )
+    )
     curriculum: Literal["cross-balanced", "fixed"] = (
         "cross-balanced" if config.num_envs % _CROSS_BALANCED_STRIDE == 0 else "fixed"
     )
     collector = _open_collector(
         obs_space,
-        _sample_pair_match(deck_source, rng),
+        match,
         reward,
         num_envs=config.num_envs,
         seed=seed,
@@ -297,6 +304,7 @@ def update_step(
     config: UpdateConfig,
     rng: np.random.Generator,
     learning_seats: Literal["both", "one"] = "both",
+    aux_loss: AuxLossFn | None = None,
 ) -> UpdateStats:
     """Run one on-policy RL update over a collected `RolloutBatch`.
 
@@ -325,9 +333,7 @@ def update_step(
     row_sizes = None if raw_needs is None else raw_needs.sum(axis=1)
     flat_actions = batch.actions.reshape(-1)
 
-    totals = dict.fromkeys(
-        ("policy_loss", "value_loss", "collection_kl", "magnet_kl", "entropy", "clip_fraction", "grad_norm"), 0.0
-    )
+    totals = dict.fromkeys(_METRIC_KEYS, 0.0)
     steps = 0
     agent.train()
     for _ in range(config.epochs):
@@ -357,6 +363,7 @@ def update_step(
                     loss_fn=loss,
                     max_grad_norm=config.max_grad_norm,
                     catalog_pair=catalog_pair,
+                    aux_loss=aux_loss,
                 )
                 for key, value in metrics.items():
                     totals[key] += value
@@ -368,26 +375,16 @@ def update_step(
     denom = max(steps, 1)
     seats_per_game = 2 if learning_seats == "both" else 1
     return UpdateStats(
-        rows=total_rows,
-        selected_rows=int(selected_mask.sum().item()),
-        completed_games=int(batch.dones.sum()) // seats_per_game,
-        policy_loss=totals["policy_loss"] / denom,
-        value_loss=totals["value_loss"] / denom,
-        collection_kl=totals["collection_kl"] / denom,
-        magnet_kl=totals["magnet_kl"] / denom,
-        entropy=totals["entropy"] / denom,
-        clip_fraction=totals["clip_fraction"] / denom,
-        grad_norm=totals["grad_norm"] / denom,
-        mean_advantage_abs=float(raw_flat.abs().mean().item()),
+        total_rows,
+        int(selected_mask.sum().item()),
+        int(batch.dones.sum()) // seats_per_game,
+        *(totals[k] / denom for k in _METRIC_KEYS),
+        float(raw_flat.abs().mean().item()),
     )
 
 
 def _resolve_update_loss(
-    update_idx: int,
-    *,
-    optimizer: Optimizer,
-    default_loss: LossFn,
-    loss_schedule: LossScheduleFn | None,
+    update_idx: int, *, optimizer: Optimizer, default_loss: LossFn, loss_schedule: LossScheduleFn | None
 ) -> tuple[float, float, LossFn]:
     if loss_schedule is None:
         return current_optimizer_lr(optimizer), 0.0, default_loss
@@ -408,6 +405,7 @@ def train_self_play(
     config: TrainConfig,
     loss_schedule: LossScheduleFn | None = None,
     collect_fn: CollectFn | None = None,
+    prepare_aux: PrepareAuxFn | None = None,
     on_update: UpdateCallback | None = None,
 ) -> list[UpdateStats]:
     """Run complete-game self-play training over `deck_source` using Jace's RL pipeline.
@@ -464,6 +462,7 @@ def train_self_play(
             t_collect = time.perf_counter()
             batch = active_collect(agent, opponent_entry=entry, update_idx=update_idx)
             collect_s = time.perf_counter() - t_collect
+            aux_loss = prepare_aux(agent, update_idx) if prepare_aux is not None else None
             t_learn = time.perf_counter()
             stats = update_step(
                 agent,
@@ -475,12 +474,14 @@ def train_self_play(
                 config=config.update,
                 rng=rng,
                 learning_seats="one" if entry is not None else "both",
+                aux_loss=aux_loss,
             )
             learn_s = time.perf_counter() - t_learn
             if pool is not None and update_idx % max(config.snapshot_every, 1) == 0:
                 pool.add(agent, update=update_idx)
             history.append(stats)
             if on_update is not None:
+                opp = f"snapshot@u{entry.update}" if entry is not None else "self"
                 on_update(
                     StepRecord(
                         update=update_idx,
@@ -489,7 +490,7 @@ def train_self_play(
                         learn_s=learn_s,
                         learning_rate=lr,
                         magnet_tau=tau,
-                        opponent=f"snapshot@u{entry.update}" if entry is not None else "self",
+                        opponent=opp,
                     )
                 )
     finally:

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import torch
 
-from jace.loops.forks import ForkCollectorPool, ForkConfig, apply_fork_update
+from jace.loops.forks import ForkCollectorPool, ForkConfig, build_fork_aux_loss
 from jace.loops.train_ten_decks import build_agent
 from jace.rl import fork_pairwise_loss, fork_targets_from_returns
 
@@ -88,7 +88,13 @@ def test_fork_collector_and_update_smoke_on_closed_decks() -> None:
     assert all(item.num_actions == 2 for item in examples)
     assert all(item.valid_pairs >= 1 for item in examples)
 
-    stats = apply_fork_update(agent, optimizer, examples=examples, config=cfg, device=torch.device("cpu"))
+    aux_fn, stats = build_fork_aux_loss(agent, examples=examples, config=cfg, device=torch.device("cpu"))
     assert stats.total_forks == 2
     assert 0 <= stats.decisive_forks <= 2
-    assert stats.grad_norm >= 0.0
+    if aux_fn is not None:
+        agent.train()
+        loss = aux_fn()
+        assert loss is not None
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()

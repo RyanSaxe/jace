@@ -11,6 +11,7 @@ anchor to protect unrelated decisions.
 
 from __future__ import annotations
 
+import functools
 import logging
 import multiprocessing as mp
 import random
@@ -32,17 +33,15 @@ from jace.eval.deals import Deal, build_deals, elemental_decks
 from jace.rl.losses import fork_pairwise_loss, policy_log_probs
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from multiprocessing.pool import Pool as ProcessPool
-
-    from torch.optim import Optimizer
 
 __all__ = (
     "ForkCollectorPool",
     "ForkConfig",
     "ForkExample",
     "ForkStats",
-    "apply_fork_update",
+    "build_fork_aux_loss",
 )
 
 _ACTION_SPACE_NAMES = {int(member): member.name.lower() for member in ActionSpaceEnum}
@@ -403,48 +402,47 @@ class ForkCollectorPool:
         parts = self._pool.map(_fork_worker_task, tasks)
         return [item for part in parts for item in part]
 
-    def collect_and_update(
-        self, agent: ActorCritic, optimizer: Optimizer, *, config: ForkConfig, device: torch.device, seed: int
-    ) -> ForkStats:
+    def prepare_joint_aux(
+        self, agent: ActorCritic, *, config: ForkConfig, device: torch.device, seed: int
+    ) -> tuple[Callable[[], torch.Tensor | None] | None, ForkStats]:
         t0 = time.perf_counter()
         examples = self.collect(agent, config=config, seed=seed)
-        return apply_fork_update(
-            agent, optimizer, examples=examples, config=config, device=device, collect_s=time.perf_counter() - t0
+        return build_fork_aux_loss(
+            agent, examples=examples, config=config, device=device, collect_s=time.perf_counter() - t0
         )
 
 
 def _legal_mask_from_counts(counts: Sequence[int], *, width: int, device: torch.device) -> torch.Tensor:
-    arange = torch.arange(width, device=device)[None, :]
-    limit = torch.tensor(counts, dtype=torch.long, device=device)[:, None]
-    return arange < limit
+    return torch.arange(width, device=device)[None, :] < torch.tensor(counts, dtype=torch.long, device=device)[:, None]
 
 
-def apply_fork_update(
+def build_fork_aux_loss(
     agent: ActorCritic,
-    optimizer: Optimizer,
     *,
     examples: Sequence[ForkExample],
     config: ForkConfig,
     device: torch.device,
     collect_s: float = 0.0,
-) -> ForkStats:
-    """Apply one bounded pairwise counterfactual cross-entropy update on decisive forks.
+) -> tuple[Callable[[], torch.Tensor | None] | None, ForkStats]:
+    """Prepare a joint auxiliary fork-loss closure to mix directly into PPO+KL minibatches.
 
-    Filters `examples` to decisive comparisons (`|q_0 - q_1| >= config.min_gap`), anchors
-    full-action logits to the pre-update policy with `config.anchor_kl`, runs one clipped
-    optimizer step scaled by `config.fork_weight`, and returns summary fork diagnostics.
+    Filters `examples` to decisive comparisons, stages their encoded observations on
+    `device` once, records pre-update log-probabilities for KL anchoring, and returns a
+    zero-argument closure computing `config.fork_weight * fork_pairwise_loss(...).total`
+    together with summary `ForkStats`. Mixing forks into every PPO minibatch keeps shared
+    transformer trunk features anchored by normal land/spell/block states.
     """
     t0 = time.perf_counter()
     total = len(examples)
     if total == 0:
-        return ForkStats(0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, collect_s, 0.0)
-
+        return None, ForkStats(0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, collect_s, 0.0)
     mean_top_p = sum(item.policy_pair_probs[0] for item in examples) / total
     mean_alt_p = sum(item.policy_pair_probs[1] for item in examples) / total
     decisive = [item for item in examples if abs(item.pair_returns[0] - item.pair_returns[1]) >= config.min_gap]
     alt_better = sum(1 for item in decisive if item.pair_returns[1] > item.pair_returns[0])
     if not decisive:
-        return ForkStats(total, 0, 0, 0.0, mean_top_p, mean_alt_p, 0.0, 0.0, 0.0, collect_s, time.perf_counter() - t0)
+        stats = ForkStats(total, 0, 0, 0.0, mean_top_p, mean_alt_p, 0.0, 0.0, 0.0, collect_s, time.perf_counter() - t0)
+        return None, stats
 
     stacked = {key: np.stack([item.encoded_obs[key] for item in decisive], axis=0) for key in decisive[0].encoded_obs}
     action_pairs = torch.tensor([item.action_pair for item in decisive], dtype=torch.long, device=device)
@@ -459,10 +457,8 @@ def apply_fork_update(
         legal_mask = _legal_mask_from_counts(counts, width=old_logits.shape[-1], device=device)
         ref_logs = policy_log_probs(old_logits, legal_mask).detach()
 
-    agent.train()
-    logits, _ = agent.forward_distribution(prepared)
-    breakdown = fork_pairwise_loss(
-        logits,
+    eval_loss = functools.partial(
+        fork_pairwise_loss,
         action_pairs=action_pairs,
         pair_returns=pair_returns,
         legal_mask=legal_mask,
@@ -471,23 +467,24 @@ def apply_fork_update(
         min_gap=config.min_gap,
         anchor_kl=config.anchor_kl,
     )
-    optimizer.zero_grad(set_to_none=True)
-    (config.fork_weight * breakdown.total).backward()
-    grad_norm = float(torch.nn.utils.clip_grad_norm_(agent.parameters(), config.max_grad_norm).item())
-    optimizer.step()
-    if device.type == "mps":
-        torch.mps.empty_cache()
+    with torch.no_grad():
+        preview = eval_loss(old_logits)
 
-    return ForkStats(
-        total_forks=total,
-        decisive_forks=breakdown.active_count,
-        alt_better_forks=alt_better,
-        mean_gap=breakdown.mean_gap,
-        mean_top_prob=mean_top_p,
-        mean_alt_prob=mean_alt_p,
-        fork_loss=breakdown.cross_entropy,
-        anchor_kl=breakdown.anchor_kl,
-        grad_norm=grad_norm,
-        collect_s=collect_s,
-        learn_s=time.perf_counter() - t0,
+    def _compute_aux() -> torch.Tensor:
+        logits, _ = agent.forward_distribution(prepared)
+        return config.fork_weight * eval_loss(logits).total
+
+    stats = ForkStats(
+        total,
+        preview.active_count,
+        alt_better,
+        preview.mean_gap,
+        mean_top_p,
+        mean_alt_p,
+        preview.cross_entropy,
+        preview.anchor_kl,
+        0.0,
+        collect_s,
+        time.perf_counter() - t0,
     )
+    return _compute_aux, stats
