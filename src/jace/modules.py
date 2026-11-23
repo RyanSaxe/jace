@@ -13,8 +13,6 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional
 
-from jace.metal_attention import attend_within_rows
-
 __all__ = ("DROPOUT", "FEEDFORWARD_EXPANSION", "DropoutInEncodeRealError", "encode_real", "transformer")
 
 # A transformer layer's feed-forward block is this many times the model width,
@@ -63,10 +61,9 @@ def encode_real(encoder: nn.TransformerEncoder, sequence: Tensor, *, mask: Tenso
     tokens of every row are packed into one `[tokens, width]` matrix, with a
     few dummy tokens to round the count up. The projections, feed-forward
     blocks and norms run on that matrix alone. Only attention mixes the
-    tokens of a row. On MPS, attention runs on the packed tokens with the
-    `jace.metal_attention` kernels. On other devices, each row is padded to
-    the longest row's length for attention. Packing changes nothing in the
-    result, because the encoder has no position input.
+    tokens of a row, padding each row to the longest row's length for
+    attention. Packing changes nothing in the result, because the encoder has
+    no position input.
 
     Raises `DropoutInEncodeRealError` for an encoder with dropout that is in
     training mode.
@@ -143,10 +140,7 @@ def _attention(attention: nn.MultiheadAttention, packed: Tensor, *, packing: _Pa
     heads = attention.num_heads
     projected = functional.linear(packed, attention.in_proj_weight, attention.in_proj_bias)
     projected = projected.view(tokens, 3, heads, width // heads)  # each token's query, key and value heads
-    if projected.device.type == "mps":
-        mixed, _ = attend_within_rows(projected, packing.bounds)
-    else:
-        mixed = _padded_attention(projected, packing=packing)
+    mixed = _padded_attention(projected, packing=packing)
     return attention.out_proj(mixed.reshape(tokens, width))
 
 

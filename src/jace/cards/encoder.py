@@ -1,10 +1,9 @@
-"""The card vectors every model reads: an encoder of each card's content, or a fixed table of its output.
+"""The card vectors every model reads: a program encoder, or a fixed table of its output.
 
-`CardEncoder` makes a card's vector from three inputs, all known before
-anyone plays the card. They are the card's printed text as a language model
-embeds it, its engine program, and a few facts printed on it. A card's
-vector depends on that card's inputs alone, so a card the encoder was not
-trained on still gets a vector from its own content.
+`CardEncoder` makes a card's vector from its `managym` engine program alone,
+which is known before anyone plays the card. A card's vector depends only on
+its own program, so a card the encoder was not trained on still gets a vector
+from its own mechanics.
 
 The drafter's pretraining trains the encoder. Every later model reads
 `frozen_table(encoder)`, a `CardTable` that contains the vectors and has
@@ -21,7 +20,6 @@ vocabulary lacks. The encoder learns a position for each of the first
 fits.
 """
 
-from dataclasses import dataclass
 from typing import Protocol, override
 
 import torch
@@ -36,7 +34,6 @@ __all__ = (
     "PADDING_TOKEN",
     "UNKNOWN_TOKEN",
     "CardEncoder",
-    "CardInputs",
     "CardTable",
     "CardVectors",
     "frozen_table",
@@ -48,26 +45,6 @@ NO_PROGRAM_TOKEN = 1
 UNKNOWN_TOKEN = 2
 FIRST_PROGRAM_TOKEN = 3
 MAX_PROGRAM_TOKENS = 256
-
-# The encoder joins three vectors of its width, one each for the text, the program and the printed facts.
-_PARTS = 3
-
-
-@dataclass(frozen=True, slots=True)
-class CardInputs:
-    """What the encoder reads about each card, one row per card in card id order.
-
-    `text` is float32 `[cards, text width]`, each card's printed text
-    embedded by a language model, as `jace.data.text_vectors` returns it.
-    `program` is int64 `[cards, longest]`, the engine program as token ids
-    padded with `PADDING_TOKEN`, as `jace.data.program_tokens` returns it.
-    `printed` is float32 `[cards, printed facts]`, the `printed` tensor of
-    `jace.data.SetCards`.
-    """
-
-    text: Tensor
-    program: Tensor
-    printed: Tensor
 
 
 class CardVectors(Protocol):
@@ -87,8 +64,10 @@ class CardVectors(Protocol):
 
 
 class CardEncoder(nn.Module):
-    """Encode each card's text, program and printed facts as one vector of `width` numbers.
+    """Encode each card's engine program as one vector of `width` numbers.
 
+    `program` is int64 `[cards, longest]`, one row per card in card id order,
+    padded with `PADDING_TOKEN`, as `jace.data.program_tokens` returns it.
     `program_vocabulary` is the number of program token ids, which is
     `FIRST_PROGRAM_TOKEN` plus the size of the engine's vocabulary. A
     transformer encoder of `program_layers` layers, with `heads` attention
@@ -96,37 +75,30 @@ class CardEncoder(nn.Module):
     its learned embedding, so a card's vector depends on the order of its
     program's pairs and not only on which pairs it contains.
 
-    The inputs are buffers that are not saved in a checkpoint, because every
-    run rebuilds them from data. A checkpoint therefore contains the weights
-    only.
+    The program tensor is a buffer that is not saved in a checkpoint, because
+    every run rebuilds it from the engine catalog. A checkpoint therefore
+    contains the weights only.
     """
 
     def __init__(
-        self, inputs: CardInputs, *, width: int, program_vocabulary: int, program_layers: int, heads: int
+        self, program: Tensor, *, width: int, program_vocabulary: int, program_layers: int, heads: int
     ) -> None:
         super().__init__()
-        self.text: Tensor
         self.program: Tensor
-        self.printed: Tensor
-        self.register_buffer("text", inputs.text.detach().clone(), persistent=False)
-        self.register_buffer("program", inputs.program.detach().clone(), persistent=False)
-        self.register_buffer("printed", inputs.printed.detach().clone(), persistent=False)
+        self.register_buffer("program", program.detach().clone(), persistent=False)
         self.width: int = width
-        self.text_projection: nn.Linear = nn.Linear(inputs.text.shape[1], width)
-        self.printed_projection: nn.Linear = nn.Linear(inputs.printed.shape[1], width)
         self.program_tokens: nn.Embedding = nn.Embedding(program_vocabulary, width, padding_idx=PADDING_TOKEN)
         self.program_positions: nn.Embedding = nn.Embedding(MAX_PROGRAM_TOKENS, width)
         self.program_encoder: nn.TransformerEncoder = transformer(width, layers=program_layers, heads=heads)
-        self.join: nn.Sequential = nn.Sequential(nn.Linear(_PARTS * width, width), nn.GELU(), nn.Linear(width, width))
         self.norm: nn.LayerNorm = nn.LayerNorm(width)
 
     @property
     def cards(self) -> int:
-        return self.text.shape[0]
+        return self.program.shape[0]
 
     @property
     def device(self) -> torch.device:
-        return self.text.device
+        return self.program.device
 
     def table(self) -> Tensor:
         # Returns float [cards, width], every card's vector.
@@ -136,8 +108,7 @@ class CardEncoder(nn.Module):
         tokens = self.program_tokens(self.program) + self.program_positions(positions)
         encoded = encode_real(self.program_encoder, tokens, mask=real)  # [cards, longest, width], zero at padding
         program = encoded.sum(dim=1) / real.sum(dim=1, keepdim=True)
-        parts = torch.cat([self.text_projection(self.text), program, self.printed_projection(self.printed)], dim=-1)
-        return self.norm(self.join(parts))
+        return self.norm(program)
 
     @override
     def forward(self, cards: Tensor) -> Tensor:

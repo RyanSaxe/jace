@@ -13,7 +13,7 @@ import pytest
 import torch
 from torch import Tensor
 
-from jace.cards import FIRST_PROGRAM_TOKEN, NO_PROGRAM_TOKEN, CardEncoder, CardInputs, CardTable, Pool, own_parameters
+from jace.cards import FIRST_PROGRAM_TOKEN, NO_PROGRAM_TOKEN, CardEncoder, CardTable, Pool, own_parameters
 from jace.decks import BuildRules, DeckBuilder, DeckScore, build_decks, build_log_probs, sample_builds
 
 __all__ = ()
@@ -183,13 +183,8 @@ def test_models_give_the_same_answers_when_the_card_pool_grows() -> None:
 
 
 def test_a_deck_models_own_parameters_hold_none_of_the_shared_embeddings() -> None:
-    generator = torch.Generator().manual_seed(0)
-    inputs = CardInputs(
-        text=torch.randn((CARDS, 4), generator=generator),
-        program=torch.full((CARDS, 1), NO_PROGRAM_TOKEN),
-        printed=torch.randn((CARDS, 3), generator=generator),
-    )
-    embedding = CardEncoder(inputs, width=8, program_vocabulary=FIRST_PROGRAM_TOKEN, program_layers=1, heads=2)
+    program = torch.full((CARDS, 1), NO_PROGRAM_TOKEN)
+    embedding = CardEncoder(program, width=8, program_vocabulary=FIRST_PROGRAM_TOKEN, program_layers=1, heads=2)
     shared = {id(parameter) for parameter in embedding.parameters()}
 
     for model in (

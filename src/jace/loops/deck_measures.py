@@ -21,7 +21,7 @@ from torch import Tensor
 
 from jace.data import HumanDecks
 from jace.decks import BuildRules, Builds, DeckBuilder, Scorer, build_log_probs
-from jace.train import score_loss
+from jace.loops.supervised import score_loss
 
 __all__ = (
     "GAMES_FOR_A_RATE",

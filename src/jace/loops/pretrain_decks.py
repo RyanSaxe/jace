@@ -53,7 +53,6 @@ from jace.loops.entry_points import (
     ADAM_BETAS,
     RunArguments,
     add_run_flags,
-    card_inputs,
     device_named,
     load_card_table,
     set_cards,
@@ -61,9 +60,9 @@ from jace.loops.entry_points import (
 )
 from jace.loops.formats import deck_rules, limited_format
 from jace.loops.schedules import RateScale, current_rates, scale_rates, warm_up_then_decay
+from jace.loops.supervised import apply, score_loss
 from jace.tracking import Running, log_update, save_checkpoint
 from jace.tracking import writing as writing_run
-from jace.train import apply, score_loss
 
 __all__ = (
     "BuilderPoint",
@@ -296,7 +295,7 @@ class _Arguments(RunArguments):
 def _arguments(argv: Sequence[str]) -> _Arguments:
     parser = argparse.ArgumentParser(description="Train the deck score and the deck builder on human decks.")
     add_run_flags(parser)
-    parser.add_argument("--device", default="auto", help="cpu, mps or cuda; auto takes mps when it is available")
+    parser.add_argument("--device", default="auto", help="cpu, mps or cuda; auto prefers cuda, then mps")
     parser.add_argument(
         "--score-steps",
         type=int,
@@ -361,9 +360,7 @@ def main(argv: Sequence[str]) -> None:
         data.games, pool=cards.pool, cache_dir=arguments.data_dir, held_out_share=arguments.held_out_share
     )
     rules = deck_rules(limited_format(arguments.set_code), cards)
-    embedding, embedding_ref = load_card_table(
-        arguments.embedding_run, inputs=card_inputs(data, cards, data_dir=arguments.data_dir)
-    )
+    embedding, embedding_ref = load_card_table(arguments.embedding_run, pool=cards.pool)
     shape = {"width": arguments.width, "layers": arguments.layers, "heads": arguments.heads}
     score = DeckScore(embedding, **shape).to(device)
     builder = DeckBuilder(embedding, **shape).to(device)

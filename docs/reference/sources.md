@@ -7,15 +7,10 @@ and not followed, and it gives the reason. To add a source, put it under
 the heading that fits, in the same form, in the same commit as the code
 that uses it.
 
-The entries refer to jace's six models: the drafter, the deck builder, the
-deck score, the guess model, the player and the win chance.
-[Models](../concepts/models.md) describes each one. The guess model guesses
-the opponent's hidden cards. The win chance estimates the acting seat's
-chance to win, and only training uses it. The deck score has two copies.
-One is trained on human decks and stays frozen. The other, the learning
-deck score, trains on self-play games from the first iteration.
-[Deck building](../concepts/deck-building.md) explains when the deck search
-switches from the first copy to the second.
+See [Gameplay RL](../concepts/gameplay-rl.md) and
+[Limited models](../concepts/limited-models.md) for the current architecture.
+Entries for earlier designs that jace moved away from are kept with notes on
+what jace does instead.
 
 ## Game-playing RL and search
 
@@ -52,8 +47,10 @@ switches from the first copy to the second.
   search runs few simulations, and a regularized policy built from the
   search's values works better there.
 
-  In jace, at small search budgets the player would learn from the
-  search's values rather than its visit counts.
+  In jace, `jace.rl.losses.fork_targets_from_returns` turns paired
+  counterfactual rollout returns at small simulation budgets into regularized
+  softmax targets (`softmax(pair_returns / temperature)`) for
+  `fork_pairwise_loss`.
 
 - [Understanding the Success of Perfect Information Monte Carlo Sampling in Game Tree Search](https://ojs.aaai.org/index.php/AAAI/article/view/7562).
   Long, Sturtevant, Buro and Furtak, 2010. A search of sampled worlds, each
@@ -96,16 +93,13 @@ switches from the first copy to the second.
   on the true hidden pieces from self-play games. Attention over time
   helped the belief network but not the policy.
 
-  In jace, the player's update rule comes from it, through manabot's PPO
-  rule. `PlayerRule`'s `clip`, `stay`, `spread`, `keep_quantile` and
-  `normalize` are that rule's dials: `stay` weighs the pull toward the
-  policy that played the games, and `spread` weighs the pull toward the
-  magnet. `jace.loops.schedules` uses its Table S7 curves for the player's
-  learning rate and `spread`. The guess model trains on the opponent's true
-  hidden cards from self-play, and it is the only model that reads the
-  game's history. Ataraxos's test-time search, which runs short playouts
-  and then takes one regularized step, is the alternative to a tree for
-  each dealt world.
+  In jace, `jace.rl.losses.damped_policy_loss` implements this clipped update
+  with dual reverse-KL pulls (`collection_kl` toward the behavior policy and
+  `magnet_kl` toward `reference_probs`), paired with `jace.rl.select.top_fraction`
+  advantage filtering and `jace.rl.pool.DampedSchedule` (Table S7 curves).
+  An earlier separate guess model was replaced by closed-decklist `v11`
+  observations on the `ActorCritic` backbone. Batched counterfactual forks
+  (`jace.loops.fork_batch`) follow the short playout + regularized step pattern.
 
 - [The Update-Equivalence Framework for Decision-Time Planning](https://arxiv.org/abs/2304.13138).
   Sokota et al., 2023. Planning at decision time can sample histories from
@@ -129,9 +123,9 @@ switches from the first copy to the second.
   linear convergence, and as self-play RL it was competitive with CFR in
   tabular games.
 
-  In jace, `spread` weighs a pull toward even odds over the legal actions,
-  which makes the uniform policy the magnet. The schedule lowers `spread`
-  over training.
+  In jace, `magnet_kl` in `damped_policy_loss` weighs the reverse-KL pull
+  toward the full-support reference policy (`action_type_uniform` by default),
+  and `DecaySchedule` or `DampedSchedule` lowers it over training.
 
 - [Reevaluating Policy Gradient Methods for Imperfect-Information Games](https://arxiv.org/abs/2502.08938).
   Rudolph et al., 2025. Over more than 7,000 training runs on five games,
@@ -182,10 +176,9 @@ switches from the first copy to the second.
   searching over its win-probability head, which trained alongside the
   policy.
 
-  In jace, every row of a rollout comes from one version of the weights,
-  so no data is stale. The learning deck score, which judges decks, learns
-  alongside the models whose decks it judges. Training against past
-  checkpoints is not built.
+  In jace, every row of a complete-game rollout comes from one frozen version
+  of the weights, so no data is stale. `jace.rl.pool.SnapshotPool` mixes
+  one-seat games against past checkpoints (25% of updates by default).
 
 - [Grandmaster level in StarCraft II using multi-agent reinforcement learning](https://doi.org/10.1038/s41586-019-1724-z).
   Vinyals et al., 2019. AlphaStar starts from supervised learning on human
@@ -194,9 +187,10 @@ switches from the first copy to the second.
   players' views. Self-play alone "may chase cycles", so it trains against
   a league of past players and exploiters.
 
-  In jace, the drafter is pulled toward the human-trained drafter until
-  `pull_ends`, and the win chance reads the opponent's hidden cards in
-  training only.
+  In jace, `jace.rl.pool.SnapshotPool(matching="even_odds")` samples past
+  checkpoints in proportion to `max(0.05, p * (1 - p))` using each snapshot's
+  EMA win rate so self-play avoids cycling. An earlier separate hidden-card
+  critic was replaced by the shared categorical WDL critic.
 
 - [AlphaStar Unplugged: Large-Scale Offline Reinforcement Learning](https://arxiv.org/abs/2308.03526).
   Mathieu et al., 2023. The agent reads units with a transformer and
@@ -222,18 +216,18 @@ switches from the first copy to the second.
   errors, each weighted by lambda to the power of its distance. Lambda
   trades bias for variance.
 
-  In jace, `advantages` spreads a game's result over each seat's decisions
-  with `lam_advantage` and no discount, and the win chance learns the
-  lambda-returns with `lam_value`.
+  In jace, `jace.rl.credit.gae_wdl` computes undiscounted (`gamma=1.0`) GAE
+  advantages with `lam_policy` and 3-class WDL lambda-returns with
+  `lam_value`.
 
 - [Proximal Policy Optimization Algorithms](https://arxiv.org/abs/1707.06347).
   Schulman et al., 2017. Clipping the probability ratio keeps one update
   close to the policy that collected the data, so several passes can reuse
   one batch.
 
-  In jace, `player_loss` is PPO's clipped loss with two pulls added. With
-  `stay`, `spread`, `keep_quantile` and `keep_floor` at zero, the player's
-  update is plain PPO.
+  In jace, `jace.rl.losses.damped_policy_loss` is PPO's clipped loss with two
+  reverse-KL pulls added, and `jace.rl.losses.ppo_loss` provides plain clipped
+  PPO with an entropy bonus.
 
 - [IMPALA: Scalable Distributed Deep-RL with Importance Weighted Actor-Learner Architectures](https://arxiv.org/abs/1802.01561).
   Espeholt et al., 2018. V-trace corrects for actors that play with older
@@ -256,9 +250,11 @@ switches from the first copy to the second.
   reuse of its data than a policy does. One policy epoch was almost always
   near-optimal.
 
-  In jace, the win chance is separate from the player. The learning deck
-  score, also a judge, takes four gradient steps an iteration over the last
-  eight iterations' decks.
+  Earlier jace prototypes used a separate value network. jace now uses the
+  shared-trunk `ActorCritic` with 1 policy epoch per rollout by default, and
+  `jace.loops.fork_audit.build_batched_fork_aux_loss` reuses on-policy
+  continuation states from counterfactual forks to supply extra WDL value
+  supervision.
 
 ## Imperfect information and opponent modelling
 
@@ -266,9 +262,9 @@ switches from the first copy to the second.
   Pinto et al., 2017. The critic trains on the simulator's full state while
   the actor sees only its observations.
 
-  In jace, `WinChanceModel` reads the opponent's true unseen cards. Only
-  training code calls it, so no action the player takes depends on the
-  hidden cards.
+  Earlier jace prototypes used a separate `WinChanceModel` that read the
+  opponent's true unseen cards during training. jace now uses a shared
+  categorical WDL critic over closed-decklist observations.
 
 - [Unbiased Asymmetric Reinforcement Learning under Partial Observability](https://arxiv.org/abs/2105.11674).
   Baisero and Amato, 2021. A critic that reads only the true state gives a
@@ -373,9 +369,9 @@ switches from the first copy to the second.
   features. Training the head first, then everything, did better out of
   distribution.
 
-  In jace, the language model that embeds card text stays frozen. The
-  learning deck score trains with a KL pull toward the human-trained deck
-  score.
+  In jace, downstream deck models read a frozen `CardTable` from the
+  pretrained card encoder, and the learning deck score trains with a KL pull
+  toward the human-trained deck score.
 
 - [Actor-Critic Algorithms](https://papers.nips.cc/paper/1786-actor-critic-algorithms).
   Konda and Tsitsiklis, 1999. Actor-critic methods are two-time-scale
@@ -592,21 +588,24 @@ switches from the first copy to the second.
   Narasimhan, Barzilay and Jaakkola, 2017. Text descriptions of entities
   let a policy transfer to new domains.
 
-  In jace, the card encoder reads each card's printed text.
+  Decided against: jace encodes each card from its `managym` engine program
+  tokens instead of its printed text, since the program defines the card's
+  exact mechanics in the engine's own vocabulary.
 
 - [RTFM: Generalising to Novel Environment Dynamics via Reading](https://arxiv.org/abs/1910.08210).
   Zhong, Rocktäschel and Grefenstette, 2019. Generated games and manuals
   force an agent to read rather than memorize, and it generalizes to new
   dynamics.
 
-  In jace, a card's vector depends only on what is known of the card before
-  anyone plays it, and no card has an identity of its own.
+  In jace, a card's vector depends only on its engine program, which is
+  known before anyone plays it, and no card has an identity of its own.
 
 - [Grounding Language to Entities and Dynamics for Generalization in Reinforcement Learning](https://arxiv.org/abs/2101.07393).
   Hanjie, Zhong and Narasimhan, 2021. EMMA attends from each entity to its
   entry in a text manual and generalizes to unseen games.
 
-  In jace, each card's vector is built from the embedding of its own text.
+  Decided against: jace builds each card's vector from its engine program
+  tokens rather than a text manual embedding.
 
 - [A Survey of Zero-shot Generalisation in Deep Reinforcement Learning](https://arxiv.org/abs/2111.09794).
   Kirk, Zhang, Grefenstette and Rocktäschel, 2021. Generalization is
@@ -619,7 +618,8 @@ switches from the first copy to the second.
   Luketina et al., 2019. It surveys agents that use language, including
   agents that read descriptions of entities.
 
-  In jace, it is background for reading cards through their text.
+  Decided against: jace reads each card through its structured engine
+  program instead of natural-language rules text.
 
 - [DraftFM: A FoundationModel for Day-Zero Drafting in Magic: The Gathering](https://arxiv.org/abs/2608.19568).
   Ward, 2026. Every card enters the model as a frozen vector of its printed
@@ -628,9 +628,9 @@ switches from the first copy to the second.
   picks from 29 sets, it agreed with 50.8%, 60.4% and 56.7% of human picks
   on three sets it never saw. Its code is at [brianward92/mtga](https://github.com/brianward92/mtga).
 
-  In jace, the card encoder reads a card's printed text, engine program and
-  printed facts, and no card vector is built from a 17Lands statistic.
-  DraftFM is a point of comparison, not a target.
+  In jace, the card encoder reads each card's engine program alone, with no
+  17Lands statistics and no fixed per-card IDs. DraftFM is a point of
+  comparison, not a target.
 
 - [Learning With Generalised Card Representations for "Magic: The Gathering"](https://arxiv.org/abs/2407.05879).
   Bertram, Fürnkranz and Müller, 2024. The choice of card representation
@@ -654,8 +654,8 @@ switches from the first copy to the second.
   0.0125 HR@10 against 0.5899 for a text-based one. On known items a frozen
   text encoder with a trained head came close to IDs.
 
-  In jace, a card's vector is built from its content with a frozen text
-  model, and no card has an ID vector.
+  In jace, a card's vector is built from its engine program rather than a
+  learned per-card ID (replacing an earlier frozen text encoder).
 
 - [Let It Go? Not Quite: Addressing Item Cold Start in Sequential Recommendations with Content-Based Initialization](https://arxiv.org/abs/2507.19473).
   Pembek, Fatkulin, Klenitskiy and Vasilev, 2025. A per-item table started
@@ -681,11 +681,12 @@ switches from the first copy to the second.
   manabot adds the board encoding, scripted opponents, rating math and a
   PPO rule adapted from Ataraxos.
 
-  In jace, every game runs on managym. Only `jace/engine/manabot.py` and
-  `jace/engine/scoring.py` import managym or manabot. The models read
-  boards in manabot's encoding, and the card encoder reads each card's
-  program from the engine. Scoring plays jace's checkpoints against
-  manabot's random, greedy, heuristic and flat Monte Carlo players.
+  In jace, games run on `managym` with `manabot`'s `ActorCritic`,
+  `ObservationSpace`, and rollout collector behind a narrow import seam
+  (`jace.data.catalog`, `jace.rl.loop`, `jace.eval`, `jace.runs`, and
+  `jace.loops`), while all RL algorithms live in `jace.rl`. Evaluation
+  scores checkpoints against `managym`'s `Heuristic` and random players, and
+  `jace.cards` reads each card's engine program through `jace.data.catalog`.
 
 - [XMage](https://github.com/magefree/mage), [Forge](https://github.com/Card-Forge/forge)
   and [phase-rs](https://github.com/phase-rs/phase). magefree, Card-Forge
@@ -722,8 +723,8 @@ switches from the first copy to the second.
 - [MTGJSON](https://mtgjson.com/). MTGJSON. Card data for every Magic
   card, including rules text.
 
-  In jace, it supplies the card attributes through spells, including the
-  rules text the card encoder embeds.
+  In jace, it supplies set card attributes (rarity, land type, and mana
+  value) through spells.
 
 - [bstaple1/MTGA_Draft_17Lands](https://github.com/bstaple1/MTGA_Draft_17Lands).
   bstaple1, MIT licence. A draft overlay whose README notes that Arena's log
@@ -741,13 +742,14 @@ switches from the first copy to the second.
   sentence-transformers, Apache 2.0. A small sentence embedder that gives
   384 numbers per text.
 
-  In jace, it is `TEXT_MODEL`, the frozen model that embeds each card's
-  text for the card encoder.
+  Decided against: jace unified its card encoder on `managym` engine program
+  tokens alone and removed frozen text embeddings.
 
 - [Hugging Face Transformers](https://github.com/huggingface/transformers).
   Hugging Face, Apache 2.0, version 5.22.2 or later.
 
-  In jace, `hugging_face_encoder` runs the text model with it.
+  Decided against: removed alongside `all-MiniLM-L6-v2` when the card
+  encoder moved to engine program tokens alone.
 
 - [PyTorch](https://pytorch.org/). The PyTorch Foundation, version 2.10 or
   later.
@@ -787,4 +789,5 @@ switches from the first copy to the second.
 
   Decided against: with any of them, jace would still define a run's
   lineage and state itself, and plain files can be read without a service.
-  `jace.tracking` writes each run as a folder of plain files.
+  `jace.runs` writes Academy-native gameplay runs and `jace.tracking` writes
+  file-locked pretraining runs as folders of plain files.

@@ -2,13 +2,13 @@
 
 ## Requirements
 
-| Need             | Why                                                       |
-| ---------------- | --------------------------------------------------------- |
-| Python 3.13      | The one version `pyproject.toml` allows                   |
-| [uv](https://docs.astral.sh/uv/) | It installs jace and runs every command   |
-| A Rust toolchain | Only to compile the engine, managym 0.2.3, on a platform with no prebuilt managym package. Prebuilt packages exist for macOS on Apple silicon and Linux on x86-64 |
+| Requirement                      | Purpose                                                                      |
+| -------------------------------- | ---------------------------------------------------------------------------- |
+| Python 3.13                      | Required by `pyproject.toml` (`>=3.13,<3.14`)                                |
+| [uv](https://docs.astral.sh/uv/) | Installs dependencies and runs every command                                 |
+| Rust toolchain                   | Required by `uv sync` to compile the pinned `managym` engine from source     |
 
-## Install and check
+## Install and verify
 
 ```sh
 git clone https://github.com/RyanSaxe/jace.git
@@ -17,27 +17,36 @@ uv sync
 uv run pytest -q
 ```
 
-`uv sync` installs managym and manabot 0.2.3. Where it has to compile the
-engine, that takes a few minutes. The tests then run in under a minute.
+`uv sync` compiles `managym[academy]` from the pinned git revision in `pyproject.toml` (a few minutes on first build). All unit tests run without external datasets.
 
-## Run the example
+## Quick 10-deck lab run
+
+`jace.loops.train_ten_decks` runs closed-decklist self-play on the 10 built-in `elemental-world-v2` decks bundled with `managym`:
 
 ```sh
-uv run python -m jace.loops.toy
+uv run python -m jace.loops.train_ten_decks \
+  --run-id smoke \
+  --updates 2 \
+  --num-envs 8 \
+  --steps-per-env 32 \
+  --eval-every 2 \
+  --eval-deals 4 \
+  --probe-count 8 \
+  --learn-device cpu
 ```
 
-It trains a player on High Card, a toy game that runs without the engine.
-Each seat holds three cards and plays one, and the higher card wins. In
-each line the example prints, `best card` is the share of decisions in
-which the player played its highest card. It rises as the player trains:
+Artifacts are written to `../jace-runs/v2-ten-deck-lab/smoke/` (override with `--runs-dir`).
 
-```text
-iteration  1  best card 0.34  win rate 0.49
-iteration 20  best card 0.61  win rate 0.67
-iteration 40  best card 0.81  win rate 0.76
+## Download 17Lands data
+
+Full-data self-play (`jace.loops.train_full_data`) and supervised pretraining (`jace.loops.pretrain`, `jace.loops.pretrain_decks`) read public 17Lands Premier Draft exports and MTGJSON attributes via [spells](https://github.com/oelarnes/spells):
+
+```sh
+uv run spells add TLA
 ```
+
+Files are stored in `~/.local/share/spells` (or `$SPELLS_DATA_HOME`). jace never downloads datasets automatically. See [Data](../reference/data.md) for caching and deterministic splits.
 
 ## Next
 
-Read [The approach](../concepts/approach.md), then
-[Write a loop](../guides/write-a-loop.md).
+Read [Architecture](../concepts/architecture.md) for the system design, or [Running experiments](../guides/running-experiments.md) for training, pretraining, screening, and Academy replays.

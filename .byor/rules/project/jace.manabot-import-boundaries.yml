@@ -1,0 +1,42 @@
+id: jace.manabot-import-boundaries
+language: Python
+severity: error
+message: Only the designated seam modules (jace.data.catalog, jace.rl.loop, jace.eval, jace.runs, jace.loops) may import manabot or managym.
+files:
+  - src/jace/**/*.py
+ignores:
+  - src/jace/data/catalog.py
+  - src/jace/rl/loop.py
+  - src/jace/eval/**
+  - src/jace/runs.py
+  - src/jace/loops/**
+rule:
+  any:
+    - kind: import_from_statement
+      has:
+        field: module_name
+        regex: ^(manabot|managym)(\.|$)
+    - kind: import_statement
+      has:
+        any:
+          - kind: dotted_name
+            regex: ^(manabot|managym)(\.|$)
+          - kind: aliased_import
+            has:
+              kind: dotted_name
+              regex: ^(manabot|managym)(\.|$)
+metadata:
+  byor:
+    rationale: >
+      Keeping manabot and managym behind a narrow, explicit seam ensures that
+      jace's pure RL math (jace.rl.credit, losses, select) and Limited domain
+      models (cards, data, draft, decks, tracking) stay decoupled, fast to
+      test with plain tensors, and easy to reason about.
+    agent_prompt: >
+      Do not import manabot or managym here. Pass plain PyTorch tensors or
+      NumPy arrays from jace.rl.loop, jace.eval, jace.runs, or jace.loops.
+      Card catalog lookups belong in src/jace/data/catalog.py.
+    tags:
+      - python
+      - jace
+      - boundaries
