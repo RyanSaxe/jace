@@ -33,6 +33,7 @@ from manabot.training.rollout.collection import (
 
 from jace.rl.credit import CreditFn, Trajectory, standardize_advantages
 from jace.rl.diagnostics import GradientAgreementTracker, snapshot_win_rate
+from jace.rl.ema import EmaWeights, resolve_ema_weights
 from jace.rl.losses import LossFn, PolicyBatch
 from jace.rl.pool import (
     SnapshotEntry,
@@ -43,10 +44,12 @@ from jace.rl.pool import (
     UpdateStats,
     current_optimizer_lr,
     load_snapshot,
+    resolve_snapshot_pool,
     set_optimizer_lr,
-    should_use_snapshot,
+    update_snapshot_pool,
 )
-from jace.rl.select import SelectFn, bucketed_minibatch_order
+from jace.rl.prefetch import RolloutScheduler
+from jace.rl.select import SelectFn, bucketed_minibatch_order, training_row_indexes
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -234,6 +237,7 @@ def _collect_against_snapshot(
         learning_seats="both",
         matchup_curriculum=curriculum,
         batch_closure="complete-games",
+        workers=config.native_workers,
     )
     try:
         return _collect_pair_rollout(collector, agent, config.steps_per_env)[0]
@@ -248,7 +252,6 @@ def _open_local_collector(
     deck_source: UniformDecks,
     config: TrainConfig,
     enable_snapshots: bool,
-    rng: np.random.Generator,
 ) -> tuple[Collector, CollectFn]:
     reward = Reward(RewardConfig())
     collector = _open_collector(
@@ -262,15 +265,18 @@ def _open_local_collector(
         learning_seats="both",
         batch_closure="complete-games",
         deck_source=deck_source,
+        workers=config.native_workers,
         games_path=config.games_path,
         record_fraction=config.record_fraction,
     )
     frozen = copy.deepcopy(agent).to(config.collect_device).eval() if enable_snapshots else None
     collect_device = torch.device(config.collect_device)
+    collect_rng = np.random.default_rng(config.seed + 202)
 
     def _collect(agent: ActorCritic, *, opponent_entry: SnapshotEntry | None, update_idx: int) -> RolloutBatch:
         agent.to(collect_device)
         agent.eval()
+        agent.cache_programs()
         if opponent_entry is not None and frozen is not None:
             return _collect_against_snapshot(
                 agent,
@@ -281,7 +287,7 @@ def _open_local_collector(
                 reward=reward,
                 config=config,
                 seed=config.seed + 10_000 + update_idx,
-                rng=rng,
+                rng=collect_rng,
             )
         return _collect_rollout(collector, agent, config.steps_per_env)
 
@@ -324,9 +330,9 @@ def update_step(
         else targets.value_targets.reshape(raw_flat.shape[0], -1)
     )
     total_rows = int(batch.actions.size)
-    all_indexes = np.arange(total_rows, dtype=np.int64)
-    rollout.admit_rows(all_indexes, chunk_rows=config.minibatch_size)
-    raw_needs = batch.recorded.gather_needs(all_indexes)
+    active_indexes = training_row_indexes(selected_mask, filter_scope=config.filter_scope)
+    rollout.admit_rows(active_indexes, chunk_rows=config.minibatch_size)
+    raw_needs = batch.recorded.gather_needs(active_indexes)
     row_sizes = None if raw_needs is None else raw_needs.sum(axis=1)
     flat_actions = batch.actions.reshape(-1)
     totals = dict.fromkeys(_METRIC_KEYS, 0.0)
@@ -335,7 +341,10 @@ def update_step(
         grad_tracker.begin_update()
     agent.train()
     for _ in range(config.epochs):
-        order = bucketed_minibatch_order(total_rows, minibatch_size=config.minibatch_size, row_sizes=row_sizes, rng=rng)
+        rel_order = bucketed_minibatch_order(
+            len(active_indexes), minibatch_size=config.minibatch_size, row_sizes=row_sizes, rng=rng
+        )
+        order = active_indexes[rel_order]
         with (
             _epoch_catalog_cache(agent, optimizer, device=device, max_grad_norm=config.max_grad_norm) as catalog_pair,
             rollout.minibatches(order, config.minibatch_size, device) as minibatches,
@@ -391,29 +400,6 @@ def _resolve_update_loss(
     return lr, tau, scheduled_loss
 
 
-def _resolve_pool(snapshot_pool: SnapshotPool | None, *, config: TrainConfig) -> SnapshotPool | None:
-    if snapshot_pool is not None or config.snapshot_fraction <= 0.0:
-        return snapshot_pool
-    return SnapshotPool(max_size=config.snapshot_pool_size, matching=config.snapshot_matching)
-
-
-def _update_pool(
-    pool: SnapshotPool | None,
-    agent: ActorCritic,
-    *,
-    entry: SnapshotEntry | None,
-    snap_wr: float | None,
-    update_idx: int,
-    snapshot_every: int,
-) -> None:
-    if pool is None:
-        return
-    if entry is not None and snap_wr is not None:
-        pool.record_outcome(entry.update, win_rate=snap_wr)
-    if update_idx % max(snapshot_every, 1) == 0:
-        pool.add(agent, update=update_idx)
-
-
 def train_self_play(
     agent: ActorCritic,
     optimizer: Optimizer,
@@ -429,69 +415,85 @@ def train_self_play(
     prepare_aux: PrepareAuxFn | None = None,
     on_update: UpdateCallback | None = None,
     snapshot_pool: SnapshotPool | None = None,
+    ema_weights: EmaWeights | None = None,
 ) -> list[UpdateStats]:
     """Run complete-game self-play training over `deck_source` using Jace's RL pipeline.
 
     Collects both seats under the current frozen policy (or via an injected `collect_fn`),
-    mixes optional 1-seat snapshot updates (uniform or even-odds), logs optional gradient
-    cosine agreement across consecutive updates, and invokes `on_update` per step.
+    supports optional 1-update async prefetching (`config.async_collect`), mixes optional
+    1-seat snapshot updates (uniform or even-odds), advances optional EMA shadow weights
+    after each update, logs optional gradient cosine agreement across consecutive updates,
+    and invokes `on_update` per step.
     """
     deck_source.check()
     rng = np.random.default_rng(config.seed + 101)
-    pool = _resolve_pool(snapshot_pool, config=config)
+    pool = resolve_snapshot_pool(snapshot_pool, config=config)
+    ema = resolve_ema_weights(ema_weights, agent, config=config)
     grad_tracker = GradientAgreementTracker() if config.log_grad_agreement else None
     collector: Collector | None = None
     if collect_fn is None:
         collector, active_collect = _open_local_collector(
-            agent,
-            obs_space=obs_space,
-            deck_source=deck_source,
-            config=config,
-            enable_snapshots=pool is not None,
-            rng=rng,
+            agent, obs_space=obs_space, deck_source=deck_source, config=config, enable_snapshots=pool is not None
         )
     else:
         active_collect = collect_fn
     history: list[UpdateStats] = []
     try:
-        for update_idx in range(config.start_update, config.updates + 1):
-            lr, tau, step_loss = _resolve_update_loss(
-                update_idx, optimizer=optimizer, default_loss=loss, loss_schedule=loss_schedule
-            )
-            entry = (
-                pool.sample(rng)
-                if pool is not None
-                and should_use_snapshot(update_idx, fraction=config.snapshot_fraction, pool_size=len(pool))
-                else None
-            )
-            t_collect = time.perf_counter()
-            batch = active_collect(agent, opponent_entry=entry, update_idx=update_idx)
-            collect_s = time.perf_counter() - t_collect
-            snap_wr = snapshot_win_rate(batch.rewards, batch.dones) if entry is not None else None
-            aux_loss = prepare_aux(agent, update_idx) if prepare_aux is not None else None
-            t_learn = time.perf_counter()
-            stats = update_step(
+        with RolloutScheduler(
+            active_collect, agent, collect_device=config.collect_device, async_mode=config.async_collect
+        ) as scheduler:
+            scheduler.prime(
                 agent,
-                optimizer,
-                batch=batch,
-                credit=credit,
-                select=select,
-                loss=step_loss,
-                config=config.update,
+                pool=pool,
                 rng=rng,
-                learning_seats="one" if entry is not None else "both",
-                aux_loss=aux_loss,
-                grad_tracker=grad_tracker,
+                start_update=config.start_update,
+                total_updates=config.updates,
+                snapshot_fraction=config.snapshot_fraction,
             )
-            learn_s = time.perf_counter() - t_learn
-            grad_cosine = grad_tracker.finish_update() if grad_tracker is not None else None
-            _update_pool(
-                pool, agent, entry=entry, snap_wr=snap_wr, update_idx=update_idx, snapshot_every=config.snapshot_every
-            )
-            history.append(stats)
-            if on_update is not None:
-                opp = f"snapshot@u{entry.update}" if entry is not None else "self"
-                on_update(StepRecord(update_idx, stats, collect_s, learn_s, lr, tau, opp, grad_cosine, snap_wr))
+            for update_idx in range(config.start_update, config.updates + 1):
+                lr, tau, step_loss = _resolve_update_loss(
+                    update_idx, optimizer=optimizer, default_loss=loss, loss_schedule=loss_schedule
+                )
+                batch, entry, collect_s = scheduler.next_batch(
+                    agent,
+                    pool=pool,
+                    rng=rng,
+                    update_idx=update_idx,
+                    total_updates=config.updates,
+                    snapshot_fraction=config.snapshot_fraction,
+                )
+                snap_wr = snapshot_win_rate(batch.rewards, batch.dones) if entry is not None else None
+                aux_loss = prepare_aux(agent, update_idx) if prepare_aux is not None else None
+                t_learn = time.perf_counter()
+                stats = update_step(
+                    agent,
+                    optimizer,
+                    batch=batch,
+                    credit=credit,
+                    select=select,
+                    loss=step_loss,
+                    config=config.update,
+                    rng=rng,
+                    learning_seats="one" if entry is not None else "both",
+                    aux_loss=aux_loss,
+                    grad_tracker=grad_tracker,
+                )
+                learn_s = time.perf_counter() - t_learn
+                if ema is not None:
+                    ema.update(agent)
+                grad_cosine = grad_tracker.finish_update() if grad_tracker is not None else None
+                update_snapshot_pool(
+                    pool,
+                    agent,
+                    entry=entry,
+                    snap_wr=snap_wr,
+                    update_idx=update_idx,
+                    snapshot_every=config.snapshot_every,
+                )
+                history.append(stats)
+                if on_update is not None:
+                    opp = f"snapshot@u{entry.update}" if entry is not None else "self"
+                    on_update(StepRecord(update_idx, stats, collect_s, learn_s, lr, tau, opp, grad_cosine, snap_wr))
     finally:
         if collector is not None:
             close_collector(collector)

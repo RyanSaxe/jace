@@ -13,25 +13,26 @@ import logging
 import multiprocessing as mp
 import random
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Protocol, Self
 
 import managym
 import numpy as np
 import torch
 from manabot.backends.torch.bot import evaluate_observation
-from manabot.backends.torch.policy import ActorCritic, PolicyInference
-from manabot.env.observation import ObservationSpace
-from manabot.infra.config import ModelConfig, ObservationConfig
 from managym.enums import ActionSpaceEnum
 
 from jace.eval.deals import Deal, build_deals, elemental_decks
 from jace.eval.human_decks import build_human_deals, load_human_deck_catalog
+from jace.loops.agent_factory import DecisionMemoryKind, build_agent
 from jace.loops.forks import ForkExample
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from multiprocessing.pool import Pool as ProcessPool
     from pathlib import Path
+
+    from manabot.backends.torch.policy import ActorCritic, PolicyInference
+    from manabot.env.observation import ObservationSpace
 
 __all__ = (
     "BatchedForkCollectorPool",
@@ -113,34 +114,46 @@ class _ActiveBranch:
     sampled_obs: list[tuple[dict[str, np.ndarray], int]] | None = None
 
 
-def _init_batch_worker(init_spec: tuple[int, int, Path | None]) -> None:
-    hidden_dim, attention_layers, human_decks_path = init_spec
+def _init_batch_worker(init_spec: tuple[int, int, DecisionMemoryKind, Path | None]) -> None:
+    hidden_dim, attention_layers, decision_memory, human_decks_path = init_spec
     logging.getLogger("manabot").setLevel(logging.WARNING)
     torch.set_num_threads(1)
-    obs_space = ObservationSpace(
-        ObservationConfig(policy_input_version=11, max_cards_per_player=80, max_permanents_per_player=64)
-    )
-    model_cfg = ModelConfig(
-        world="world",
+    agent, obs_space = build_agent(
         hidden_dim=hidden_dim,
         attention_layers=attention_layers,
-        num_attention_heads=4,
-        policy_film=True,
-        value_kind="categorical_wdl",
-        value_aggregation="masked_mean",
+        decision_memory=decision_memory,
+        bucketed_shapes=True,
+        live_tokens=False,
     )
-    _BATCH_WORKER.agent = ActorCritic(obs_space, model_cfg, bucketed_shapes=True, live_tokens=False)
-    _BATCH_WORKER.obs_space = obs_space
+    _BATCH_WORKER.agent, _BATCH_WORKER.obs_space = agent, obs_space
     _BATCH_WORKER.human_decks_path = human_decks_path
     _BATCH_WORKER.decks = None if human_decks_path is not None else elemental_decks()
 
 
-def _safe_step(env: managym.Env, action: int) -> tuple[managym.Observation | None, bool, bool]:
+def _engine_error_types() -> tuple[type[BaseException], ...]:
+    panic_types = tuple(cls for cls in BaseException.__subclasses__() if cls.__name__ == "PanicException")
+    return (*panic_types, RuntimeError, ValueError, KeyError, IndexError)
+
+
+class _ForkEnv(Protocol):
+    def step(self, action: int) -> tuple[managym.Observation, float, bool, bool, dict[str, object]]: ...
+    def is_game_over(self) -> bool: ...
+    def clone_env(self) -> managym.Env: ...
+
+
+def _safe_step(env: _ForkEnv, action: int) -> tuple[managym.Observation | None, bool, bool]:
     try:
         obs, _, terminated, truncated, _ = env.step(action)
-    except (RuntimeError, ValueError, KeyError, IndexError):
+    except _engine_error_types():
         return None, True, True
     return obs, bool(terminated or truncated or env.is_game_over()), False
+
+
+def _safe_clone(env: _ForkEnv) -> managym.Env | None:
+    try:
+        return env.clone_env()
+    except _engine_error_types():
+        return None
 
 
 def _batched_eval(
@@ -167,8 +180,7 @@ def _batched_eval(
             counts.append(count)
         else:
             probs, val = evaluate_observation(scope, obs_space, obs)
-            probs_out[idx] = probs
-            vals_out[idx] = float(val)
+            probs_out[idx], vals_out[idx] = probs, float(val)
 
     if encoded_list:
         stacked = {key: np.stack([item[key] for item in encoded_list], axis=0) for key in encoded_list[0]}
@@ -189,12 +201,6 @@ def _hero_win_prob(env: managym.Env, *, hero_idx: int, active_value: float) -> f
     return float(min(1.0, max(0.0, 0.5 * (signed + 1.0))))
 
 
-def _terminal_outcome_class(winner: int | None, *, seat_idx: int) -> int:
-    if winner is None:
-        return 1
-    return 2 if int(winner) == seat_idx else 0
-
-
 def _terminal_score(env: managym.Env, *, hero_idx: int, leaf_value: float | None) -> float:
     if leaf_value is not None and not env.is_game_over():
         return leaf_value
@@ -202,6 +208,43 @@ def _terminal_score(env: managym.Env, *, hero_idx: int, leaf_value: float | None
     if winner is None:
         return 0.5
     return 1.0 if int(winner) == hero_idx else 0.0
+
+
+def _maybe_harvest_root(
+    env: managym.Env,
+    obs: managym.Observation,
+    *,
+    obs_space: ObservationSpace,
+    probs: Sequence[float],
+    allowed: frozenset[str] | None,
+    sample_prob: float,
+    rng: random.Random,
+    base_seed: int,
+) -> _HarvestedRoot | None:
+    kind = _ACTION_SPACE_NAMES.get(int(obs.action_space.action_space_type), "unknown")
+    eligible = _MIN_BRANCH_ACTIONS <= len(probs) <= obs_space.encoder.max_actions and (
+        allowed is None or kind in allowed
+    )
+    if not eligible or rng.random() >= sample_prob:
+        return None
+    hero_idx = env.current_agent_index()
+    cloned = _safe_clone(env) if hero_idx is not None else None
+    if hero_idx is None or cloned is None:
+        return None
+    ranked = sorted(range(len(probs)), key=probs.__getitem__, reverse=True)
+    a0, a1 = ranked[0], ranked[1]
+    encoded = {key: np.asarray(val, dtype=np.float32) for key, val in obs_space.encode(obs).items()}
+    return _HarvestedRoot(
+        cloned,
+        encoded,
+        int(hero_idx),
+        (a0, a1),
+        (float(probs[a0]), float(probs[a1])),
+        kind,
+        int(obs.turn.turn_number),
+        len(probs),
+        base_seed,
+    )
 
 
 def _harvest_roots_from_deal(
@@ -215,36 +258,29 @@ def _harvest_roots_from_deal(
     rng: random.Random,
     base_seed: int,
 ) -> list[_HarvestedRoot]:
-    env = managym.Env(seed=deal.seed, skip_trivial=True)
-    obs, _ = env.reset(deal.game_setup())
+    use_memory = obs_space.encoder.config.max_decision_records > 0
+    env = managym.Env(seed=deal.seed, skip_trivial=True, decision_memory=use_memory)
+    try:
+        obs, _ = env.reset(deal.game_setup())
+    except _engine_error_types():
+        return []
     roots: list[_HarvestedRoot] = []
     for step_idx in range(config.max_steps):
         if env.is_game_over() or len(roots) >= remaining:
             break
         probs, _ = evaluate_observation(scope, obs_space, obs)
-        kind = _ACTION_SPACE_NAMES.get(int(obs.action_space.action_space_type), "unknown")
-        eligible = _MIN_BRANCH_ACTIONS <= len(probs) <= obs_space.encoder.max_actions and (
-            allowed is None or kind in allowed
+        root = _maybe_harvest_root(
+            env,
+            obs,
+            obs_space=obs_space,
+            probs=probs,
+            allowed=allowed,
+            sample_prob=config.sample_prob,
+            rng=rng,
+            base_seed=base_seed + step_idx * 31,
         )
-        if eligible and rng.random() < config.sample_prob:
-            hero_idx = env.current_agent_index()
-            if hero_idx is not None:
-                ranked = sorted(range(len(probs)), key=probs.__getitem__, reverse=True)
-                a0, a1 = ranked[0], ranked[1]
-                encoded = {key: np.asarray(val, dtype=np.float32) for key, val in obs_space.encode(obs).items()}
-                roots.append(
-                    _HarvestedRoot(
-                        env=env.clone_env(),
-                        encoded_obs=encoded,
-                        hero_idx=int(hero_idx),
-                        action_pair=(a0, a1),
-                        policy_pair_probs=(float(probs[a0]), float(probs[a1])),
-                        decision_kind=kind,
-                        turn=int(obs.turn.turn_number),
-                        num_actions=len(probs),
-                        base_seed=base_seed + step_idx * 31,
-                    )
-                )
+        if root is not None:
+            roots.append(root)
         action = rng.choices(range(len(probs)), weights=probs, k=1)[0]
         next_obs, is_done, is_failed = _safe_step(env, action)
         if is_done or is_failed or next_obs is None:
@@ -260,19 +296,23 @@ def _spawn_all_branches(roots: Sequence[_HarvestedRoot], *, config: BatchedForkC
         for pair_idx in range(config.playouts_per_action):
             pair_seed = root.base_seed + pair_idx * 9973
             for arm_idx, root_action in enumerate(root.action_pair):
-                clone = root.env.clone_env()
-                next_obs, is_done, is_failed = _safe_step(clone, root_action)
+                clone = _safe_clone(root.env)
+                if clone is None:
+                    next_obs, is_done, is_failed = None, True, True
+                    clone = root.env
+                else:
+                    next_obs, is_done, is_failed = _safe_step(clone, root_action)
                 branches.append(
                     _ActiveBranch(
-                        fork_idx=fork_idx,
-                        pair_idx=pair_idx,
-                        arm_idx=arm_idx,
-                        hero_idx=root.hero_idx,
-                        env=clone,
-                        obs=next_obs,
-                        rng=random.Random(pair_seed),
-                        done=is_done,
-                        failed=is_failed,
+                        fork_idx,
+                        pair_idx,
+                        arm_idx,
+                        root.hero_idx,
+                        clone,
+                        next_obs,
+                        random.Random(pair_seed),
+                        is_done,
+                        is_failed,
                         sampled_obs=[] if want_samples else None,
                     )
                 )
@@ -318,9 +358,7 @@ def _step_all_branches(
             _maybe_record_value_sample(branch, encoded=encoded, cap_per_branch=cap_per_branch)
             action = branch.rng.choices(range(len(probs)), weights=probs, k=1)[0]
             next_obs, is_done, is_failed = _safe_step(branch.env, action)
-            branch.obs = next_obs
-            branch.done = is_done
-            branch.failed = is_failed
+            branch.obs, branch.done, branch.failed = next_obs, is_done, is_failed
             branch.steps += 1
 
 
@@ -331,12 +369,8 @@ def _collect_value_samples(branches: Sequence[_ActiveBranch]) -> list[Continuati
             continue
         winner = branch.env.winner_index()
         for encoded, seat_idx in branch.sampled_obs:
-            samples.append(
-                ContinuationValueSample(
-                    encoded_obs=encoded,
-                    outcome_class=_terminal_outcome_class(winner, seat_idx=seat_idx),
-                )
-            )
+            outcome = 1 if winner is None else (2 if int(winner) == seat_idx else 0)
+            samples.append(ContinuationValueSample(encoded_obs=encoded, outcome_class=outcome))
     return samples
 
 
@@ -388,11 +422,8 @@ def _batch_worker_task(args: tuple[dict[str, np.ndarray], int, BatchedForkConfig
         catalog = load_human_deck_catalog(_BATCH_WORKER.human_decks_path)
         deals = build_human_deals(catalog, split="train", count=deal_count, seed=seed, decklists="closed")
     else:
-        decks = _BATCH_WORKER.decks if _BATCH_WORKER.decks is not None else elemental_decks()
-        deals = build_deals(decks, count=deal_count, seed=seed, decklists="closed")
-
-    rng = random.Random(seed)
-    allowed = None if config.decision_kinds is None else frozenset(config.decision_kinds)
+        deals = build_deals(_BATCH_WORKER.decks or elemental_decks(), count=deal_count, seed=seed, decklists="closed")
+    rng, allowed = random.Random(seed), (None if config.decision_kinds is None else frozenset(config.decision_kinds))
     roots: list[_HarvestedRoot] = []
     with agent.inference_scope() as scope:
         for deal_idx, deal in enumerate(deals):
@@ -416,34 +447,29 @@ def _batch_worker_task(args: tuple[dict[str, np.ndarray], int, BatchedForkConfig
 
 
 class BatchedForkCollectorPool:
-    """Persistent CPU worker pool that steps all forked branches in wide batched passes.
-
-    Spawns `num_workers` workers once on entry, harvests closed-decklist roots across
-    deals, steps every active fork clone together per ply, and returns both pairwise fork
-    examples and optional on-policy continuation value samples.
-    """
+    _hidden_dim: int
+    _attention_layers: int
+    _decision_memory: DecisionMemoryKind
+    _num_workers: int
+    _human_decks_path: Path | None
+    _pool: ProcessPool | None
 
     def __init__(
         self,
         *,
         hidden_dim: int,
         attention_layers: int,
+        decision_memory: DecisionMemoryKind = "none",
         num_workers: int = 8,
         human_decks_path: Path | None = None,
     ) -> None:
-        self._hidden_dim = hidden_dim
-        self._attention_layers = attention_layers
-        self._num_workers = max(1, num_workers)
-        self._human_decks_path = human_decks_path
-        self._pool: ProcessPool | None = None
+        self._hidden_dim, self._attention_layers = hidden_dim, attention_layers
+        self._decision_memory, self._num_workers = decision_memory, max(1, num_workers)
+        self._human_decks_path, self._pool = human_decks_path, None
 
     def __enter__(self) -> Self:
-        ctx = mp.get_context("spawn")
-        self._pool = ctx.Pool(
-            self._num_workers,
-            initializer=_init_batch_worker,
-            initargs=((self._hidden_dim, self._attention_layers, self._human_decks_path),),
-        )
+        initargs = ((self._hidden_dim, self._attention_layers, self._decision_memory, self._human_decks_path),)
+        self._pool = mp.get_context("spawn").Pool(self._num_workers, initializer=_init_batch_worker, initargs=initargs)
         return self
 
     def __exit__(self, *_: object) -> None:

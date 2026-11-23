@@ -134,6 +134,10 @@ class PolicyPlayer:
             self._scope.__exit__(None, None, None)
             self._scope = None
 
+    @property
+    def needs_decision_memory(self) -> bool:
+        return self._obs_space.encoder.config.max_decision_records > 0
+
     def evaluate(self, obs: managym.Observation) -> tuple[int, tuple[float, ...], float]:
         if self._scope is None:
             msg = "PolicyPlayer must be entered as a context manager before evaluation"
@@ -239,11 +243,16 @@ def _play_leg(
     max_actions: int,
 ) -> tuple[int | None, int, int]:
     setup = deal.game_setup(swapped=False)
-    env = managym.Env(seed=deal.seed, skip_trivial=True)
+    use_memory = bool(
+        (isinstance(seat0, PolicyPlayer) and seat0.needs_decision_memory)
+        or (isinstance(seat1, PolicyPlayer) and seat1.needs_decision_memory)
+    )
+    env = managym.Env(seed=deal.seed, skip_trivial=True, decision_memory=use_memory)
     capture = (
         ScalarCapture(
             seed=deal.seed,
             skip_trivial=True,
+            decision_memory=use_memory,
             games_path=games_path,
             record_fraction=1.0,
             context={"players": list(player_names)},

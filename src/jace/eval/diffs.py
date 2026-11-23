@@ -105,8 +105,8 @@ def _action_label(action: managym.Action) -> str:
     return kind
 
 
-def _replay_probe(probe: ProbeState) -> managym.Observation:
-    env = managym.Env(seed=probe.deal.seed, skip_trivial=True)
+def _replay_probe(probe: ProbeState, *, decision_memory: bool = False) -> managym.Observation:
+    env = managym.Env(seed=probe.deal.seed, skip_trivial=True, decision_memory=decision_memory)
     obs, _ = env.reset(probe.deal.game_setup(swapped=False))
     for action in probe.prefix_actions:
         obs, _, _, _, _ = env.step(action)
@@ -200,12 +200,13 @@ def diff_checkpoints(
     `top_k` largest total-variation shifts.
     """
     shifts: list[DecisionShift] = []
+    use_memory = obs_space.encoder.config.max_decision_records > 0
     with (
         PolicyPlayer(before, obs_space, deterministic=True) as player_before,
         PolicyPlayer(after, obs_space, deterministic=True) as player_after,
     ):
         for index, probe in enumerate(probes):
-            obs = _replay_probe(probe)
+            obs = _replay_probe(probe, decision_memory=use_memory)
             _, before_probs, before_val = player_before.evaluate(obs)
             _, after_probs, after_val = player_after.evaluate(obs)
             shifts.append(

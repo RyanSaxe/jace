@@ -8,6 +8,7 @@ without touching collection or loss code.
 
 import math
 from collections.abc import Callable
+from typing import Literal
 
 import numpy as np
 import torch
@@ -18,6 +19,7 @@ __all__ = (
     "all_rows",
     "bucketed_minibatch_order",
     "top_fraction",
+    "training_row_indexes",
 )
 
 type SelectFn = Callable[[Tensor], Tensor]
@@ -79,3 +81,24 @@ def bucketed_minibatch_order(
     buckets = [sorted_perm[start : start + minibatch_size] for start in range(0, total_rows, minibatch_size)]
     rng.shuffle(buckets)
     return np.concatenate(buckets)
+
+
+def training_row_indexes(
+    selected_mask: Tensor,
+    *,
+    filter_scope: Literal["actor", "actor_critic"],
+) -> np.ndarray:
+    """Resolve the flat rollout row indices to admit and visit during minibatch updates.
+
+    Under `filter_scope="actor"`, returns every row `[0, N)` so the critic trains on
+    the full rollout while the actor masks by `selected_mask`. Under `"actor_critic"`,
+    restricts both actor and critic to the selected high-leverage rows, falling back
+    to all rows when zero rows pass the filter.
+    """
+    total_rows = int(selected_mask.numel())
+    if filter_scope == "actor":
+        return np.arange(total_rows, dtype=np.int64)
+    selected = selected_mask.detach().reshape(-1).nonzero(as_tuple=False).flatten().cpu().numpy().astype(np.int64)
+    if selected.size == 0:
+        return np.arange(total_rows, dtype=np.int64)
+    return selected

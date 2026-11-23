@@ -38,30 +38,24 @@ from jace.eval import (
     summarize_paired_deals,
     top_card_pool,
 )
+from jace.loops.agent_factory import DecisionMemoryKind, build_agent, build_damped_rl_components
 from jace.loops.collect_pool import MultiProcessCollector, WorkerPoolConfig
 from jace.loops.entry_points import default_device_name
-from jace.loops.train_ten_decks import build_agent
+from jace.loops.fork_audit import BatchedForkSpec, add_fork_cli_args, open_batched_fork_hook
+from jace.loops.local_collector import LocalCollectorConfig, LocalShardedCollector, add_full_data_rl_args
 from jace.rl import (
-    CreditFn,
-    DampedSchedule,
-    DecaySchedule,
-    LossFn,
-    LossScheduleFn,
-    SelectFn,
+    EmaWeights,
     SnapshotPool,
     StepRecord,
     TrainConfig,
     UpdateConfig,
-    all_rows,
-    damped_policy_loss,
-    gae_wdl,
-    top_fraction,
     train_self_play,
 )
 from jace.runs import (
     RunLayout,
     academy_commands,
     append_metric,
+    append_train_metric,
     create_run,
     load_resume_state,
     save_forensics,
@@ -99,9 +93,11 @@ class FullDataConfig:
     max_grad_norm: float = 0.267
     hidden_dim: int = 160
     attention_layers: int = 2
+    decision_memory: DecisionMemoryKind = "none"
     lam_policy: float = 0.5
     lam_value: float = 0.8
     select_kind: str = "top50"
+    filter_scope: Literal["actor", "actor_critic"] = "actor"
     min_advantage: float = 0.01
     clip: float = 0.2
     collection_kl: float = 0.1
@@ -109,12 +105,15 @@ class FullDataConfig:
     value_coef: float = 1.0
     schedule_kind: str = "decay"
     schedule_decay: float = 9.0
+    ema: float | None = None
     snapshot_fraction: float = 0.25
     snapshot_every: int = 10
     snapshot_pool_size: int = 16
     snapshot_matching: Literal["uniform", "even_odds"] = "even_odds"
     log_grad_agreement: bool = True
     collect_workers: int = 8
+    native_workers: Literal[1, 2, 4] = 1
+    async_collect: bool = False
     eval_workers: int = 8
     shard_size: int = 512
     shard_refresh_every: int = 50
@@ -130,43 +129,8 @@ class FullDataConfig:
     record_train_fraction: float = 0.01
     init_checkpoint: Path | None = None
     resume: bool = False
+    fork: BatchedForkSpec = field(default_factory=BatchedForkSpec)
     seed: int = 1
-
-
-def _build_rl_components(cfg: FullDataConfig) -> tuple[CreditFn, SelectFn, LossFn, LossScheduleFn | None]:
-    credit: CreditFn = gae_wdl(gamma=1.0, lam_policy=cfg.lam_policy, lam_value=cfg.lam_value)
-    select: SelectFn = (
-        all_rows
-        if cfg.select_kind == "all"
-        else top_fraction(0.5 if cfg.select_kind == "top50" else 0.25, minimum=cfg.min_advantage)
-    )
-    default_loss = damped_policy_loss(
-        clip=cfg.clip, collection_kl=cfg.collection_kl, magnet_kl=cfg.magnet_kl, value_coef=cfg.value_coef
-    )
-    if cfg.schedule_kind == "none":
-        return credit, select, default_loss, None
-    schedule: DampedSchedule | DecaySchedule = (
-        DecaySchedule(
-            total_updates=cfg.updates,
-            lr_initial=cfg.learning_rate,
-            tau_initial=cfg.magnet_kl,
-            decay=cfg.schedule_decay,
-        )
-        if cfg.schedule_kind == "decay"
-        else DampedSchedule(total_updates=cfg.updates, lr_max=cfg.learning_rate, tau_scale=cfg.magnet_kl)
-    )
-
-    def _loss_for_update(update_idx: int) -> tuple[float, float, LossFn]:
-        lr, tau = schedule.rates(update_idx)
-        return (
-            lr,
-            tau,
-            damped_policy_loss(
-                clip=cfg.clip, collection_kl=cfg.collection_kl, magnet_kl=tau, value_coef=cfg.value_coef
-            ),
-        )
-
-    return credit, select, default_loss, _loss_for_update
 
 
 def _evaluate_full_data(
@@ -182,18 +146,28 @@ def _evaluate_full_data(
     cfg: FullDataConfig,
     optimizer: torch.optim.Optimizer,
     snapshot_pool: SnapshotPool | None,
+    ema_weights: EmaWeights | None,
     record_games: bool,
 ) -> dict[str, object]:
     eval_agent = copy.deepcopy(agent).to("cpu").eval()
+    if ema_weights is not None:
+        ema_weights.copy_to(eval_agent)
     ckpt_path, _ = save_policy_checkpoint(
         eval_agent,
         obs_space=obs_space,
         layout=layout,
         iteration=iteration,
         deterministic=False,
-        extra={"iteration": iteration},
+        extra={"iteration": iteration, "ema": cfg.ema},
     )
-    save_resume_state(layout, iteration=iteration, optimizer=optimizer, snapshot_pool=snapshot_pool)
+    save_resume_state(
+        layout,
+        iteration=iteration,
+        optimizer=optimizer,
+        snapshot_pool=snapshot_pool,
+        agent=agent,
+        ema=ema_weights,
+    )
     paired_det = summarize_paired_deals(
         play_deals_parallel(
             ckpt_path,
@@ -266,36 +240,6 @@ def _open_or_create_layout(cfg: FullDataConfig, *, catalog: HumanDeckCatalog, pa
     return create_run(runs_dir=cfg.runs_dir, experiment=cfg.experiment, run_id=cfg.run_id, config=run_config)
 
 
-def _log_train_step(layout: RunLayout, record: StepRecord) -> None:
-    stats = record.stats
-    row: dict[str, object] = {
-        "kind": "train",
-        "update": record.update,
-        "opponent": record.opponent,
-        "lr": round(record.learning_rate, 7),
-        "tau": round(record.magnet_tau, 6),
-        "rows": stats.rows,
-        "selected_rows": stats.selected_rows,
-        "completed_games": stats.completed_games,
-        "policy_loss": round(stats.policy_loss, 5),
-        "value_loss": round(stats.value_loss, 5),
-        "collection_kl": round(stats.collection_kl, 5),
-        "magnet_kl": round(stats.magnet_kl, 5),
-        "entropy": round(stats.entropy, 5),
-        "clip_fraction": round(stats.clip_fraction, 5),
-        "grad_norm": round(stats.grad_norm, 4),
-        "mean_advantage_abs": round(stats.mean_advantage_abs, 5),
-        "collect_s": round(record.collect_s, 3),
-        "learn_s": round(record.learn_s, 3),
-        "tps": round(stats.rows / max(record.collect_s + record.learn_s, 1e-6), 1),
-    }
-    if record.grad_cosine is not None:
-        row["grad_cosine"] = round(record.grad_cosine, 5)
-    if record.snapshot_win_rate is not None:
-        row["snapshot_win_rate"] = round(record.snapshot_win_rate, 4)
-    append_metric(layout, row)
-
-
 def _init_training_state(
     cfg: FullDataConfig,
     *,
@@ -303,12 +247,22 @@ def _init_training_state(
     agent: ActorCritic,
     optimizer: torch.optim.Optimizer,
     pool: SnapshotPool | None,
+    ema_weights: EmaWeights | None,
 ) -> int:
     if cfg.resume and (layout.checkpoints_dir / _RESUME_FILENAME).exists():
-        done = load_resume_state(layout, agent=agent, optimizer=optimizer, snapshot_pool=pool, device=cfg.learn_device)
+        done = load_resume_state(
+            layout,
+            agent=agent,
+            optimizer=optimizer,
+            snapshot_pool=pool,
+            ema=ema_weights,
+            device=cfg.learn_device,
+        )
         return done + 1
     if cfg.init_checkpoint is not None:
         agent.load_state_dict(load_checkpoint(str(cfg.init_checkpoint))[0].state_dict())
+        if ema_weights is not None:
+            ema_weights.sync_from(agent)
     return 1
 
 
@@ -332,7 +286,11 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
         catalog, count=min(cfg.shard_size, 64), seed=cfg.seed, allowed_cards=allowed_cards
     )
     agent, obs_space = build_agent(
-        hidden_dim=cfg.hidden_dim, attention_layers=cfg.attention_layers, bucketed_shapes=True, live_tokens=False
+        hidden_dim=cfg.hidden_dim,
+        attention_layers=cfg.attention_layers,
+        decision_memory=cfg.decision_memory,
+        bucketed_shapes=True,
+        live_tokens=False,
     )
     layout = _open_or_create_layout(cfg, catalog=catalog, params=sum(p.numel() for p in agent.parameters()))
     optimizer = torch.optim.Adam(agent.parameters(), lr=cfg.learning_rate)
@@ -341,9 +299,25 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
         if cfg.snapshot_fraction > 0.0
         else None
     )
-    start_update = _init_training_state(cfg, layout=layout, agent=agent, optimizer=optimizer, pool=pool)
+    ema_weights = EmaWeights(agent, decay=cfg.ema) if cfg.ema is not None else None
+    start_update = _init_training_state(
+        cfg, layout=layout, agent=agent, optimizer=optimizer, pool=pool, ema_weights=ema_weights
+    )
     baseline = copy.deepcopy(agent).to("cpu").eval()
-    credit, select, loss, loss_schedule = _build_rl_components(cfg)
+    credit, select, loss, loss_schedule = build_damped_rl_components(
+        updates=cfg.updates,
+        learning_rate=cfg.learning_rate,
+        lam_policy=cfg.lam_policy,
+        lam_value=cfg.lam_value,
+        select_kind=cfg.select_kind,
+        min_advantage=cfg.min_advantage,
+        clip=cfg.clip,
+        collection_kl=cfg.collection_kl,
+        magnet_kl=cfg.magnet_kl,
+        value_coef=cfg.value_coef,
+        schedule_kind=cfg.schedule_kind,
+        schedule_decay=cfg.schedule_decay,
+    )
     held_out_deals = build_human_deals(catalog, split="held_out", count=cfg.eval_deals, seed=cfg.seed + 20_000)
     forensics_deals = held_out_deals[: cfg.forensics_deals]
     probes = capture_probes(forensics_deals, max_probes=cfg.probe_count)
@@ -360,12 +334,13 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
         cfg=cfg,
         optimizer=optimizer,
         snapshot_pool=pool,
+        ema_weights=ema_weights,
     )
     if start_update == 1:
         run_eval(iteration=0, record_games=False)
 
     def on_update(record: StepRecord) -> None:
-        _log_train_step(layout, record)
+        append_train_metric(layout, record)
         if record.update % cfg.eval_every == 0 or record.update == cfg.updates:
             run_eval(iteration=record.update, record_games=True)
 
@@ -375,11 +350,14 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
         steps_per_env=cfg.steps_per_env,
         seed=cfg.seed,
         collect_device=cfg.collect_device,
+        native_workers=cfg.native_workers,
+        async_collect=cfg.async_collect,
         update=UpdateConfig(
             epochs=cfg.epochs,
             minibatch_size=cfg.minibatch_size,
             max_grad_norm=cfg.max_grad_norm,
             normalize_advantages=False,
+            filter_scope=cfg.filter_scope,
             device=cfg.learn_device,
         ),
         games_path=layout.train_games_path(),
@@ -390,6 +368,7 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
         snapshot_matching=cfg.snapshot_matching,
         start_update=start_update,
         log_grad_agreement=cfg.log_grad_agreement,
+        ema=cfg.ema,
     )
     with ExitStack() as stack:
         collect_fn = (
@@ -401,6 +380,7 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
                         steps_per_env=cfg.steps_per_env,
                         hidden_dim=cfg.hidden_dim,
                         attention_layers=cfg.attention_layers,
+                        decision_memory=cfg.decision_memory,
                         seed=cfg.seed,
                         games_path=layout.train_games_path(),
                         record_fraction=cfg.record_train_fraction,
@@ -416,7 +396,40 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
                 )
             ).collect
             if cfg.collect_workers > 0
-            else None
+            else stack.enter_context(
+                LocalShardedCollector(
+                    LocalCollectorConfig(
+                        num_envs=cfg.num_envs,
+                        steps_per_env=cfg.steps_per_env,
+                        collect_device=cfg.collect_device,
+                        native_workers=cfg.native_workers,
+                        seed=cfg.seed,
+                        games_path=layout.train_games_path(),
+                        record_fraction=cfg.record_train_fraction,
+                        enable_snapshots=cfg.snapshot_fraction > 0.0,
+                        shard_size=cfg.shard_size,
+                        shard_refresh_every=cfg.shard_refresh_every,
+                        card_pool_size=cfg.card_pool_size,
+                        curriculum_pools=curriculum_pools,
+                        curriculum_blend_updates=cfg.curriculum_blend_updates,
+                        start_update=start_update,
+                    ),
+                    catalog=catalog,
+                    obs_space=obs_space,
+                    template_agent=agent,
+                )
+            ).collect
+        )
+        prepare_aux = open_batched_fork_hook(
+            stack,
+            cfg.fork,
+            hidden_dim=cfg.hidden_dim,
+            attention_layers=cfg.attention_layers,
+            decision_memory=cfg.decision_memory,
+            decks_path=cfg.decks_path,
+            learn_device=cfg.learn_device,
+            seed=cfg.seed + 50_000,
+            layout=layout,
         )
         train_self_play(
             agent,
@@ -429,8 +442,10 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
             loss_schedule=loss_schedule,
             config=train_cfg,
             collect_fn=collect_fn,
+            prepare_aux=prepare_aux,
             on_update=on_update,
             snapshot_pool=pool,
+            ema_weights=ema_weights,
         )
     return layout
 
@@ -448,30 +463,7 @@ def _parse_args(argv: Sequence[str] | None) -> FullDataConfig:
     parser.add_argument("--minibatch-size", type=int, default=1024)
     parser.add_argument("--lr", dest="learning_rate", type=float, default=2.5e-4)
     parser.add_argument("--max-grad-norm", type=float, default=0.267)
-    parser.add_argument("--hidden-dim", type=int, default=160)
-    parser.add_argument("--attention-layers", type=int, default=2)
-    parser.add_argument("--lam-policy", type=float, default=0.5)
-    parser.add_argument("--lam-value", type=float, default=0.8)
-    parser.add_argument("--select", dest="select_kind", choices=("top25", "top50", "all"), default="top50")
-    parser.add_argument("--min-advantage", type=float, default=0.01)
-    parser.add_argument("--clip", type=float, default=0.2)
-    parser.add_argument("--collection-kl", type=float, default=0.1)
-    parser.add_argument("--magnet-kl", type=float, default=0.01)
-    parser.add_argument("--value-coef", type=float, default=1.0)
-    parser.add_argument("--schedule-kind", choices=("damped", "decay", "none"), default="decay")
-    parser.add_argument("--schedule-decay", type=float, default=9.0)
-    parser.add_argument("--snapshot-fraction", type=float, default=0.25)
-    parser.add_argument("--snapshot-every", type=int, default=10)
-    parser.add_argument("--snapshot-pool-size", type=int, default=16)
-    parser.add_argument("--snapshot-matching", choices=("uniform", "even_odds"), default="even_odds")
-    parser.add_argument("--log-grad-agreement", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--collect-workers", type=int, default=8)
-    parser.add_argument("--eval-workers", type=int, default=8)
-    parser.add_argument("--shard-size", type=int, default=512)
-    parser.add_argument("--shard-refresh-every", type=int, default=50)
-    parser.add_argument("--card-pool-size", type=int, default=None)
-    parser.add_argument("--curriculum-stages", type=str, default=None)
-    parser.add_argument("--curriculum-blend-updates", type=int, default=10)
+    add_full_data_rl_args(parser)
     parser.add_argument("--collect-device", default="cpu")
     parser.add_argument("--learn-device", default=default_device_name())
     parser.add_argument("--eval-every", type=int, default=40)
@@ -481,8 +473,12 @@ def _parse_args(argv: Sequence[str] | None) -> FullDataConfig:
     parser.add_argument("--record-train-fraction", type=float, default=0.01)
     parser.add_argument("--init-checkpoint", type=Path, default=None)
     parser.add_argument("--resume", action="store_true", default=False)
+    add_fork_cli_args(parser)
     parser.add_argument("--seed", type=int, default=1)
-    return FullDataConfig(**vars(parser.parse_args(argv)))
+    ns = parser.parse_args(argv)
+    fork_spec = BatchedForkSpec.from_namespace(ns)
+    raw = {key: val for key, val in vars(ns).items() if not key.startswith("fork")}
+    return FullDataConfig(**raw, fork=fork_spec)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -23,13 +23,15 @@ if TYPE_CHECKING:
     from manabot.backends.torch.policy import ActorCritic
     from manabot.env.observation import ObservationSpace
 
-    from jace.rl.pool import SnapshotPool
+    from jace.rl.ema import EmaWeights
+    from jace.rl.pool import SnapshotPool, StepRecord
 
 __all__ = (
     "RunExistsError",
     "RunLayout",
     "academy_commands",
     "append_metric",
+    "append_train_metric",
     "create_run",
     "load_resume_state",
     "save_forensics",
@@ -133,6 +135,36 @@ def append_metric(layout: RunLayout, record: Mapping[str, object]) -> None:
         handle.write(line)
 
 
+def append_train_metric(layout: RunLayout, record: StepRecord) -> None:
+    stats = record.stats
+    row: dict[str, object] = {
+        "kind": "train",
+        "update": record.update,
+        "opponent": record.opponent,
+        "lr": round(record.learning_rate, 7),
+        "tau": round(record.magnet_tau, 6),
+        "rows": stats.rows,
+        "selected_rows": stats.selected_rows,
+        "completed_games": stats.completed_games,
+        "policy_loss": round(stats.policy_loss, 5),
+        "value_loss": round(stats.value_loss, 5),
+        "collection_kl": round(stats.collection_kl, 5),
+        "magnet_kl": round(stats.magnet_kl, 5),
+        "entropy": round(stats.entropy, 5),
+        "clip_fraction": round(stats.clip_fraction, 5),
+        "grad_norm": round(stats.grad_norm, 4),
+        "mean_advantage_abs": round(stats.mean_advantage_abs, 5),
+        "collect_s": round(record.collect_s, 3),
+        "learn_s": round(record.learn_s, 3),
+        "tps": round(stats.rows / max(record.collect_s + record.learn_s, 1e-6), 1),
+    }
+    if record.grad_cosine is not None:
+        row["grad_cosine"] = round(record.grad_cosine, 5)
+    if record.snapshot_win_rate is not None:
+        row["snapshot_win_rate"] = round(record.snapshot_win_rate, 4)
+    append_metric(layout, row)
+
+
 def save_forensics(layout: RunLayout, *, iteration: int, report: Mapping[str, object]) -> Path:
     path = layout.forensics_path(iteration)
     path.write_text(json.dumps(dict(report), indent=2, sort_keys=True) + "\n")
@@ -154,6 +186,8 @@ def save_resume_state(
     iteration: int,
     optimizer: torch.optim.Optimizer,
     snapshot_pool: SnapshotPool | None,
+    agent: ActorCritic | None = None,
+    ema: EmaWeights | None = None,
 ) -> Path:
     payload: dict[str, object] = {
         "iteration": iteration,
@@ -161,6 +195,10 @@ def save_resume_state(
         "optimizer": optimizer.state_dict(),
         "snapshot_pool": None if snapshot_pool is None else snapshot_pool.export_state(),
     }
+    if agent is not None:
+        payload["live_agent_state"] = {key: val.detach().cpu().clone() for key, val in agent.state_dict().items()}
+    if ema is not None:
+        payload["ema_state"] = ema.export_state()
     target = layout.checkpoints_dir / _RESUME_FILENAME
     partial = target.with_suffix(".pt.partial")
     torch.save(payload, partial)
@@ -174,6 +212,7 @@ def load_resume_state(
     agent: ActorCritic,
     optimizer: torch.optim.Optimizer,
     snapshot_pool: SnapshotPool | None,
+    ema: EmaWeights | None = None,
     device: str | torch.device | None = None,
 ) -> int:
     path = layout.checkpoints_dir / _RESUME_FILENAME
@@ -182,12 +221,26 @@ def load_resume_state(
         raise FileNotFoundError(msg)
     state = torch.load(path, map_location="cpu", weights_only=False)
     iteration = int(state["iteration"])
-    ckpt_path = Path(str(state["checkpoint"]))
-    agent.load_state_dict(load_checkpoint(str(ckpt_path))[0].state_dict())
+    live_state = state.get("live_agent_state")
+    if isinstance(live_state, Mapping):
+        agent.load_state_dict(live_state)
+    else:
+        ckpt_path = Path(str(state["checkpoint"]))
+        agent.load_state_dict(load_checkpoint(str(ckpt_path))[0].state_dict())
     if device is not None:
         agent.to(device)
     optimizer.load_state_dict(state["optimizer"])
     pool_state = state.get("snapshot_pool")
     if snapshot_pool is not None and isinstance(pool_state, Mapping):
         snapshot_pool.restore_state(pool_state)
+    _restore_ema_state(ema, state.get("ema_state"), agent=agent)
     return iteration
+
+
+def _restore_ema_state(ema: EmaWeights | None, raw_state: object, *, agent: ActorCritic) -> None:
+    if ema is None:
+        return
+    if isinstance(raw_state, Mapping):
+        ema.restore_state(raw_state)
+    else:
+        ema.sync_from(agent)

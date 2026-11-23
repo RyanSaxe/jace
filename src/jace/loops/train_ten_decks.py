@@ -14,12 +14,12 @@ from collections.abc import Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import torch
 from manabot.backends.torch.checkpoint import load_checkpoint
 from manabot.backends.torch.policy import ActorCritic
 from manabot.env.observation import ObservationSpace
-from manabot.infra.config import ModelConfig, ObservationConfig
 from manabot.training.decks import UniformDecks
 
 from jace.eval import (
@@ -31,6 +31,7 @@ from jace.eval import (
     elemental_decks,
     run_forensics,
 )
+from jace.loops.agent_factory import build_agent
 from jace.loops.collect_pool import MultiProcessCollector, WorkerPoolConfig
 from jace.loops.entry_points import default_device_name
 from jace.loops.forks import ForkCollectorPool, ForkConfig
@@ -102,6 +103,8 @@ class LabConfig:
     snapshot_every: int = 10
     snapshot_pool_size: int = 16
     collect_workers: int = 0
+    native_workers: Literal[1, 2, 4] = 1
+    async_collect: bool = False
     collect_device: str = "cpu"
     learn_device: str = field(default_factory=default_device_name)
     eval_every: int = 25
@@ -111,24 +114,6 @@ class LabConfig:
     init_checkpoint: Path | None = None
     fork_config: ForkConfig | None = None
     seed: int = 1
-
-
-def build_agent(
-    *, hidden_dim: int = 64, attention_layers: int = 2, bucketed_shapes: bool = True, live_tokens: bool = False
-) -> tuple[ActorCritic, ObservationSpace]:
-    obs_space = ObservationSpace(
-        ObservationConfig(policy_input_version=11, max_cards_per_player=80, max_permanents_per_player=64)
-    )
-    model_cfg = ModelConfig(
-        world="world",
-        hidden_dim=hidden_dim,
-        attention_layers=attention_layers,
-        num_attention_heads=4,
-        policy_film=True,
-        value_kind="categorical_wdl",
-        value_aggregation="masked_mean",
-    )
-    return ActorCritic(obs_space, model_cfg, bucketed_shapes=bucketed_shapes, live_tokens=live_tokens), obs_space
 
 
 def _build_select(cfg: LabConfig) -> SelectFn:
@@ -388,6 +373,8 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
         steps_per_env=cfg.steps_per_env,
         seed=cfg.seed,
         collect_device=cfg.collect_device,
+        native_workers=cfg.native_workers,
+        async_collect=cfg.async_collect,
         update=UpdateConfig(
             epochs=cfg.epochs,
             minibatch_size=cfg.minibatch_size,
@@ -464,6 +451,8 @@ def _parse_args(argv: Sequence[str] | None) -> LabConfig:
     parser.add_argument("--snapshot-every", type=int, default=10)
     parser.add_argument("--snapshot-pool-size", type=int, default=16)
     parser.add_argument("--collect-workers", type=int, default=0)
+    parser.add_argument("--native-workers", type=int, choices=(1, 2, 4), default=1)
+    parser.add_argument("--async-collect", action="store_true", default=False)
     parser.add_argument("--collect-device", default="cpu")
     parser.add_argument("--learn-device", default=default_device_name())
     parser.add_argument("--eval-every", type=int, default=25)
