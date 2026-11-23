@@ -6,17 +6,10 @@ games come from the free 17Lands public datasets. The other functions take
 the tables `read_set` returns rather than a set code, so they also work on
 a small table made by hand.
 
-This package also makes the card encoder's inputs. `card_table` reads each
-card's printed facts, `text_vectors` embeds each card's printed text with a
-language model, and `program_tokens` turns each card's engine program into
-token ids. This package does not import the drafter or the game engine.
-Instead, a loop in `jace.loops` passes in the engine's card programs, keyed
-by card name, and the engine's vocabulary. The loop then gives the
-resulting tensors to a model.
-
-The encoder that runs a Hugging Face model is in `jace.data.hugging_face`.
-This package does not import that module, so importing `jace.data` does not
-load `transformers`.
+`program_tokens` turns each card's engine program into token ids for
+`CardEncoder`. This package does not import the drafter or the game engine
+directly; `jace.data.catalog` reads the engine's card catalog and vocabulary,
+and a loop in `jace.loops` passes the resulting tensors to a model.
 """
 
 from jace.data.cards import SetCards, card_table
@@ -25,11 +18,9 @@ from jace.data.drafts import RESULT_FLOOR, HumanDrafts, PoolAtSecondPickError, l
 from jace.data.programs import ProgramTooLongError, program_tokens
 from jace.data.seventeen_lands import SetData, SetNotDownloadedError, read_set
 from jace.data.store import CardColumnsError, StaleCacheError
-from jace.data.text import TEXT_MODEL, TextEncoder, card_texts, text_vectors
 
 __all__ = (
     "RESULT_FLOOR",
-    "TEXT_MODEL",
     "CardColumnsError",
     "HumanDecks",
     "HumanDrafts",
@@ -39,12 +30,9 @@ __all__ = (
     "SetData",
     "SetNotDownloadedError",
     "StaleCacheError",
-    "TextEncoder",
     "card_table",
-    "card_texts",
     "load_decks",
     "load_drafts",
     "program_tokens",
     "read_set",
-    "text_vectors",
 )

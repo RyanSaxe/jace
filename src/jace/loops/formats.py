@@ -68,12 +68,11 @@ def limited_format(set_code: str) -> LimitedFormat:
 
 
 def deck_rules(limited: LimitedFormat, cards: SetCards) -> BuildRules:
-    is_land = cards.printed[:, cards.printed_names.index("type_land")] > 0
     basics = cards.pool.of_rarity(Rarity.BASIC)
     return BuildRules(
         size=limited.deck_size,
         basics=basics,
-        nonbasic_lands=frozenset(is_land.nonzero().squeeze(1).tolist()) - frozenset(basics),
+        nonbasic_lands=frozenset(cards.is_land.nonzero().squeeze(1).tolist()) - frozenset(basics),
         min_lands=limited.min_lands,
         max_lands=limited.max_lands,
     )

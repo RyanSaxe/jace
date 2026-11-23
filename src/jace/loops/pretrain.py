@@ -15,15 +15,13 @@ its loss. One penalizes taking rare cards and the other taking costly cards.
 Here they are hand-added priors, off unless `pretrain_drafter` is given a
 `PickPriors`.
 
-The card encoder reads each card's text, engine program and printed facts. The
-pick loss trains it together with the drafter, each with its own optimizer. The
-encoder is saved as the run's "embedding" checkpoint, which `pretrain_decks`
-and the self-play loops read frozen.
+The card encoder reads each card's engine program. The pick loss trains it
+together with the drafter, each with its own optimizer. The encoder is saved as
+the run's "embedding" checkpoint, which `pretrain_decks` and the self-play loops
+read frozen.
 
 Run it with `uv run python -m jace.loops.pretrain --help`. The card set must
-already be downloaded with `uv run spells add <set>`. A run on a data folder
-without cached text vectors loads the text model from Hugging Face, and
-downloads it first if this machine has no copy.
+already be downloaded with `uv run spells add <set>`.
 """
 
 import argparse
@@ -40,16 +38,16 @@ from torch import Tensor
 from torch.optim import Optimizer
 
 from jace.cards import FIRST_PROGRAM_TOKEN, CardEncoder, Rarity, own_parameters
-from jace.data import HumanDrafts, SetCards, card_table, load_drafts, read_set
-from jace.data.catalog import engine_cards, program_vocabulary
+from jace.data import HumanDrafts, SetCards, load_drafts, program_tokens, read_set
+from jace.data.catalog import program_vocabulary
 from jace.draft import DrafterModel
 from jace.loops.entry_points import (
     ADAM_BETAS,
     RunArguments,
     add_card_flags,
     add_run_flags,
-    card_inputs,
     device_named,
+    set_cards,
     start_run,
 )
 from jace.loops.formats import limited_format
@@ -421,15 +419,15 @@ def main(argv: Sequence[str]) -> None:
     device = device_named(arguments.device)
     torch.manual_seed(arguments.seed)
     data = read_set(arguments.set_code)
-    programs = {card.name: card.program for card in engine_cards()}
-    cards = card_table(data.attributes, data.statistics, programs=programs)
+    cards = set_cards(data)
     drafts = load_drafts(
         data.picks, pool=cards.pool, cache_dir=arguments.data_dir, held_out_share=arguments.held_out_share
     )
+    vocabulary = program_vocabulary()
     encoder = CardEncoder(
-        card_inputs(data, cards, data_dir=arguments.data_dir),
+        program_tokens(cards.pool, vocabulary=vocabulary),
         width=arguments.card_width,
-        program_vocabulary=FIRST_PROGRAM_TOKEN + len(program_vocabulary()),
+        program_vocabulary=FIRST_PROGRAM_TOKEN + len(vocabulary),
         program_layers=arguments.card_layers,
         heads=arguments.card_heads,
     )

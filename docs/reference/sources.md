@@ -374,9 +374,9 @@ hidden-card win-chance critic) are kept with notes on what v2 does instead.
   features. Training the head first, then everything, did better out of
   distribution.
 
-  In jace, the language model that embeds card text stays frozen. The
-  learning deck score trains with a KL pull toward the human-trained deck
-  score.
+  In jace, downstream deck models read a frozen `CardTable` from the
+  pretrained card encoder, and the learning deck score trains with a KL pull
+  toward the human-trained deck score.
 
 - [Actor-Critic Algorithms](https://papers.nips.cc/paper/1786-actor-critic-algorithms).
   Konda and Tsitsiklis, 1999. Actor-critic methods are two-time-scale
@@ -593,21 +593,24 @@ hidden-card win-chance critic) are kept with notes on what v2 does instead.
   Narasimhan, Barzilay and Jaakkola, 2017. Text descriptions of entities
   let a policy transfer to new domains.
 
-  In jace, the card encoder reads each card's printed text.
+  Decided against: jace encodes each card from its `managym` engine program
+  tokens instead of its printed text, since the program defines the card's
+  exact mechanics in the engine's own vocabulary.
 
 - [RTFM: Generalising to Novel Environment Dynamics via Reading](https://arxiv.org/abs/1910.08210).
   Zhong, Rocktäschel and Grefenstette, 2019. Generated games and manuals
   force an agent to read rather than memorize, and it generalizes to new
   dynamics.
 
-  In jace, a card's vector depends only on what is known of the card before
-  anyone plays it, and no card has an identity of its own.
+  In jace, a card's vector depends only on its engine program, which is
+  known before anyone plays it, and no card has an identity of its own.
 
 - [Grounding Language to Entities and Dynamics for Generalization in Reinforcement Learning](https://arxiv.org/abs/2101.07393).
   Hanjie, Zhong and Narasimhan, 2021. EMMA attends from each entity to its
   entry in a text manual and generalizes to unseen games.
 
-  In jace, each card's vector is built from the embedding of its own text.
+  Decided against: jace builds each card's vector from its engine program
+  tokens rather than a text manual embedding.
 
 - [A Survey of Zero-shot Generalisation in Deep Reinforcement Learning](https://arxiv.org/abs/2111.09794).
   Kirk, Zhang, Grefenstette and Rocktäschel, 2021. Generalization is
@@ -620,7 +623,8 @@ hidden-card win-chance critic) are kept with notes on what v2 does instead.
   Luketina et al., 2019. It surveys agents that use language, including
   agents that read descriptions of entities.
 
-  In jace, it is background for reading cards through their text.
+  Decided against: jace reads each card through its structured engine
+  program instead of natural-language rules text.
 
 - [DraftFM: A FoundationModel for Day-Zero Drafting in Magic: The Gathering](https://arxiv.org/abs/2608.19568).
   Ward, 2026. Every card enters the model as a frozen vector of its printed
@@ -629,9 +633,9 @@ hidden-card win-chance critic) are kept with notes on what v2 does instead.
   picks from 29 sets, it agreed with 50.8%, 60.4% and 56.7% of human picks
   on three sets it never saw. Its code is at [brianward92/mtga](https://github.com/brianward92/mtga).
 
-  In jace, the card encoder reads a card's printed text, engine program and
-  printed facts, and no card vector is built from a 17Lands statistic.
-  DraftFM is a point of comparison, not a target.
+  In jace, the card encoder reads each card's engine program alone, with no
+  17Lands statistics and no fixed per-card IDs. DraftFM is a point of
+  comparison, not a target.
 
 - [Learning With Generalised Card Representations for "Magic: The Gathering"](https://arxiv.org/abs/2407.05879).
   Bertram, Fürnkranz and Müller, 2024. The choice of card representation
@@ -655,8 +659,8 @@ hidden-card win-chance critic) are kept with notes on what v2 does instead.
   0.0125 HR@10 against 0.5899 for a text-based one. On known items a frozen
   text encoder with a trained head came close to IDs.
 
-  In jace, a card's vector is built from its content with a frozen text
-  model, and no card has an ID vector.
+  In jace, a card's vector is built from its engine program rather than a
+  learned per-card ID (replacing an earlier frozen text encoder).
 
 - [Let It Go? Not Quite: Addressing Item Cold Start in Sequential Recommendations with Content-Based Initialization](https://arxiv.org/abs/2507.19473).
   Pembek, Fatkulin, Klenitskiy and Vasilev, 2025. A per-item table started
@@ -725,8 +729,8 @@ hidden-card win-chance critic) are kept with notes on what v2 does instead.
 - [MTGJSON](https://mtgjson.com/). MTGJSON. Card data for every Magic
   card, including rules text.
 
-  In jace, it supplies the card attributes through spells, including the
-  rules text the card encoder embeds.
+  In jace, it supplies set card attributes (rarity, land type, and mana
+  value) through spells.
 
 - [bstaple1/MTGA_Draft_17Lands](https://github.com/bstaple1/MTGA_Draft_17Lands).
   bstaple1, MIT licence. A draft overlay whose README notes that Arena's log
@@ -744,13 +748,14 @@ hidden-card win-chance critic) are kept with notes on what v2 does instead.
   sentence-transformers, Apache 2.0. A small sentence embedder that gives
   384 numbers per text.
 
-  In jace, it is `TEXT_MODEL`, the frozen model that embeds each card's
-  text for the card encoder.
+  Decided against: jace unified its card encoder on `managym` engine program
+  tokens alone and removed frozen text embeddings.
 
 - [Hugging Face Transformers](https://github.com/huggingface/transformers).
   Hugging Face, Apache 2.0, version 5.22.2 or later.
 
-  In jace, `hugging_face_encoder` runs the text model with it.
+  Decided against: removed alongside `all-MiniLM-L6-v2` when the card
+  encoder moved to engine program tokens alone.
 
 - [PyTorch](https://pytorch.org/). The PyTorch Foundation, version 2.10 or
   later.

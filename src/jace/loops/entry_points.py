@@ -1,7 +1,7 @@
-"""Shared CLI flags, card-input loading, and run initialization for pretraining loops.
+"""Shared CLI flags, card-pool loading, and run initialization for pretraining loops.
 
 Pretraining entry points (`pretrain` and `pretrain_decks`) share run-folder
-creation, device selection, card-encoder input loading, and saved card-table
+creation, device selection, set card-pool loading, and saved card-table
 loading. Keeping these helpers here keeps each pretraining script focused on
 its own model and loss.
 """
@@ -13,18 +13,9 @@ from pathlib import Path
 
 import torch
 
-from jace.cards import FIRST_PROGRAM_TOKEN, CardEncoder, CardInputs, CardTable, frozen_table
-from jace.data import (
-    TEXT_MODEL,
-    SetCards,
-    SetData,
-    card_table,
-    card_texts,
-    program_tokens,
-    text_vectors,
-)
+from jace.cards import FIRST_PROGRAM_TOKEN, CardEncoder, CardPool, CardTable, frozen_table
+from jace.data import SetCards, SetData, card_table, program_tokens
 from jace.data.catalog import engine_cards, program_vocabulary
-from jace.data.hugging_face import hugging_face_encoder
 from jace.tracking import (
     CheckpointRef,
     Clock,
@@ -41,7 +32,6 @@ __all__ = (
     "RunArguments",
     "add_card_flags",
     "add_run_flags",
-    "card_inputs",
     "device_named",
     "load_card_table",
     "set_cards",
@@ -113,25 +103,15 @@ def set_cards(data: SetData) -> SetCards:
     return card_table(data.attributes, data.statistics, programs=programs)
 
 
-def card_inputs(data: SetData, cards: SetCards, *, data_dir: Path) -> CardInputs:
-    text = text_vectors(
-        card_texts(data.attributes),
-        encode=hugging_face_encoder(TEXT_MODEL, device=torch.device("cpu")),
-        model_name=TEXT_MODEL,
-        cache_dir=data_dir,
-    )
-    program = program_tokens(cards.pool, vocabulary=program_vocabulary())
-    return CardInputs(text=text, program=program, printed=cards.printed)
-
-
-def load_card_table(run_folder: Path, *, inputs: CardInputs) -> tuple[CardTable, CheckpointRef]:
+def load_card_table(run_folder: Path, *, pool: CardPool) -> tuple[CardTable, CheckpointRef]:
     reference = latest_checkpoint(run_folder, "embedding")
     config = json.loads((run_folder / "identity.json").read_text())["config"]
     if "card_width" in config:
+        vocabulary = program_vocabulary()
         encoder = CardEncoder(
-            inputs,
+            program_tokens(pool, vocabulary=vocabulary),
             width=int(config["card_width"]),
-            program_vocabulary=FIRST_PROGRAM_TOKEN + len(program_vocabulary()),
+            program_vocabulary=FIRST_PROGRAM_TOKEN + len(vocabulary),
             program_layers=int(config["card_layers"]),
             heads=int(config["card_heads"]),
         )

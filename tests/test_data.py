@@ -14,8 +14,16 @@ import polars as pl
 import pytest
 import torch
 
-from jace.cards import CardPool, CardRecord, Rarity
-from jace.data import StaleCacheError, card_table, load_decks, load_drafts
+from jace.cards import (
+    FIRST_PROGRAM_TOKEN,
+    NO_PROGRAM_TOKEN,
+    PADDING_TOKEN,
+    UNKNOWN_TOKEN,
+    CardPool,
+    CardRecord,
+    Rarity,
+)
+from jace.data import StaleCacheError, card_table, load_decks, load_drafts, program_tokens
 
 __all__ = ()
 
@@ -142,44 +150,37 @@ def test_a_draft_with_two_builds_gives_the_build_played_most_and_the_whole_event
     assert (decks.wins.tolist(), decks.losses.tolist()) == ([1], [2])
 
 
-def test_a_card_with_no_printed_power_or_toughness_gets_zero_there_and_a_marker_that_says_so() -> None:
+def test_card_table_aligns_pool_lands_mana_values_programs_and_ata() -> None:
     attributes = pl.DataFrame(
         {
             "name": ["Ant", "Bat", "Plains"],
             "set_code": ["TST", "TST", "TST"],
             "rarity": ["rare", "common", "common"],
-            "color": ["G", "B", ""],
             "card_type": ["Creature", "Creature", "Land"],
             "mana_value": [2.0, 4.0, 0.0],
-            "power": ["2", "4", None],
-            "toughness": ["*", "1", None],
-            "is_bonus_sheet": [False, False, False],
             "oracle_text": ["", "", ""],
         }
     )
-    statistics = pl.DataFrame(
-        {
-            "name": ["Plains", "Ant", "Bat"],
-            "gih_wr": [None, 0.6, 0.5],
-            "oh_wr": [None, 0.6, 0.5],
-            "gp_wr": [None, 0.6, 0.5],
-            "iwd": [None, 0.1, 0.0],
-            "alsa": [9.0, 2.0, 5.0],
-            "ata": [10.0, 2.0, 6.0],
-            "pct_gp": [0.0, 0.9, 0.5],
-            "num_gih": [0, 100, 50],
-        }
-    )
+    statistics = pl.DataFrame({"name": ["Plains", "Ant", "Bat"], "ata": [10.0, 2.0, 6.0]})
 
     cards = card_table(attributes, statistics, programs={"Ant": (7, 7)})
 
-    column = dict(zip(cards.printed_names, cards.printed.T.tolist(), strict=True))
-    assert column["power"] == [-1, 1, 0]
-    assert column["no_power"] == [0, 0, 1]
-    assert column["toughness"] == [0, 0, 0]
-    assert column["no_toughness"] == [1, 0, 1]
-    assert column["colour_G"] == [1, 0, 0]
-    assert column["rarity_basic"] == [0, 0, 1]
+    assert cards.is_land.tolist() == [False, False, True]
+    assert cards.mana_value.tolist() == [2.0, 4.0, 0.0]
     assert [cards.pool[card].rarity for card in range(3)] == [Rarity.RARE, Rarity.COMMON, Rarity.BASIC]
     assert [cards.pool[card].program for card in range(3)] == [(7, 7), (), ()]
     assert cards.ata.tolist() == [2.0, 6.0, 10.0]
+
+
+def test_program_tokens_mark_a_pair_the_vocabulary_lacks_and_a_card_without_a_program() -> None:
+    programs = {"Ant": (1, 5, 2, 9), "Bat": (1, 5, 3, 4, 2, 9), "Dog": ()}
+    records = [
+        CardRecord(name=name, set_code="TST", rarity=Rarity.COMMON, text="", program=program)
+        for name, program in programs.items()
+    ]
+
+    ant, bat, dog = program_tokens(CardPool(records), vocabulary={(1, 5): 0, (2, 9): 1}).tolist()
+
+    assert ant == [FIRST_PROGRAM_TOKEN, FIRST_PROGRAM_TOKEN + 1, PADDING_TOKEN]
+    assert bat == [FIRST_PROGRAM_TOKEN, UNKNOWN_TOKEN, FIRST_PROGRAM_TOKEN + 1]
+    assert dog == [NO_PROGRAM_TOKEN, PADDING_TOKEN, PADDING_TOKEN]

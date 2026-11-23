@@ -53,7 +53,6 @@ from jace.loops.entry_points import (
     ADAM_BETAS,
     RunArguments,
     add_run_flags,
-    card_inputs,
     device_named,
     load_card_table,
     set_cards,
@@ -361,9 +360,7 @@ def main(argv: Sequence[str]) -> None:
         data.games, pool=cards.pool, cache_dir=arguments.data_dir, held_out_share=arguments.held_out_share
     )
     rules = deck_rules(limited_format(arguments.set_code), cards)
-    embedding, embedding_ref = load_card_table(
-        arguments.embedding_run, inputs=card_inputs(data, cards, data_dir=arguments.data_dir)
-    )
+    embedding, embedding_ref = load_card_table(arguments.embedding_run, pool=cards.pool)
     shape = {"width": arguments.width, "layers": arguments.layers, "heads": arguments.heads}
     score = DeckScore(embedding, **shape).to(device)
     builder = DeckBuilder(embedding, **shape).to(device)

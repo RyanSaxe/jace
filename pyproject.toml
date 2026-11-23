@@ -10,7 +10,6 @@ dependencies = [
     "numpy>=2",
     "spells-mtg>=0.18",
     "torch>=2.15.0",
-    "transformers>=5.22.2",
 ]
 
 [tool.uv.sources]

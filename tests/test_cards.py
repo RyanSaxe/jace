@@ -1,8 +1,7 @@
 """Check the card encoder and the table frozen from it through `jace.cards`.
 
-The inputs are made up. The text vectors and printed facts are random, and each
-program is a short run of made-up token ids, padded the way real programs are.
-The programs have different lengths, so some rows have more padding than
+Each program is a short run of made-up token ids, padded the way real programs
+are. The programs have different lengths, so some rows have more padding than
 others. The encoder is tiny and has the weights PyTorch initialises it with. It
 is never trained, because what these tests check is true for any weights.
 """
@@ -10,7 +9,6 @@ is never trained, because what these tests check is true for any weights.
 from collections.abc import Sequence
 
 import torch
-from torch import Tensor
 
 from jace.cards import (
     FIRST_PROGRAM_TOKEN,
@@ -18,7 +16,6 @@ from jace.cards import (
     PADDING_TOKEN,
     UNKNOWN_TOKEN,
     CardEncoder,
-    CardInputs,
     frozen_table,
 )
 
@@ -34,22 +31,20 @@ _PROGRAMS = (
 _VOCABULARY = FIRST_PROGRAM_TOKEN + 6
 
 
-def _encoder(programs: Sequence[tuple[int, ...]], *, text: Tensor, printed: Tensor) -> CardEncoder:
+def _encoder(programs: Sequence[tuple[int, ...]]) -> CardEncoder:
     program = torch.full((len(programs), max(map(len, programs))), PADDING_TOKEN)
     for card, tokens in enumerate(programs):
         program[card, : len(tokens)] = torch.tensor(tokens)
-    inputs = CardInputs(text=text, program=program, printed=printed)
-    return CardEncoder(inputs, width=8, program_vocabulary=_VOCABULARY, program_layers=1, heads=2)
+    return CardEncoder(program, width=8, program_vocabulary=_VOCABULARY, program_layers=1, heads=2)
 
 
-def test_a_cards_vector_depends_only_on_its_own_inputs_whatever_the_other_cards_are() -> None:
+def test_a_cards_vector_depends_only_on_its_own_program_whatever_the_other_cards_are() -> None:
     torch.manual_seed(0)
-    text, printed = torch.randn(len(_PROGRAMS), 6), torch.randn(len(_PROGRAMS), 4)
-    encoder = _encoder(_PROGRAMS, text=text, printed=printed)
+    encoder = _encoder(_PROGRAMS)
     # Three of the cards, in another order. Card 3 has the longest program and is left out, so these rows
     # have less padding than before.
     chosen = [4, 0, 2]
-    fewer = _encoder([_PROGRAMS[card] for card in chosen], text=text[chosen], printed=printed[chosen])
+    fewer = _encoder([_PROGRAMS[card] for card in chosen])
     fewer.load_state_dict(encoder.state_dict())
 
     with torch.no_grad():
@@ -58,7 +53,7 @@ def test_a_cards_vector_depends_only_on_its_own_inputs_whatever_the_other_cards_
 
 def test_a_frozen_table_gives_the_encoders_vectors_and_has_nothing_to_train() -> None:
     torch.manual_seed(0)
-    encoder = _encoder(_PROGRAMS, text=torch.randn(len(_PROGRAMS), 6), printed=torch.randn(len(_PROGRAMS), 4))
+    encoder = _encoder(_PROGRAMS)
     cards = torch.tensor([[2, 0], [4, 4]])
 
     table = frozen_table(encoder)
