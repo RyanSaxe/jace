@@ -28,8 +28,10 @@ __all__ = (
     "UpdateStats",
     "current_optimizer_lr",
     "load_snapshot",
+    "resolve_snapshot_pool",
     "set_optimizer_lr",
     "should_use_snapshot",
+    "update_snapshot_pool",
 )
 
 _MIN_REFERENCE_STEPS = 2
@@ -240,6 +242,7 @@ class UpdateConfig:
     minibatch_size: int = 256
     max_grad_norm: float = 0.267
     normalize_advantages: bool = False
+    filter_scope: Literal["actor", "actor_critic"] = "actor"
     reference: Literal["uniform", "action_type_uniform"] = "action_type_uniform"
     device: str = "cpu"
 
@@ -275,6 +278,7 @@ class TrainConfig:
     snapshot_matching: Literal["uniform", "even_odds"] = "uniform"
     start_update: int = 1
     log_grad_agreement: bool = False
+    ema: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,3 +308,26 @@ def should_use_snapshot(update_idx: int, *, fraction: float, pool_size: int) -> 
         return False
     interval = max(1, round(1.0 / fraction))
     return update_idx % interval == 0
+
+
+def resolve_snapshot_pool(snapshot_pool: SnapshotPool | None, *, config: TrainConfig) -> SnapshotPool | None:
+    if snapshot_pool is not None or config.snapshot_fraction <= 0.0:
+        return snapshot_pool
+    return SnapshotPool(max_size=config.snapshot_pool_size, matching=config.snapshot_matching)
+
+
+def update_snapshot_pool(
+    pool: SnapshotPool | None,
+    module: nn.Module,
+    *,
+    entry: SnapshotEntry | None,
+    snap_wr: float | None,
+    update_idx: int,
+    snapshot_every: int,
+) -> None:
+    if pool is None:
+        return
+    if entry is not None and snap_wr is not None:
+        pool.record_outcome(entry.update, win_rate=snap_wr)
+    if update_idx % max(snapshot_every, 1) == 0:
+        pool.add(module, update=update_idx)

@@ -222,12 +222,14 @@ def _play_audited_leg(
     max_actions: int,
 ) -> int | None:
     setup = deal.game_setup(swapped=False)
-    env = managym.Env(seed=deal.seed, skip_trivial=True)
+    use_memory = player.needs_decision_memory
+    env = managym.Env(seed=deal.seed, skip_trivial=True, decision_memory=use_memory)
     names = ["agent", "heuristic"] if leg == 0 else ["heuristic", "agent"]
     capture = (
         ScalarCapture(
             seed=deal.seed,
             skip_trivial=True,
+            decision_memory=use_memory,
             games_path=games_path,
             record_fraction=1.0,
             context={"players": names},

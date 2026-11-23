@@ -21,15 +21,11 @@ from typing import TYPE_CHECKING, Literal, Self
 import numpy as np
 import torch
 from manabot.backends.torch.collection import CollectionSession
-from manabot.backends.torch.policy import ActorCritic
 from manabot.env.match import Match, Reward
-from manabot.env.observation import ObservationSpace
-from manabot.infra.config import MatchConfig, ModelConfig, ObservationConfig, RewardConfig
+from manabot.infra.config import MatchConfig, RewardConfig
 from manabot.training.decks import UniformDecks
 from manabot.training.rollout.collection import (
     Collector,
-    PackedActions,
-    RecordedObservations,
     RolloutBatch,
     close_collector,
     collect,
@@ -47,11 +43,22 @@ from jace.eval import (
     needs_curriculum_refresh,
     top_card_pool,
 )
+from jace.loops.agent_factory import (
+    DecisionMemoryKind,
+    build_agent,
+    merge_rollout_batches,
+    pack_batch_for_ipc,
+    unpack_batch_from_ipc,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
     from multiprocessing.process import BaseProcess
     from pathlib import Path
+
+    from manabot.backends.torch.policy import ActorCritic
+    from manabot.env.memory_store import MemoryArchive
+    from manabot.env.observation import ObservationSpace
 
     from jace.rl.pool import SnapshotEntry
 
@@ -63,7 +70,6 @@ __all__ = (
 
 _MIN_CROSS_BALANCED_ENVS = 4
 _POLL_TIMEOUT_S = 5.0
-_ERROR_TUPLE_LEN = 3
 _GAME_ERROR_POLICY = GameErrorPolicy(threshold=0.05, window=200, warmup=100, recover_capacity=True)
 _LOGGER = logging.getLogger(__name__)
 _collect_rollout: Callable[..., RolloutBatch] = collect
@@ -71,7 +77,9 @@ _collect_pair_rollout: Callable[..., tuple[RolloutBatch, RolloutBatch]] = collec
 _open_collector: Callable[..., Collector] = open_collector
 
 type _WorkerTask = tuple[int, dict[str, torch.Tensor], dict[str, torch.Tensor] | None] | None
-type _WorkerResult = tuple[int, RolloutBatch] | tuple[Literal["ready"], int] | tuple[Literal["error"], int, str]
+type _WorkerResult = (
+    tuple[int, RolloutBatch, MemoryArchive | None] | tuple[Literal["ready"], int] | tuple[Literal["error"], int, str]
+)
 
 
 def _worker_error_types() -> tuple[type[BaseException], ...]:
@@ -92,6 +100,7 @@ class WorkerPoolConfig:
     steps_per_env: int
     hidden_dim: int
     attention_layers: int
+    decision_memory: DecisionMemoryKind = "none"
     seed: int = 1
     games_path: Path | None = None
     record_fraction: float = 0.0
@@ -103,59 +112,6 @@ class WorkerPoolConfig:
     curriculum_pools: tuple[tuple[int, int, frozenset[str]], ...] = ()
     curriculum_blend_updates: int = 10
     start_update: int = 1
-
-
-def _merge_recorded(batches: Sequence[RolloutBatch]) -> RecordedObservations:
-    first = batches[0].recorded
-    merged_rows = {key: np.concatenate([batch.recorded.rows[key] for batch in batches], axis=0) for key in first.rows}
-    offsets: list[np.ndarray] = []
-    row_base = 0
-    for batch in batches:
-        offsets.append(batch.recorded.index + row_base)
-        first_array = next(iter(batch.recorded.rows.values()))
-        row_base += int(first_array.shape[0])
-    merged_needs: np.ndarray | None = None
-    if all(batch.recorded.needs is not None for batch in batches):
-        merged_needs = np.concatenate([b.recorded.needs for b in batches if b.recorded.needs is not None])
-    return RecordedObservations(
-        rows=merged_rows,
-        index=np.concatenate(offsets, axis=0),
-        needs=merged_needs,
-    )
-
-
-def merge_rollout_batches(batches: Sequence[RolloutBatch]) -> RolloutBatch:
-    """Concatenate complete-game `RolloutBatch` payloads from parallel workers.
-
-    Joins every worker's time-major rollout arrays (`actions`, `logprobs`, `rewards`,
-    `dones`, `values`, and optional `outcome_probabilities`) along axis 0, shifts
-    `RecordedObservations.index` by each worker's recorded row count, and concatenates
-    `PackedActions` via `PackedActions.concatenate`. Because complete-game rollouts
-    terminate every trajectory before closing, `next_obs` and `next_done` carry forward
-    from the final batch. Raises `ValueError` when `batches` is empty.
-    """
-    if not batches:
-        msg = "batches must contain at least one RolloutBatch"
-        raise ValueError(msg)
-    if len(batches) == 1:
-        return batches[0]
-    outcomes = (
-        np.concatenate([b.outcome_probabilities for b in batches if b.outcome_probabilities is not None], axis=0)
-        if all(b.outcome_probabilities is not None for b in batches)
-        else None
-    )
-    return RolloutBatch(
-        recorded=_merge_recorded(batches),
-        actions=np.concatenate([b.actions for b in batches], axis=0),
-        logprobs=np.concatenate([b.logprobs for b in batches], axis=0),
-        rewards=np.concatenate([b.rewards for b in batches], axis=0),
-        dones=np.concatenate([b.dones for b in batches], axis=0),
-        values=np.concatenate([b.values for b in batches], axis=0),
-        next_obs=batches[-1].next_obs,
-        next_done=batches[-1].next_done,
-        action_data=PackedActions.concatenate([b.action_data for b in batches]),
-        outcome_probabilities=outcomes,
-    )
 
 
 def _sample_pair_match(deck_source: UniformDecks, rng: np.random.Generator) -> Match:
@@ -176,23 +132,13 @@ def _sample_pair_match(deck_source: UniformDecks, rng: np.random.Generator) -> M
 
 
 def _build_worker_agent(cfg: WorkerPoolConfig) -> tuple[ActorCritic, ObservationSpace]:
-    obs_space = ObservationSpace(
-        ObservationConfig(
-            policy_input_version=11,
-            max_cards_per_player=80,
-            max_permanents_per_player=64,
-        )
-    )
-    model_cfg = ModelConfig(
-        world="world",
+    agent, obs_space = build_agent(
         hidden_dim=cfg.hidden_dim,
         attention_layers=cfg.attention_layers,
-        num_attention_heads=4,
-        policy_film=True,
-        value_kind="categorical_wdl",
-        value_aggregation="masked_mean",
+        decision_memory=cfg.decision_memory,
+        bucketed_shapes=True,
+        live_tokens=False,
     )
-    agent = ActorCritic(obs_space, model_cfg, bucketed_shapes=True, live_tokens=False)
     return agent.eval(), obs_space
 
 
@@ -375,7 +321,8 @@ def _run_worker_loop(
                 )
             else:
                 batch = _collect_rollout(collector, agent, cfg.steps_per_env)
-            res_queue.put((rank, batch))
+            packed, archive = pack_batch_for_ipc(batch)
+            res_queue.put((rank, packed, archive))
     finally:
         close_collector(collector)
 
@@ -450,7 +397,7 @@ class MultiProcessCollector:
                     msg = f"rollout worker exited unexpectedly: {dead}"
                     raise RuntimeError(msg) from None
                 continue
-            if len(item) == _ERROR_TUPLE_LEN:
+            if item[0] == "error":
                 msg = f"rollout worker {item[1]} failed: {item[2]}"
                 raise RuntimeError(msg)
             return item
@@ -477,7 +424,7 @@ class MultiProcessCollector:
         for _ in range(self._cfg.num_workers):
             item = self._get_result()
             if isinstance(item[0], int):
-                ordered[item[0]] = item[1]
+                ordered[item[0]] = unpack_batch_from_ipc(item[1], item[2])
         return merge_rollout_batches([ordered[rank] for rank in sorted(ordered)])
 
     def close(self) -> None:

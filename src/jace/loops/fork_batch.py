@@ -23,8 +23,8 @@ from managym.enums import ActionSpaceEnum
 
 from jace.eval.deals import Deal, build_deals, elemental_decks
 from jace.eval.human_decks import build_human_deals, load_human_deck_catalog
+from jace.loops.agent_factory import DecisionMemoryKind, build_agent
 from jace.loops.forks import ForkExample
-from jace.loops.train_ten_decks import build_agent
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -114,15 +114,18 @@ class _ActiveBranch:
     sampled_obs: list[tuple[dict[str, np.ndarray], int]] | None = None
 
 
-def _init_batch_worker(init_spec: tuple[int, int, Path | None]) -> None:
-    hidden_dim, attention_layers, human_decks_path = init_spec
+def _init_batch_worker(init_spec: tuple[int, int, DecisionMemoryKind, Path | None]) -> None:
+    hidden_dim, attention_layers, decision_memory, human_decks_path = init_spec
     logging.getLogger("manabot").setLevel(logging.WARNING)
     torch.set_num_threads(1)
     agent, obs_space = build_agent(
-        hidden_dim=hidden_dim, attention_layers=attention_layers, bucketed_shapes=True, live_tokens=False
+        hidden_dim=hidden_dim,
+        attention_layers=attention_layers,
+        decision_memory=decision_memory,
+        bucketed_shapes=True,
+        live_tokens=False,
     )
-    _BATCH_WORKER.agent = agent
-    _BATCH_WORKER.obs_space = obs_space
+    _BATCH_WORKER.agent, _BATCH_WORKER.obs_space = agent, obs_space
     _BATCH_WORKER.human_decks_path = human_decks_path
     _BATCH_WORKER.decks = None if human_decks_path is not None else elemental_decks()
 
@@ -177,8 +180,7 @@ def _batched_eval(
             counts.append(count)
         else:
             probs, val = evaluate_observation(scope, obs_space, obs)
-            probs_out[idx] = probs
-            vals_out[idx] = float(val)
+            probs_out[idx], vals_out[idx] = probs, float(val)
 
     if encoded_list:
         stacked = {key: np.stack([item[key] for item in encoded_list], axis=0) for key in encoded_list[0]}
@@ -256,7 +258,8 @@ def _harvest_roots_from_deal(
     rng: random.Random,
     base_seed: int,
 ) -> list[_HarvestedRoot]:
-    env = managym.Env(seed=deal.seed, skip_trivial=True)
+    use_memory = obs_space.encoder.config.max_decision_records > 0
+    env = managym.Env(seed=deal.seed, skip_trivial=True, decision_memory=use_memory)
     try:
         obs, _ = env.reset(deal.game_setup())
     except _engine_error_types():
@@ -301,15 +304,15 @@ def _spawn_all_branches(roots: Sequence[_HarvestedRoot], *, config: BatchedForkC
                     next_obs, is_done, is_failed = _safe_step(clone, root_action)
                 branches.append(
                     _ActiveBranch(
-                        fork_idx=fork_idx,
-                        pair_idx=pair_idx,
-                        arm_idx=arm_idx,
-                        hero_idx=root.hero_idx,
-                        env=clone,
-                        obs=next_obs,
-                        rng=random.Random(pair_seed),
-                        done=is_done,
-                        failed=is_failed,
+                        fork_idx,
+                        pair_idx,
+                        arm_idx,
+                        root.hero_idx,
+                        clone,
+                        next_obs,
+                        random.Random(pair_seed),
+                        is_done,
+                        is_failed,
                         sampled_obs=[] if want_samples else None,
                     )
                 )
@@ -355,9 +358,7 @@ def _step_all_branches(
             _maybe_record_value_sample(branch, encoded=encoded, cap_per_branch=cap_per_branch)
             action = branch.rng.choices(range(len(probs)), weights=probs, k=1)[0]
             next_obs, is_done, is_failed = _safe_step(branch.env, action)
-            branch.obs = next_obs
-            branch.done = is_done
-            branch.failed = is_failed
+            branch.obs, branch.done, branch.failed = next_obs, is_done, is_failed
             branch.steps += 1
 
 
@@ -446,22 +447,28 @@ def _batch_worker_task(args: tuple[dict[str, np.ndarray], int, BatchedForkConfig
 
 
 class BatchedForkCollectorPool:
+    _hidden_dim: int
+    _attention_layers: int
+    _decision_memory: DecisionMemoryKind
+    _num_workers: int
+    _human_decks_path: Path | None
+    _pool: ProcessPool | None
+
     def __init__(
         self,
         *,
         hidden_dim: int,
         attention_layers: int,
+        decision_memory: DecisionMemoryKind = "none",
         num_workers: int = 8,
         human_decks_path: Path | None = None,
     ) -> None:
-        self._hidden_dim = hidden_dim
-        self._attention_layers = attention_layers
-        self._num_workers = max(1, num_workers)
-        self._human_decks_path = human_decks_path
-        self._pool: ProcessPool | None = None
+        self._hidden_dim, self._attention_layers = hidden_dim, attention_layers
+        self._decision_memory, self._num_workers = decision_memory, max(1, num_workers)
+        self._human_decks_path, self._pool = human_decks_path, None
 
     def __enter__(self) -> Self:
-        initargs = ((self._hidden_dim, self._attention_layers, self._human_decks_path),)
+        initargs = ((self._hidden_dim, self._attention_layers, self._decision_memory, self._human_decks_path),)
         self._pool = mp.get_context("spawn").Pool(self._num_workers, initializer=_init_batch_worker, initargs=initargs)
         return self
 

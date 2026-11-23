@@ -19,7 +19,6 @@ import torch
 from manabot.backends.torch.checkpoint import load_checkpoint
 from manabot.backends.torch.policy import ActorCritic
 from manabot.env.observation import ObservationSpace
-from manabot.infra.config import ModelConfig, ObservationConfig
 from manabot.training.decks import UniformDecks
 
 from jace.eval import (
@@ -31,6 +30,7 @@ from jace.eval import (
     elemental_decks,
     run_forensics,
 )
+from jace.loops.agent_factory import build_agent
 from jace.loops.collect_pool import MultiProcessCollector, WorkerPoolConfig
 from jace.loops.entry_points import default_device_name
 from jace.loops.forks import ForkCollectorPool, ForkConfig
@@ -111,24 +111,6 @@ class LabConfig:
     init_checkpoint: Path | None = None
     fork_config: ForkConfig | None = None
     seed: int = 1
-
-
-def build_agent(
-    *, hidden_dim: int = 64, attention_layers: int = 2, bucketed_shapes: bool = True, live_tokens: bool = False
-) -> tuple[ActorCritic, ObservationSpace]:
-    obs_space = ObservationSpace(
-        ObservationConfig(policy_input_version=11, max_cards_per_player=80, max_permanents_per_player=64)
-    )
-    model_cfg = ModelConfig(
-        world="world",
-        hidden_dim=hidden_dim,
-        attention_layers=attention_layers,
-        num_attention_heads=4,
-        policy_film=True,
-        value_kind="categorical_wdl",
-        value_aggregation="masked_mean",
-    )
-    return ActorCritic(obs_space, model_cfg, bucketed_shapes=bucketed_shapes, live_tokens=live_tokens), obs_space
 
 
 def _build_select(cfg: LabConfig) -> SelectFn:

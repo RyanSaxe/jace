@@ -33,6 +33,7 @@ from manabot.training.rollout.collection import (
 
 from jace.rl.credit import CreditFn, Trajectory, standardize_advantages
 from jace.rl.diagnostics import GradientAgreementTracker, snapshot_win_rate
+from jace.rl.ema import EmaWeights, resolve_ema_weights
 from jace.rl.losses import LossFn, PolicyBatch
 from jace.rl.pool import (
     SnapshotEntry,
@@ -43,10 +44,12 @@ from jace.rl.pool import (
     UpdateStats,
     current_optimizer_lr,
     load_snapshot,
+    resolve_snapshot_pool,
     set_optimizer_lr,
     should_use_snapshot,
+    update_snapshot_pool,
 )
-from jace.rl.select import SelectFn, bucketed_minibatch_order
+from jace.rl.select import SelectFn, bucketed_minibatch_order, training_row_indexes
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -324,9 +327,9 @@ def update_step(
         else targets.value_targets.reshape(raw_flat.shape[0], -1)
     )
     total_rows = int(batch.actions.size)
-    all_indexes = np.arange(total_rows, dtype=np.int64)
-    rollout.admit_rows(all_indexes, chunk_rows=config.minibatch_size)
-    raw_needs = batch.recorded.gather_needs(all_indexes)
+    active_indexes = training_row_indexes(selected_mask, filter_scope=config.filter_scope)
+    rollout.admit_rows(active_indexes, chunk_rows=config.minibatch_size)
+    raw_needs = batch.recorded.gather_needs(active_indexes)
     row_sizes = None if raw_needs is None else raw_needs.sum(axis=1)
     flat_actions = batch.actions.reshape(-1)
     totals = dict.fromkeys(_METRIC_KEYS, 0.0)
@@ -335,7 +338,10 @@ def update_step(
         grad_tracker.begin_update()
     agent.train()
     for _ in range(config.epochs):
-        order = bucketed_minibatch_order(total_rows, minibatch_size=config.minibatch_size, row_sizes=row_sizes, rng=rng)
+        rel_order = bucketed_minibatch_order(
+            len(active_indexes), minibatch_size=config.minibatch_size, row_sizes=row_sizes, rng=rng
+        )
+        order = active_indexes[rel_order]
         with (
             _epoch_catalog_cache(agent, optimizer, device=device, max_grad_norm=config.max_grad_norm) as catalog_pair,
             rollout.minibatches(order, config.minibatch_size, device) as minibatches,
@@ -391,29 +397,6 @@ def _resolve_update_loss(
     return lr, tau, scheduled_loss
 
 
-def _resolve_pool(snapshot_pool: SnapshotPool | None, *, config: TrainConfig) -> SnapshotPool | None:
-    if snapshot_pool is not None or config.snapshot_fraction <= 0.0:
-        return snapshot_pool
-    return SnapshotPool(max_size=config.snapshot_pool_size, matching=config.snapshot_matching)
-
-
-def _update_pool(
-    pool: SnapshotPool | None,
-    agent: ActorCritic,
-    *,
-    entry: SnapshotEntry | None,
-    snap_wr: float | None,
-    update_idx: int,
-    snapshot_every: int,
-) -> None:
-    if pool is None:
-        return
-    if entry is not None and snap_wr is not None:
-        pool.record_outcome(entry.update, win_rate=snap_wr)
-    if update_idx % max(snapshot_every, 1) == 0:
-        pool.add(agent, update=update_idx)
-
-
 def train_self_play(
     agent: ActorCritic,
     optimizer: Optimizer,
@@ -429,16 +412,19 @@ def train_self_play(
     prepare_aux: PrepareAuxFn | None = None,
     on_update: UpdateCallback | None = None,
     snapshot_pool: SnapshotPool | None = None,
+    ema_weights: EmaWeights | None = None,
 ) -> list[UpdateStats]:
     """Run complete-game self-play training over `deck_source` using Jace's RL pipeline.
 
     Collects both seats under the current frozen policy (or via an injected `collect_fn`),
-    mixes optional 1-seat snapshot updates (uniform or even-odds), logs optional gradient
-    cosine agreement across consecutive updates, and invokes `on_update` per step.
+    mixes optional 1-seat snapshot updates (uniform or even-odds), advances optional EMA
+    shadow weights after each update, logs optional gradient cosine agreement across
+    consecutive updates, and invokes `on_update` per step.
     """
     deck_source.check()
     rng = np.random.default_rng(config.seed + 101)
-    pool = _resolve_pool(snapshot_pool, config=config)
+    pool = resolve_snapshot_pool(snapshot_pool, config=config)
+    ema = resolve_ema_weights(ema_weights, agent, config=config)
     grad_tracker = GradientAgreementTracker() if config.log_grad_agreement else None
     collector: Collector | None = None
     if collect_fn is None:
@@ -484,8 +470,10 @@ def train_self_play(
                 grad_tracker=grad_tracker,
             )
             learn_s = time.perf_counter() - t_learn
+            if ema is not None:
+                ema.update(agent)
             grad_cosine = grad_tracker.finish_update() if grad_tracker is not None else None
-            _update_pool(
+            update_snapshot_pool(
                 pool, agent, entry=entry, snap_wr=snap_wr, update_idx=update_idx, snapshot_every=config.snapshot_every
             )
             history.append(stats)

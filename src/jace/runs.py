@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from manabot.backends.torch.policy import ActorCritic
     from manabot.env.observation import ObservationSpace
 
+    from jace.rl.ema import EmaWeights
     from jace.rl.pool import SnapshotPool, StepRecord
 
 __all__ = (
@@ -185,6 +186,8 @@ def save_resume_state(
     iteration: int,
     optimizer: torch.optim.Optimizer,
     snapshot_pool: SnapshotPool | None,
+    agent: ActorCritic | None = None,
+    ema: EmaWeights | None = None,
 ) -> Path:
     payload: dict[str, object] = {
         "iteration": iteration,
@@ -192,6 +195,10 @@ def save_resume_state(
         "optimizer": optimizer.state_dict(),
         "snapshot_pool": None if snapshot_pool is None else snapshot_pool.export_state(),
     }
+    if agent is not None:
+        payload["live_agent_state"] = {key: val.detach().cpu().clone() for key, val in agent.state_dict().items()}
+    if ema is not None:
+        payload["ema_state"] = ema.export_state()
     target = layout.checkpoints_dir / _RESUME_FILENAME
     partial = target.with_suffix(".pt.partial")
     torch.save(payload, partial)
@@ -205,6 +212,7 @@ def load_resume_state(
     agent: ActorCritic,
     optimizer: torch.optim.Optimizer,
     snapshot_pool: SnapshotPool | None,
+    ema: EmaWeights | None = None,
     device: str | torch.device | None = None,
 ) -> int:
     path = layout.checkpoints_dir / _RESUME_FILENAME
@@ -213,12 +221,26 @@ def load_resume_state(
         raise FileNotFoundError(msg)
     state = torch.load(path, map_location="cpu", weights_only=False)
     iteration = int(state["iteration"])
-    ckpt_path = Path(str(state["checkpoint"]))
-    agent.load_state_dict(load_checkpoint(str(ckpt_path))[0].state_dict())
+    live_state = state.get("live_agent_state")
+    if isinstance(live_state, Mapping):
+        agent.load_state_dict(live_state)
+    else:
+        ckpt_path = Path(str(state["checkpoint"]))
+        agent.load_state_dict(load_checkpoint(str(ckpt_path))[0].state_dict())
     if device is not None:
         agent.to(device)
     optimizer.load_state_dict(state["optimizer"])
     pool_state = state.get("snapshot_pool")
     if snapshot_pool is not None and isinstance(pool_state, Mapping):
         snapshot_pool.restore_state(pool_state)
+    _restore_ema_state(ema, state.get("ema_state"), agent=agent)
     return iteration
+
+
+def _restore_ema_state(ema: EmaWeights | None, raw_state: object, *, agent: ActorCritic) -> None:
+    if ema is None:
+        return
+    if isinstance(raw_state, Mapping):
+        ema.restore_state(raw_state)
+    else:
+        ema.sync_from(agent)

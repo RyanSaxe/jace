@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from manabot.env.observation import ObservationSpace
 
     from jace.eval.deals import Deal
+    from jace.loops.agent_factory import DecisionMemoryKind
     from jace.rl.loop import PrepareAuxFn
 
 __all__ = (
@@ -397,6 +398,7 @@ def open_batched_fork_hook(
     decks_path: Path | None,
     learn_device: str,
     seed: int,
+    decision_memory: DecisionMemoryKind = "none",
     layout: RunLayout | None = None,
 ) -> PrepareAuxFn | None:
     if spec.forks_per_update <= 0:
@@ -413,6 +415,7 @@ def open_batched_fork_hook(
         BatchedForkCollectorPool(
             hidden_dim=hidden_dim,
             attention_layers=attention_layers,
+            decision_memory=decision_memory,
             num_workers=spec.fork_workers,
             human_decks_path=decks_path,
         )
