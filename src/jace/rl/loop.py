@@ -276,6 +276,7 @@ def _open_local_collector(
     def _collect(agent: ActorCritic, *, opponent_entry: SnapshotEntry | None, update_idx: int) -> RolloutBatch:
         agent.to(collect_device)
         agent.eval()
+        agent.cache_programs()
         if opponent_entry is not None and frozen is not None:
             return _collect_against_snapshot(
                 agent,

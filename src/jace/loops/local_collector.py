@@ -249,6 +249,7 @@ class LocalShardedCollector:
             self._collector = self._open_self_collector(update_idx)
         agent.to(self._device)
         agent.eval()
+        agent.cache_programs()
         if opponent_entry is not None:
             return self._collect_snapshot(agent, entry=opponent_entry, update_idx=update_idx)
         return _collect_rollout(self._collector, agent, self._cfg.steps_per_env)
