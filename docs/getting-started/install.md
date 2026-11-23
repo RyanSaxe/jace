@@ -6,7 +6,7 @@
 | -------------------------------- | --------------------------------------------------------------------------------------------------- |
 | Python 3.13                      | Required by `pyproject.toml` (`>=3.13,<3.14`)                                                       |
 | [uv](https://docs.astral.sh/uv/) | Installs dependencies and runs every command                                                        |
-| Rust toolchain                   | Needed only on platforms without a prebuilt `managym` 0.2.3 wheel (prebuilt wheels exist for Apple Silicon macOS and x86-64 Linux) |
+| Rust toolchain                   | Required by `uv sync` to compile the git-pinned `managym` engine from source                        |
 
 ## Install and verify
 
@@ -17,7 +17,7 @@ uv sync
 uv run pytest -q
 ```
 
-`uv sync` installs `managym[academy]` and `manabot` from the pinned revision in `pyproject.toml`. Compiling `managym` from source takes a few minutes where no wheel exists. The unit test suite runs without external datasets.
+`uv sync` installs `manabot` and compiles `managym[academy]` from the pinned git revision in `pyproject.toml` (a few minutes on first build). The unit test suite runs without external datasets.
 
 ## Run the 10-deck lab without external data
 

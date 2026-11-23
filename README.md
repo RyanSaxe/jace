@@ -17,7 +17,7 @@ On 400 unseen 17Lands Avatar: The Last Airbender Limited decks (347 cards, close
 
 ## Quick start
 
-jace requires Python 3.13 and [uv](https://docs.astral.sh/uv/). Prebuilt `managym` wheels exist for Apple Silicon macOS and x86-64 Linux. Other platforms compile the engine from source and need a Rust toolchain.
+jace requires Python 3.13, [uv](https://docs.astral.sh/uv/), and a Rust toolchain (to build the pinned `managym` revision from source).
 
 ```sh
 git clone https://github.com/RyanSaxe/jace.git
