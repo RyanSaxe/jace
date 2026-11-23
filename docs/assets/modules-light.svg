@@ -1,37 +1,49 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 790 418" role="img" aria-label="The modules of jace in rows, where a module imports only from the rows below it. Top: jace.loops. Then jace.draft, jace.decks, jace.train and jace.eval. Then jace.play. Then jace.engine, whose adapter is the only code that imports manabot. At the bottom, jace.cards. jace.tracking stands alone. jace.engine is drawn in blue because it is the only way games are played.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 398" role="img" aria-label="The package layers of Jace v2. Top row: jace.loops (CLI entry points, collector pool, batched forks, harness). Second row: jace.rl (pure RL math plus loop seam), jace.eval (mirrored deals and forensics), jace.draft (pods and drafter, imported only by jace.loops), and jace.decks (builder and score). Third row: jace.runs (Academy-native runs) and jace.tracking (locked pretraining run records). Bottom leaf row: jace.cards, jace.data (17Lands and catalog seam), and jace.modules. On the right: managym and manabot, connected only to the blue-highlighted seam modules.">
 <style>
-text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#1f2328;text-anchor:middle;font-size:16px}
-.t{font-weight:600}.s{font-size:13.5px;fill:#59636e}.l{text-anchor:start}.m{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:15px;font-weight:600}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#1f2328;text-anchor:middle;font-size:15.5px}
+.t{font-weight:600}.s{font-size:13px;fill:#59636e}.m{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14.5px;font-weight:600}
 .line{fill:none;stroke:#1f2328;stroke-width:1.5}.head{fill:#1f2328}
 .box{fill:#ffffff;stroke:#b8bec6}.round{fill:#eef2fd;stroke:#3a5bd9}.side{fill:none;stroke:#8c959f;stroke-dasharray:4 3}
 </style>
 <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker></defs>
-<rect class="box" x="18" y="18" width="560" height="58" rx="10"/>
-<text x="298" y="44" class="m">jace.loops</text>
-<text x="298" y="64" class="s">example loops and schedules</text>
-<rect class="box" x="18" y="92" width="128" height="58" rx="10"/>
-<text x="82" y="126" class="m">jace.draft</text>
-<rect class="box" x="162" y="92" width="128" height="58" rx="10"/>
-<text x="226" y="126" class="m">jace.decks</text>
-<rect class="box" x="306" y="92" width="128" height="58" rx="10"/>
-<text x="370" y="126" class="m">jace.train</text>
-<rect class="box" x="450" y="92" width="128" height="58" rx="10"/>
-<text x="514" y="126" class="m">jace.eval</text>
-<rect class="box" x="18" y="166" width="560" height="58" rx="10"/>
-<text x="298" y="192" class="m">jace.play</text>
-<text x="298" y="212" class="s">the guess model, the player and the win chance</text>
-<rect class="round" x="18" y="240" width="560" height="58" rx="10"/>
-<text x="298" y="266" class="m">jace.engine</text>
-<text x="298" y="286" class="s">GameBatch, and the manabot adapter</text>
-<rect class="box" x="18" y="314" width="560" height="58" rx="10"/>
-<text x="298" y="340" class="m">jace.cards</text>
-<text x="298" y="360" class="s">card records and the card embedding</text>
-<rect class="side" x="622" y="240" width="150" height="58" rx="10"/>
-<text x="697" y="266" class="t">manabot</text>
-<text x="697" y="286" class="s">the game engine</text>
-<path class="line" d="M578 269 H618" marker-end="url(#a)"/>
-<rect class="box" x="622" y="18" width="150" height="58" rx="10"/>
-<text x="697" y="44" class="m">jace.tracking</text>
-<text x="697" y="64" class="s">stands alone</text>
-<text x="298" y="402" class="s">A module imports only from the rows below it.</text>
+<rect class="round" x="18" y="18" width="596" height="60" rx="10"/>
+<text x="316" y="44" class="m">jace.loops</text>
+<text x="316" y="65" class="s">CLI loops, multi-process collector, batched forks, fast harness, pretraining</text>
+<rect class="round" x="18" y="96" width="138" height="62" rx="10"/>
+<text x="87" y="123" class="m">jace.rl</text>
+<text x="87" y="144" class="s">pure math + loop</text>
+<rect class="round" x="171" y="96" width="138" height="62" rx="10"/>
+<text x="240" y="123" class="m">jace.eval</text>
+<text x="240" y="144" class="s">deals &amp; forensics</text>
+<rect class="box" x="324" y="96" width="138" height="62" rx="10"/>
+<text x="393" y="123" class="m">jace.draft</text>
+<text x="393" y="144" class="s">pods &amp; drafter</text>
+<rect class="box" x="476" y="96" width="138" height="62" rx="10"/>
+<text x="545" y="123" class="m">jace.decks</text>
+<text x="545" y="144" class="s">builder &amp; score</text>
+<rect class="round" x="18" y="176" width="291" height="60" rx="10"/>
+<text x="163" y="202" class="m">jace.runs</text>
+<text x="163" y="223" class="s">Academy-native gameplay runs</text>
+<rect class="box" x="324" y="176" width="290" height="60" rx="10"/>
+<text x="469" y="202" class="m">jace.tracking</text>
+<text x="469" y="223" class="s">locked pretraining run records</text>
+<rect class="box" x="18" y="254" width="189" height="62" rx="10"/>
+<text x="112" y="281" class="m">jace.cards</text>
+<text x="112" y="302" class="s">card pool &amp; encoder</text>
+<rect class="round" x="222" y="254" width="189" height="62" rx="10"/>
+<text x="316" y="281" class="m">jace.data</text>
+<text x="316" y="302" class="s">17Lands &amp; catalog</text>
+<rect class="box" x="426" y="254" width="188" height="62" rx="10"/>
+<text x="520" y="281" class="m">jace.modules</text>
+<text x="520" y="302" class="s">packed transformers</text>
+<rect class="side" x="646" y="18" width="156" height="298" rx="10"/>
+<text x="724" y="132" class="t">managym /</text>
+<text x="724" y="152" class="t">manabot</text>
+<text x="724" y="180" class="s">rules engine</text>
+<text x="724" y="199" class="s">ActorCritic &amp; v11 obs</text>
+<text x="724" y="218" class="s">rollout collection</text>
+<text x="724" y="246" class="s">(learner recipes banned)</text>
+<path class="line" d="M614 48 H642" marker-end="url(#a)"/>
+<text x="410" y="352" class="s">Modules import downward only. Blue boxes mark the AST-enforced manabot/managym seam</text>
+<text x="410" y="373" class="s">(jace.loops, jace.rl.loop, jace.eval, jace.runs, and jace.data.catalog).</text>
 </svg>

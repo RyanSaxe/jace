@@ -1,128 +1,64 @@
 # Architecture
 
-jace is a set of modules that a training loop calls. This page describes
-what each module contains and how games reach the code that learns from
-them.
+jace is organized into two stages and ten small packages with AST-enforced import boundaries:
+
+- **Stage A (active gameplay self-play):** Trains a Magic player over `managym` using `manabot`'s `ActorCritic` backbone, jace's pure-tensor RL core (`jace.rl`), parallel mirrored evaluation (`jace.eval`), Academy-native run storage (`jace.runs`), and multi-process training loops (`jace.loops`).
+- **Stage B (pretrained Limited pipeline):** Builds content-based card embeddings (`jace.cards`), downloads and caches 17Lands tables (`jace.data`), simulates booster pods and trains a drafter (`jace.draft`), and trains an autoregressive deck builder and deck score (`jace.decks`). These models are pretrained on human data and ready to reconnect into end-to-end Limited self-play.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../assets/modules-dark.svg">
-  <img alt="The modules of jace in rows, where a module imports only from the rows below it. Top: jace.loops. Then jace.draft, jace.decks, jace.train and jace.eval. Then jace.play. Then jace.engine, the only module that imports manabot, the game engine. At the bottom, jace.cards. jace.tracking stands alone." src="../assets/modules-light.svg">
+  <img alt="The package layers of Jace v2. Modules import downward only, and blue boxes mark the AST-enforced manabot/managym seam." src="../assets/modules-light.svg">
 </picture>
 
-| Module          | Contains                                                  |
-| --------------- | --------------------------------------------------------- |
-| `jace.cards`    | Card records, card ids, the card encoder and the table frozen from it |
-| `jace.engine`   | `GameBatch`, the interface games are played through, and the code that plays a match between two players |
-| `jace.play`     | The guess model, the player and the win chance            |
-| `jace.draft`    | Boosters, the draft pod and the drafter                   |
-| `jace.decks`    | The deck score and the deck builder                       |
-| `jace.train`    | Game collection, the losses and the update step           |
-| `jace.eval`     | Paired deals, win rates and the check on the guess model  |
-| `jace.data`     | Human drafts and decks from 17Lands, and the card encoder's inputs |
-| `jace.loops`    | Training loops, limited formats, schedules and the command-line entry points |
-| `jace.tracking` | A training run's record on disk                           |
+## Package map
 
-`jace.data` is not in the diagram. It imports only `jace.cards`, and only
-`jace.loops` imports it.
+| Package         | Role                                                                                          |
+| --------------- | --------------------------------------------------------------------------------------------- |
+| `jace.rl`       | Pure-tensor RL math (`credit`, `losses`, `select`, `pool`, `diagnostics`) plus `loop` bridge  |
+| `jace.eval`     | Mirrored deals, parallel CPU eval, adaptive judge, forensics, probe diffs, 17Lands deck splits |
+| `jace.runs`     | Academy-native gameplay runs (`.safetensors`, `.policy.json`, JSONL metrics, atomic resume)   |
+| `jace.loops`    | CLI entry points, multi-process collector, batched counterfactual forks, fast harness, formats |
+| `jace.cards`    | Card records, `CardPool`, content-based `CardEncoder`, and frozen `CardTable`                 |
+| `jace.data`     | 17Lands and MTGJSON loaders, deterministic CRC-32 splits, text/program caching, `catalog` seam |
+| `jace.draft`    | Booster specs, multi-pod draft state machine, and causal transformer `DrafterModel`           |
+| `jace.decks`    | `DeckBuilder`, `DeckScore`, `BuildRules`, and batch-sampled deck search                       |
+| `jace.modules`  | Shared transformer builder and packed unpadded `encode_real` helper                           |
+| `jace.tracking` | File-locked, hash-verified run records used by Stage B pretraining loops                      |
 
-## Games go through one interface
+## Enforced import boundaries
 
-Every game played in training goes through `GameBatch`. A batch is made
-for a fixed list of matchups, each a pair of decks, and plays exactly
-those games, a few at a time, until all are over.
+Six `ast-grep` rules in `.byor/rules/project/` enforce the module graph on every commit and CI run:
 
-```python
-class GameBatch(Protocol):
-    def decisions(self) -> Decisions: ...
-    def act(self, actions: npt.NDArray[np.int64]) -> tuple[Finished, ...]: ...
-    def hidden_cards(self) -> HiddenCards: ...
-```
+| Rule                                 | Enforces                                                                                                     |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `jace.no-manabot-learner-recipes`    | Bans `manabot.training.updates`, `manabot.training.loops`, and `manabot.recipes` everywhere. All RL algorithms live in `jace.rl`. |
+| `jace.manabot-import-boundaries`     | Only `jace.data.catalog`, `jace.rl.loop`, `jace.eval`, `jace.runs`, and `jace.loops` may import `manabot` or `managym`. |
+| `jace.pure-rl-math-boundaries`       | `jace.rl.credit`, `jace.rl.losses`, and `jace.rl.select` cannot import engine, domain, eval, run, or loop modules. |
+| `jace.leaf-packages-stay-leaf`       | `jace.cards`, `jace.data`, `jace.modules`, and `jace.tracking` never import higher-level packages.           |
+| `jace.only-loops-import-draft`       | Outside `jace.draft`, only `jace.loops` imports `jace.draft`, keeping constructed gameplay free of draft code. |
+| `jace.nothing-imports-loops`         | Nothing outside `jace.loops` imports `jace.loops`. Loops are top-level wiring only.                          |
 
-| Method         | Returns                                                             |
-| -------------- | ------------------------------------------------------------------- |
-| `decisions`    | The pending decision of every game in play: which game, who acts, the board they see |
-| `act`          | The games that ended on this step, with their decks and outcome     |
-| `hidden_cards` | Both seats' true hands and libraries, for training the guess model and the win chance |
+Keeping `jace.rl.credit`, `jace.rl.losses`, `jace.rl.select`, `jace.rl.pool`, and `jace.rl.diagnostics` free of engine imports means every RL primitive can be swapped, composed, and unit-tested on synthetic tensors in milliseconds.
 
-When a game ends, the batch starts the next matchup of the list in its
-place. Once none is left, `decisions` returns no rows. `Decisions` and
-`Finished` identify each game by its position in the list.
+## Command-line entry points
 
-Two modules implement the interface:
+Five modules in `jace.loops` run directly via `uv run python -m <module>`:
 
-- `jace.engine.manabot` plays real Magic through the batched games of
-  managym, manabot's engine. Its `board_layout` returns the layout of the
-  engine's board arrays as a `BoardLayout`, which the play models are
-  built from.
-- `jace.engine.toy` plays High Card, a game in which each seat holds three
-  cards, picks one, and the higher pick wins. Tests and the smallest
-  example use it, so they need no engine.
+| Module                       | Stage | Purpose                                                                               |
+| ---------------------------- | ----- | ------------------------------------------------------------------------------------- |
+| `jace.loops.train_ten_decks` | A     | Self-play lab over the 10 built-in `elemental-world-v2` decks with optional forks     |
+| `jace.loops.train_full_data` | A     | Full 17Lands TLA self-play across 91,359 train decks with nested curricula and resume |
+| `jace.loops.harness`         | A     | Fast experiment screening and standalone `--eval-only` adaptive H2H judging           |
+| `jace.loops.pretrain`        | B     | Supervised pretraining of `DrafterModel` and `CardEncoder` on 17Lands picks           |
+| `jace.loops.pretrain_decks`  | B     | Supervised pretraining of `DeckScore` and `DeckBuilder` on 17Lands decks              |
 
-## Scoring plays one game at a time
+## Explicit state machines
 
-Scoring is the only part of jace that plays games without `GameBatch`.
-`jace.engine.scoring` plays a match between any two players, such as jace
-checkpoints or manabot's scripted players. It plays one game at a time for
-two reasons. manabot's scripted players read manabot's own game object,
-which a batch does not give them. Two different players also each need a
-seat with its own memory of the game.
+Most of jace consists of pure functions over tensors and frozen dataclasses. Four components own explicit state transitions:
 
-Each game also runs in a child process. A step of the engine can take very
-long on a rare board, and only killing its process ends that step. When a
-game runs past its time limit, `play_games` kills the process, records the
-game as hung and plays the rest in a new process.
-
-`jace.eval` defines which games make up a match and how their results are
-scored. A deal is two decks and an engine seed. `legs` lists every deal as
-four games, so each player plays each deck in each seat. `score_match`
-gives a win rate with a range found by resampling whole deals, because the
-four games of a deal share their decks and shuffles.
-
-`jace.engine.manabot` and `jace.engine.scoring` are the only files that
-import managym or manabot, so a change in either package affects only
-those two files.
-
-## Pieces, not a framework
-
-jace has no trainer class. `jace.train` contains functions: play these
-games, compute this loss, take this step. A training loop is a function you
-write by calling them. `jace.loops` contains two such loops: `toy`, which
-trains a player on High Card, and `limited`, which runs one round of
-draft, build, play and learn.
-
-Seven modules in `jace.loops` run from the command line:
-
-| Entry point                 | Does                                            |
-| --------------------------- | ----------------------------------------------- |
-| `jace.loops.toy`            | Trains a player on High Card and prints how often it picks its best card |
-| `jace.loops.pretrain`       | Trains the drafter and the card encoder, on human picks |
-| `jace.loops.pretrain_decks` | Trains the deck score and the deck builder, on human decks |
-| `jace.loops.train_limited`  | Trains every model, on real games. The drafter and the deck models can start from pretraining checkpoints |
-| `jace.loops.keep_running`   | Runs `train_limited` and restarts it from its newest checkpoints whenever it stalls |
-| `jace.loops.train_player`   | Trains only the player, the win chance and the guess model, on fixed human decks |
-| `jace.loops.score`          | Scores a run's checkpoints against each other and against manabot's scripted players |
-
-Only `jace.loops` imports `jace.draft`, so constructed play, which has no
-draft, needs no drafting code. A loop for it would call the same pieces
-and leave out the draft.
-
-## The things that have state
-
-Most of jace is functions over values. Five things have real states:
-
-| Thing                | States                                           | Moved by          |
-| -------------------- | ------------------------------------------------ | ----------------- |
-| A draft pod          | `Picking`, `Complete`                            | `advance`         |
-| A play worker        | `Starting`, `Ready`, `Playing`                   | `play_on_workers` |
-| A training run       | created, running, completed, failed, interrupted | `writing`         |
-| A game               | A pending decision, or finished                  | `GameBatch.act`   |
-| The deck-score check | The search reads the human-trained score, then the learning one | `check_scores` |
-
-A draft pod and a play worker have one type for each state.
-[Training](training.md#playing-games-in-worker-processes) describes the
-workers. A run's states are the values of `RunState`, and each change is one
-line of the run's `state.jsonl`. A game is pending while it has a row in
-`decisions`, and finished once `act` returns it as a `Finished`. The
-deck-score check is one `ScoreCheck` record, which the limited loop passes
-from each iteration to the next. Its `reads_learning` becomes true once and
-never becomes false again.
+| Component           | States                                                  | Owner                              |
+| ------------------- | ------------------------------------------------------- | ---------------------------------- |
+| Draft pod           | `Picking` -> `Complete`                                 | `jace.draft.pod.advance`           |
+| Pretraining run     | `created` -> `running` -> `completed` / `failed` / `interrupted` | `jace.tracking.writing`   |
+| Historical pool     | Bounded FIFO deque of detached CPU weight dicts + EMA win rates | `jace.rl.pool.SnapshotPool` |
+| Worker pool         | Persistent spawned CPU workers (`req_queues` / `res_queue`) | `jace.loops.collect_pool.MultiProcessCollector` |

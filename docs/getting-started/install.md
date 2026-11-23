@@ -2,13 +2,13 @@
 
 ## Requirements
 
-| Need             | Why                                                       |
-| ---------------- | --------------------------------------------------------- |
-| Python 3.13      | The one version `pyproject.toml` allows                   |
-| [uv](https://docs.astral.sh/uv/) | It installs jace and runs every command   |
-| A Rust toolchain | Only to compile the engine, managym 0.2.3, on a platform with no prebuilt managym package. Prebuilt packages exist for macOS on Apple silicon and Linux on x86-64 |
+| Requirement                      | Purpose                                                                                             |
+| -------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Python 3.13                      | Required by `pyproject.toml` (`>=3.13,<3.14`)                                                       |
+| [uv](https://docs.astral.sh/uv/) | Installs dependencies and runs every command                                                        |
+| Rust toolchain                   | Needed only on platforms without a prebuilt `managym` 0.2.3 wheel (prebuilt wheels exist for Apple Silicon macOS and x86-64 Linux) |
 
-## Install and check
+## Install and verify
 
 ```sh
 git clone https://github.com/RyanSaxe/jace.git
@@ -17,27 +17,36 @@ uv sync
 uv run pytest -q
 ```
 
-`uv sync` installs managym and manabot 0.2.3. Where it has to compile the
-engine, that takes a few minutes. The tests then run in under a minute.
+`uv sync` installs `managym[academy]` and `manabot` from the pinned revision in `pyproject.toml`. Compiling `managym` from source takes a few minutes where no wheel exists. The unit test suite runs without external datasets.
 
-## Run the example
+## Run the 10-deck lab without external data
+
+`jace.loops.train_ten_decks` trains on the 10 closed-decklist `elemental-world-v2` decks bundled with `managym`:
 
 ```sh
-uv run python -m jace.loops.toy
+uv run python -m jace.loops.train_ten_decks \
+  --run-id smoke \
+  --updates 2 \
+  --num-envs 8 \
+  --steps-per-env 32 \
+  --eval-every 2 \
+  --eval-deals 4 \
+  --probe-count 8 \
+  --learn-device cpu
 ```
 
-It trains a player on High Card, a toy game that runs without the engine.
-Each seat holds three cards and plays one, and the higher card wins. In
-each line the example prints, `best card` is the share of decisions in
-which the player played its highest card. It rises as the player trains:
+The run writes checkpoints, metrics, forensics, and Academy replay files to `../jace-runs/v2-ten-deck-lab/smoke/`. Pass `--runs-dir` to choose another root folder.
 
-```text
-iteration  1  best card 0.34  win rate 0.49
-iteration 20  best card 0.61  win rate 0.67
-iteration 40  best card 0.81  win rate 0.76
+## Download 17Lands data (for full-data training and pretraining)
+
+Full-data gameplay training (`jace.loops.train_full_data`) and Stage B pretraining (`jace.loops.pretrain`, `jace.loops.pretrain_decks`) read public 17Lands Premier Draft exports and MTGJSON card attributes downloaded through [spells](https://github.com/oelarnes/spells):
+
+```sh
+uv run spells add TLA
 ```
+
+Avatar: The Last Airbender (`TLA`) takes about 300 MB in `~/.local/share/spells` (or `$SPELLS_DATA_HOME`). `jace` never downloads datasets automatically. See [Data](../reference/data.md) for how `jace.data` caches `decks.pt` and `drafts.pt` from those tables.
 
 ## Next
 
-Read [The approach](../concepts/approach.md), then
-[Write a loop](../guides/write-a-loop.md).
+Read [Architecture](../concepts/architecture.md) for the package layout, or go straight to [Running experiments](../guides/running-experiments.md) for full-data training, Academy replays, and checkpoint screening.

@@ -1,37 +1,41 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 596 406" role="img" aria-label="How jace trains, as a loop of four steps. Draft: the drafter picks a card from each pack. Build: the builder proposes decks and the deck score ranks them. Play: the player acts, with a guess of the opponent's cards. Learn: the game results update all six models, and the next draft uses the better models. Below the loop, one card embedding: every model reads cards through it, so a new set needs no new weights.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 356" role="img" aria-label="Jace v2 two-stage architecture. Stage A (active gameplay self-play) loops through Collect (CPU workers playing current self and even-odds snapshots), Learn in jace.rl (WDL GAE, dual-KL policy loss, and counterfactual forks), and Evaluate in jace.eval (mirrored deals, forensics, and Academy replays). Stage B (pretrained on 17Lands) connects jace.cards (content card encoder) to jace.draft (causal transformer drafter) and jace.decks (deck builder and deck score).">
 <style>
-text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#1f2328;text-anchor:middle;font-size:17px}
-.t{font-weight:600}.s{font-size:14px;fill:#59636e}.l{text-anchor:start}
-.line{fill:none;stroke:#1f2328;stroke-width:1.5}.head{fill:#1f2328}
-.box{fill:#ffffff;stroke:#b8bec6}.round{fill:#eef2fd;stroke:#3a5bd9}
-text{fill:#e6edf3}.s{fill:#9198a1}.line{stroke:#e6edf3}.head{fill:#e6edf3}.box{fill:#0d1117;stroke:#3d444d}.round{fill:#152042;stroke:#6e8cf0}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#e6edf3;text-anchor:middle;font-size:16px}
+.t{font-weight:600}.s{font-size:13.5px;fill:#9198a1}.l{text-anchor:start}.m{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14.5px;font-weight:600}
+.k{font-size:13px;font-weight:600;fill:#6e8cf0;text-anchor:start}
+.k2{font-size:13px;font-weight:600;fill:#9198a1;text-anchor:start}
+.line{fill:none;stroke:#e6edf3;stroke-width:1.5}.head{fill:#e6edf3}
+.box{fill:#0d1117;stroke:#3d444d}.round{fill:#152042;stroke:#6e8cf0}.band{fill:none;stroke:#3d444d;stroke-dasharray:5 4}
 </style>
 <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker></defs>
-<rect class="box" x="18" y="18" width="250" height="100" rx="10"/>
-<text x="143" y="54" class="t">Draft</text>
-<text x="143" y="79" class="s">The drafter picks a card</text>
-<text x="143" y="98" class="s">from each pack</text>
-<rect class="box" x="328" y="18" width="250" height="100" rx="10"/>
-<text x="453" y="54" class="t">Build</text>
-<text x="453" y="79" class="s">The builder proposes decks</text>
-<text x="453" y="98" class="s">and the deck score ranks them</text>
-<rect class="box" x="328" y="178" width="250" height="100" rx="10"/>
-<text x="453" y="214" class="t">Play</text>
-<text x="453" y="239" class="s">The player acts, with a guess</text>
-<text x="453" y="258" class="s">of the opponent's cards</text>
-<rect class="box" x="18" y="178" width="250" height="100" rx="10"/>
-<text x="143" y="214" class="t">Learn</text>
-<text x="143" y="239" class="s">The game results update</text>
-<text x="143" y="258" class="s">all six models</text>
-<path class="line" d="M268 68 H324" marker-end="url(#a)"/>
-<text x="298" y="58" class="s">pools</text>
-<path class="line" d="M453 118 V174" marker-end="url(#a)"/>
-<text x="465" y="153" class="s l">decks</text>
-<path class="line" d="M328 228 H272" marker-end="url(#a)"/>
-<text x="298" y="218" class="s">results</text>
-<path class="line" d="M143 178 V122" marker-end="url(#a)"/>
-<text x="155" y="153" class="s l">better models</text>
-<rect class="round" x="18" y="312" width="560" height="76" rx="10"/>
-<text x="298" y="343" class="t">One card embedding</text>
-<text x="298" y="367" class="s">Every model reads cards through it, so a new set needs no new weights</text>
+<text x="24" y="28" class="k">Stage A: Gameplay self-play (active)</text>
+<rect class="box" x="24" y="42" width="212" height="96" rx="10"/>
+<text x="130" y="74" class="t">Collect</text>
+<text x="130" y="98" class="s">CPU workers play self</text>
+<text x="130" y="117" class="s">and even-odds snapshots</text>
+<rect class="round" x="284" y="42" width="212" height="96" rx="10"/>
+<text x="390" y="74" class="t">Learn (<tspan class="m">jace.rl</tspan>)</text>
+<text x="390" y="98" class="s">WDL GAE, dual-KL loss,</text>
+<text x="390" y="117" class="s">counterfactual forks</text>
+<rect class="box" x="544" y="42" width="212" height="96" rx="10"/>
+<text x="650" y="74" class="t">Evaluate (<tspan class="m">jace.eval</tspan>)</text>
+<text x="650" y="98" class="s">Mirrored held-out deals,</text>
+<text x="650" y="117" class="s">forensics, Academy replays</text>
+<path class="line" d="M236 90 H280" marker-end="url(#a)"/>
+<path class="line" d="M496 90 H540" marker-end="url(#a)"/>
+<path class="line" d="M390 138 V172 H130 V142" marker-end="url(#a)"/>
+<text x="260" y="164" class="s">updated weights &amp; snapshots</text>
+<rect class="band" x="24" y="198" width="732" height="138" rx="12"/>
+<text x="42" y="224" class="k2">Stage B: Limited drafting and deck building (pretrained on 17Lands)</text>
+<rect class="box" x="42" y="240" width="208" height="78" rx="10"/>
+<text x="146" y="271" class="m">jace.cards</text>
+<text x="146" y="294" class="s">Content card encoder</text>
+<rect class="box" x="286" y="240" width="208" height="78" rx="10"/>
+<text x="390" y="271" class="m">jace.draft</text>
+<text x="390" y="294" class="s">Causal transformer drafter</text>
+<rect class="box" x="530" y="240" width="208" height="78" rx="10"/>
+<text x="634" y="271" class="m">jace.decks</text>
+<text x="634" y="294" class="s">Deck builder &amp; deck score</text>
+<path class="line" d="M250 279 H282" marker-end="url(#a)"/>
+<path class="line" d="M494 279 H526" marker-end="url(#a)"/>
 </svg>

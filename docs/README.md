@@ -1,20 +1,17 @@
 # Documentation
 
-Read [The approach](concepts/approach.md) first. It explains how jace
-learns Magic by self-play, and the other pages use its ideas without
-explaining them again.
+Start with [Architecture](concepts/architecture.md) for the package layout, then read [Gameplay RL](concepts/gameplay-rl.md) and [Evaluation](concepts/evaluation.md) to see how Stage A trains and measures the gameplay player. Read [Limited models](concepts/limited-models.md) for the pretrained Stage B drafter and deck models.
 
-| Page                                       | What it explains                             |
-| ------------------------------------------ | -------------------------------------------- |
-| [Install](getting-started/install.md)      | Requirements, the tests and the example      |
-| [The approach](concepts/approach.md)       | The training loop and the ideas behind it    |
-| [Architecture](concepts/architecture.md)   | The modules and the interface games go through |
-| [Models](concepts/models.md)               | What each model reads and returns            |
-| [Training](concepts/training.md)           | From played games to a gradient step         |
-| [Deck building](concepts/deck-building.md) | How decks are sampled, ranked and learned from |
-| [Write a loop](guides/write-a-loop.md)     | How to assemble and change a training loop   |
-| [Run records](reference/run-records.md)    | The files a training run writes              |
-| [Data](reference/data.md)                  | The human data jace reads and its source     |
-| [Sources](reference/sources.md)            | The papers, code and data behind the design  |
-| [Status](status.md)                        | What works today and what is not built       |
-| [Contributing](contributing/README.md)     | Set-up, checks and the design rules          |
+| Page                                               | Topic                                                         |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| [Install](getting-started/install.md)              | Requirements, tests, 10-deck quick run, and 17Lands data      |
+| [Architecture](concepts/architecture.md)           | Package layers, AST import boundaries, and CLI entry points   |
+| [Gameplay RL](concepts/gameplay-rl.md)             | Policy backbone, `jace.rl`, multi-process collection, forks   |
+| [Evaluation](concepts/evaluation.md)               | Mirrored deals, adaptive harness, forensics, and probe diffs  |
+| [Limited models](concepts/limited-models.md)       | Content card encoder, drafter, deck builder, and deck score   |
+| [Running experiments](guides/running-experiments.md) | Training runs, Academy replays, screening, and custom loops |
+| [Data](reference/data.md)                          | 17Lands and MTGJSON pipeline and Avatar set counts            |
+| [Run records](reference/run-records.md)            | Academy-native `jace.runs` and locked `jace.tracking` layouts |
+| [Sources](reference/sources.md)                    | Papers, repositories, and datasets behind the design          |
+| [Status](status.md)                                | Current results, verified components, and open work           |
+| [Contributing](contributing/README.md)             | Dev setup, automated checks, boundary rules, and tests        |
