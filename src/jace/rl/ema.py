@@ -1,10 +1,12 @@
 """Exponential moving average (EMA) shadow weights for smoother self-play policies.
 
 Maintains detached CPU copies of a module's parameters and buffers, advancing shadow
-weights after each training update via `decay * shadow + (1 - decay) * live` so
-evaluation checkpoints damp step-to-step stochasticity without consuming extra
-accelerator memory. Supports `copy_to`, `sync_from`, `export_state`, and
-`restore_state` for portable evaluation snapshots and atomic checkpoint resume.
+weights after each training update toward the live module so evaluation checkpoints
+damp step-to-step stochasticity without consuming extra accelerator memory. By
+default, the decay warms up from `0.1` toward `decay` over early updates so shadow
+weights shed random initialization quickly. Supports `copy_to`, `sync_from`,
+`export_state`, and `restore_state` for portable evaluation snapshots and atomic
+checkpoint resume.
 """
 
 from __future__ import annotations
@@ -28,21 +30,26 @@ class EmaWeights:
     """Detached CPU exponential moving average tracker for PyTorch module weights.
 
     Copies parameters and buffers onto CPU at construction, updates parameters via
-    `lerp_(live, 1 - decay)` on each `update` call while mirroring buffers verbatim,
-    and writes the smoothed weights into an evaluation copy with `copy_to`. Raises
-    `ValueError` if `decay` is outside `[0, 1)`.
+    `lerp_(live, 1 - effective_decay())` on each `update` call while mirroring
+    buffers verbatim, and writes the smoothed weights into an evaluation copy with
+    `copy_to`. When `warmup=True` (the default), `effective_decay()` ramps along
+    `min(decay, (1 + updates) / (10 + updates))` so early checkpoints forget random
+    initialization quickly instead of lagging behind it. Raises `ValueError` if
+    `decay` is outside `[0, 1)`.
     """
 
     _decay: float
+    _warmup: bool
     _updates: int
     _params: dict[str, Tensor]
     _buffers: dict[str, Tensor]
 
-    def __init__(self, module: nn.Module, *, decay: float = 0.999) -> None:
+    def __init__(self, module: nn.Module, *, decay: float = 0.999, warmup: bool = True) -> None:
         if not (0.0 <= decay < 1.0):
             msg = f"decay must be in [0, 1), got {decay}"
             raise ValueError(msg)
         self._decay = float(decay)
+        self._warmup = bool(warmup)
         self._updates = 0
         self._params = {name: param.detach().cpu().clone() for name, param in module.named_parameters()}
         self._buffers = {name: buf.detach().cpu().clone() for name, buf in module.named_buffers()}
@@ -52,8 +59,17 @@ class EmaWeights:
         return self._decay
 
     @property
+    def warmup(self) -> bool:
+        return self._warmup
+
+    @property
     def updates(self) -> int:
         return self._updates
+
+    def effective_decay(self) -> float:
+        if not self._warmup:
+            return self._decay
+        return min(self._decay, (1.0 + self._updates) / (10.0 + self._updates))
 
     @torch.no_grad()
     def sync_from(self, module: nn.Module) -> None:
@@ -62,7 +78,7 @@ class EmaWeights:
 
     @torch.no_grad()
     def update(self, module: nn.Module) -> None:
-        alpha = 1.0 - self._decay
+        alpha = 1.0 - self.effective_decay()
         for name, param in module.named_parameters():
             src = param.detach().cpu()
             shadow = self._params.get(name)
@@ -86,6 +102,7 @@ class EmaWeights:
     def export_state(self) -> dict[str, object]:
         return {
             "decay": self._decay,
+            "warmup": self._warmup,
             "updates": self._updates,
             "params": {name: tensor.detach().cpu().clone() for name, tensor in self._params.items()},
             "buffers": {name: tensor.detach().cpu().clone() for name, tensor in self._buffers.items()},
@@ -95,6 +112,9 @@ class EmaWeights:
         raw_decay = payload.get("decay")
         if isinstance(raw_decay, (int, float)) and 0.0 <= float(raw_decay) < 1.0:
             self._decay = float(raw_decay)
+        raw_warmup = payload.get("warmup")
+        if isinstance(raw_warmup, bool):
+            self._warmup = raw_warmup
         raw_updates = payload.get("updates")
         if isinstance(raw_updates, int):
             self._updates = raw_updates
