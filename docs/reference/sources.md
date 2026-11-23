@@ -7,13 +7,10 @@ and not followed, and it gives the reason. To add a source, put it under
 the heading that fits, in the same form, in the same commit as the code
 that uses it.
 
-Stage A trains gameplay over `managym` using `manabot`'s `ActorCritic`
-(shared categorical Win/Draw/Loss critic over closed-decklist `v11`
-observations) and `jace.rl`, described in [Gameplay RL](../concepts/gameplay-rl.md).
-Stage B keeps the pretrained content card encoder, drafter, deck builder,
-and deck score, described in [Limited models](../concepts/limited-models.md).
-Entries below that informed v1-only models (the separate guess model and
-hidden-card win-chance critic) are kept with notes on what v2 does instead.
+See [Gameplay RL](../concepts/gameplay-rl.md) and
+[Limited models](../concepts/limited-models.md) for the current architecture.
+Entries for earlier designs that jace moved away from are kept with notes on
+what jace does instead.
 
 ## Game-playing RL and search
 
@@ -100,10 +97,9 @@ hidden-card win-chance critic) are kept with notes on what v2 does instead.
   with dual reverse-KL pulls (`collection_kl` toward the behavior policy and
   `magnet_kl` toward `reference_probs`), paired with `jace.rl.select.top_fraction`
   advantage filtering and `jace.rl.pool.DampedSchedule` (Table S7 curves).
-  v1's separate guess model was retired in Stage A when gameplay moved to
-  `manabot`'s `ActorCritic` over closed-decklist `v11` observations.
-  Batched counterfactual forks (`jace.loops.fork_batch`) follow the short
-  playout + regularized step pattern.
+  An earlier separate guess model was replaced by closed-decklist `v11`
+  observations on the `ActorCritic` backbone. Batched counterfactual forks
+  (`jace.loops.fork_batch`) follow the short playout + regularized step pattern.
 
 - [The Update-Equivalence Framework for Decision-Time Planning](https://arxiv.org/abs/2304.13138).
   Sokota et al., 2023. Planning at decision time can sample histories from
@@ -193,8 +189,8 @@ hidden-card win-chance critic) are kept with notes on what v2 does instead.
 
   In jace, `jace.rl.pool.SnapshotPool(matching="even_odds")` samples past
   checkpoints in proportion to `max(0.05, p * (1 - p))` using each snapshot's
-  EMA win rate so self-play avoids cycling. v1's separate hidden-card critic
-  is no longer used in Stage A.
+  EMA win rate so self-play avoids cycling. An earlier separate hidden-card
+  critic was replaced by the shared categorical WDL critic.
 
 - [AlphaStar Unplugged: Large-Scale Offline Reinforcement Learning](https://arxiv.org/abs/2308.03526).
   Mathieu et al., 2023. The agent reads units with a transformer and
@@ -254,11 +250,11 @@ hidden-card win-chance critic) are kept with notes on what v2 does instead.
   reuse of its data than a policy does. One policy epoch was almost always
   near-optimal.
 
-  In jace v1, the win chance was a separate network. Stage A now uses
-  `manabot`'s shared-trunk `ActorCritic` with 1 policy epoch per rollout by
-  default, and `jace.loops.fork_audit.build_batched_fork_aux_loss` reuses
-  on-policy continuation states from counterfactual forks to supply extra WDL
-  value supervision.
+  Earlier jace prototypes used a separate value network. jace now uses the
+  shared-trunk `ActorCritic` with 1 policy epoch per rollout by default, and
+  `jace.loops.fork_audit.build_batched_fork_aux_loss` reuses on-policy
+  continuation states from counterfactual forks to supply extra WDL value
+  supervision.
 
 ## Imperfect information and opponent modelling
 
@@ -266,10 +262,9 @@ hidden-card win-chance critic) are kept with notes on what v2 does instead.
   Pinto et al., 2017. The critic trains on the simulator's full state while
   the actor sees only its observations.
 
-  In jace v1, a separate `WinChanceModel` read the opponent's true unseen
-  cards during training. Stage A retired that model in favor of `manabot`'s
-  shared `ActorCritic` categorical WDL critic over closed-decklist
-  observations.
+  Earlier jace prototypes used a separate `WinChanceModel` that read the
+  opponent's true unseen cards during training. jace now uses a shared
+  categorical WDL critic over closed-decklist observations.
 
 - [Unbiased Asymmetric Reinforcement Learning under Partial Observability](https://arxiv.org/abs/2105.11674).
   Baisero and Amato, 2021. A critic that reads only the true state gives a
@@ -686,13 +681,12 @@ hidden-card win-chance critic) are kept with notes on what v2 does instead.
   manabot adds the board encoding, scripted opponents, rating math and a
   PPO rule adapted from Ataraxos.
 
-  In jace, every game runs on `managym` and Stage A uses `manabot`'s
-  `ActorCritic`, `ObservationSpace`, and rollout collector while banning
-  upstream learner updates and recipes via AST rules. Only `jace.data.catalog`,
-  `jace.rl.loop`, `jace.eval`, `jace.runs`, and `jace.loops` may import
-  `manabot` or `managym`. Evaluation scores checkpoints against `managym`'s
-  `Heuristic` and random players, and `jace.cards` reads each card's program
-  tokens through `jace.data.catalog`.
+  In jace, games run on `managym` with `manabot`'s `ActorCritic`,
+  `ObservationSpace`, and rollout collector behind a narrow import seam
+  (`jace.data.catalog`, `jace.rl.loop`, `jace.eval`, `jace.runs`, and
+  `jace.loops`), while all RL algorithms live in `jace.rl`. Evaluation
+  scores checkpoints against `managym`'s `Heuristic` and random players, and
+  `jace.cards` reads each card's engine program through `jace.data.catalog`.
 
 - [XMage](https://github.com/magefree/mage), [Forge](https://github.com/Card-Forge/forge)
   and [phase-rs](https://github.com/phase-rs/phase). magefree, Card-Forge

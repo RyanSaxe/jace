@@ -1,41 +1,51 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 356" role="img" aria-label="Jace v2 two-stage architecture. Stage A (active gameplay self-play) loops through Collect (CPU workers playing current self and even-odds snapshots), Learn in jace.rl (WDL GAE, dual-KL policy loss, and counterfactual forks), and Evaluate in jace.eval (mirrored deals, forensics, and Academy replays). Stage B (pretrained on 17Lands) connects jace.cards (content card encoder) to jace.draft (causal transformer drafter) and jace.decks (deck builder and deck score).">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 368" role="img" aria-label="Jace unified architecture. A shared program card encoder turns managym card programs into card embeddings used across all three Limited Magic stages: Draft (8-seat pods and causal transformer), Deck Build (3-stage masked builder and set-transformer deck score), and Play (closed-decklist policy and WDL critic). Play generates trajectories for Self-Play RL (WDL GAE, dual-KL damped loss, even-odds snapshots, and counterfactual forks), which updates weights and win-rate signals back into Draft, Deck Build, and Play and sends checkpoints to Evaluation (mirrored deals, forensics, and adaptive judging).">
 <style>
-text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#e6edf3;text-anchor:middle;font-size:16px}
-.t{font-weight:600}.s{font-size:13.5px;fill:#9198a1}.l{text-anchor:start}.m{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14.5px;font-weight:600}
-.k{font-size:13px;font-weight:600;fill:#6e8cf0;text-anchor:start}
-.k2{font-size:13px;font-weight:600;fill:#9198a1;text-anchor:start}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#e6edf3;text-anchor:middle;font-size:15.5px}
+.t{font-weight:600}.s{font-size:13px;fill:#9198a1}
 .line{fill:none;stroke:#e6edf3;stroke-width:1.5}.head{fill:#e6edf3}
-.box{fill:#0d1117;stroke:#3d444d}.round{fill:#152042;stroke:#6e8cf0}.band{fill:none;stroke:#3d444d;stroke-dasharray:5 4}
+.bline{fill:none;stroke:#6e8cf0;stroke-width:1.5}.bhead{fill:#6e8cf0}
+.box{fill:#0d1117;stroke:#3d444d}.round{fill:#152042;stroke:#6e8cf0}
 </style>
-<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker></defs>
-<text x="24" y="28" class="k">Stage A: Gameplay self-play (active)</text>
-<rect class="box" x="24" y="42" width="212" height="96" rx="10"/>
-<text x="130" y="74" class="t">Collect</text>
-<text x="130" y="98" class="s">CPU workers play self</text>
-<text x="130" y="117" class="s">and even-odds snapshots</text>
-<rect class="round" x="284" y="42" width="212" height="96" rx="10"/>
-<text x="390" y="74" class="t">Learn (<tspan class="m">jace.rl</tspan>)</text>
-<text x="390" y="98" class="s">WDL GAE, dual-KL loss,</text>
-<text x="390" y="117" class="s">counterfactual forks</text>
-<rect class="box" x="544" y="42" width="212" height="96" rx="10"/>
-<text x="650" y="74" class="t">Evaluate (<tspan class="m">jace.eval</tspan>)</text>
-<text x="650" y="98" class="s">Mirrored held-out deals,</text>
-<text x="650" y="117" class="s">forensics, Academy replays</text>
-<path class="line" d="M236 90 H280" marker-end="url(#a)"/>
-<path class="line" d="M496 90 H540" marker-end="url(#a)"/>
-<path class="line" d="M390 138 V172 H130 V142" marker-end="url(#a)"/>
-<text x="260" y="164" class="s">updated weights &amp; snapshots</text>
-<rect class="band" x="24" y="198" width="732" height="138" rx="12"/>
-<text x="42" y="224" class="k2">Stage B: Limited drafting and deck building (pretrained on 17Lands)</text>
-<rect class="box" x="42" y="240" width="208" height="78" rx="10"/>
-<text x="146" y="271" class="m">jace.cards</text>
-<text x="146" y="294" class="s">Content card encoder</text>
-<rect class="box" x="286" y="240" width="208" height="78" rx="10"/>
-<text x="390" y="271" class="m">jace.draft</text>
-<text x="390" y="294" class="s">Causal transformer drafter</text>
-<rect class="box" x="530" y="240" width="208" height="78" rx="10"/>
-<text x="634" y="271" class="m">jace.decks</text>
-<text x="634" y="294" class="s">Deck builder &amp; deck score</text>
-<path class="line" d="M250 279 H282" marker-end="url(#a)"/>
-<path class="line" d="M494 279 H526" marker-end="url(#a)"/>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+<marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="bhead"/></marker>
+</defs>
+<rect class="round" x="24" y="20" width="772" height="64" rx="10"/>
+<text x="410" y="47" class="t">Shared Program Card Encoder</text>
+<text x="410" y="68" class="s">managym engine card programs → shared card embeddings (no per-card IDs or usage statistics)</text>
+<path class="bline" d="M134 84 V118" marker-end="url(#b)"/>
+<path class="bline" d="M410 84 V118" marker-end="url(#b)"/>
+<path class="bline" d="M686 84 V118" marker-end="url(#b)"/>
+<rect class="box" x="24" y="122" width="220" height="82" rx="10"/>
+<text x="134" y="152" class="t">1. Draft</text>
+<text x="134" y="173" class="s">8-seat booster pods</text>
+<text x="134" y="191" class="s">causal transformer picker</text>
+<rect class="box" x="300" y="122" width="220" height="82" rx="10"/>
+<text x="410" y="152" class="t">2. Deck Build</text>
+<text x="410" y="173" class="s">3-stage masked builder</text>
+<text x="410" y="191" class="s">set-transformer deck score</text>
+<rect class="box" x="576" y="122" width="220" height="82" rx="10"/>
+<text x="686" y="152" class="t">3. Play</text>
+<text x="686" y="173" class="s">closed-decklist games</text>
+<text x="686" y="191" class="s">policy &amp; WDL critic</text>
+<path class="line" d="M244 163 H296" marker-end="url(#a)"/>
+<text x="272" y="154" class="s">pool</text>
+<path class="line" d="M520 163 H572" marker-end="url(#a)"/>
+<text x="548" y="154" class="s">deck</text>
+<rect class="box" x="24" y="266" width="220" height="82" rx="10"/>
+<text x="134" y="296" class="t">Evaluate</text>
+<text x="134" y="317" class="s">mirrored deals · forensics</text>
+<text x="134" y="335" class="s">adaptive judge · replays</text>
+<rect class="round" x="300" y="266" width="496" height="82" rx="10"/>
+<text x="548" y="296" class="t">Self-Play RL</text>
+<text x="548" y="317" class="s">WDL GAE · dual-KL damped loss</text>
+<text x="548" y="335" class="s">even-odds snapshots · counterfactual forks</text>
+<path class="line" d="M686 204 V262" marker-end="url(#a)"/>
+<text x="738" y="238" class="s">trajectories</text>
+<path class="line" d="M300 307 H248" marker-end="url(#a)"/>
+<text x="272" y="298" class="s">eval</text>
+<path class="bline" d="M410 266 V208" marker-end="url(#b)"/>
+<path class="bline" d="M410 236 H134 V208" marker-end="url(#b)"/>
+<path class="bline" d="M410 236 H616 V208" marker-end="url(#b)"/>
+<text x="272" y="228" class="s">updated weights &amp; win-rate signal</text>
 </svg>

@@ -2,11 +2,11 @@
 
 ## Requirements
 
-| Requirement                      | Purpose                                                                                             |
-| -------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Python 3.13                      | Required by `pyproject.toml` (`>=3.13,<3.14`)                                                       |
-| [uv](https://docs.astral.sh/uv/) | Installs dependencies and runs every command                                                        |
-| Rust toolchain                   | Required by `uv sync` to compile the git-pinned `managym` engine from source                        |
+| Requirement                      | Purpose                                                                      |
+| -------------------------------- | ---------------------------------------------------------------------------- |
+| Python 3.13                      | Required by `pyproject.toml` (`>=3.13,<3.14`)                                |
+| [uv](https://docs.astral.sh/uv/) | Installs dependencies and runs every command                                 |
+| Rust toolchain                   | Required by `uv sync` to compile the pinned `managym` engine from source     |
 
 ## Install and verify
 
@@ -17,11 +17,11 @@ uv sync
 uv run pytest -q
 ```
 
-`uv sync` installs `manabot` and compiles `managym[academy]` from the pinned git revision in `pyproject.toml` (a few minutes on first build). The unit test suite runs without external datasets.
+`uv sync` compiles `managym[academy]` from the pinned git revision in `pyproject.toml` (a few minutes on first build). All unit tests run without external datasets.
 
-## Run the 10-deck lab without external data
+## Quick 10-deck lab run
 
-`jace.loops.train_ten_decks` trains on the 10 closed-decklist `elemental-world-v2` decks bundled with `managym`:
+`jace.loops.train_ten_decks` runs closed-decklist self-play on the 10 built-in `elemental-world-v2` decks bundled with `managym`:
 
 ```sh
 uv run python -m jace.loops.train_ten_decks \
@@ -35,18 +35,18 @@ uv run python -m jace.loops.train_ten_decks \
   --learn-device cpu
 ```
 
-The run writes checkpoints, metrics, forensics, and Academy replay files to `../jace-runs/v2-ten-deck-lab/smoke/`. Pass `--runs-dir` to choose another root folder.
+Artifacts are written to `../jace-runs/v2-ten-deck-lab/smoke/` (override with `--runs-dir`).
 
-## Download 17Lands data (for full-data training and pretraining)
+## Download 17Lands data
 
-Full-data gameplay training (`jace.loops.train_full_data`) and Stage B pretraining (`jace.loops.pretrain`, `jace.loops.pretrain_decks`) read public 17Lands Premier Draft exports and MTGJSON card attributes downloaded through [spells](https://github.com/oelarnes/spells):
+Full-data self-play (`jace.loops.train_full_data`) and supervised pretraining (`jace.loops.pretrain`, `jace.loops.pretrain_decks`) read public 17Lands Premier Draft exports and MTGJSON attributes via [spells](https://github.com/oelarnes/spells):
 
 ```sh
 uv run spells add TLA
 ```
 
-Avatar: The Last Airbender (`TLA`) takes about 300 MB in `~/.local/share/spells` (or `$SPELLS_DATA_HOME`). `jace` never downloads datasets automatically. See [Data](../reference/data.md) for how `jace.data` caches `decks.pt` and `drafts.pt` from those tables.
+Files are stored in `~/.local/share/spells` (or `$SPELLS_DATA_HOME`). jace never downloads datasets automatically. See [Data](../reference/data.md) for caching and deterministic splits.
 
 ## Next
 
-Read [Architecture](../concepts/architecture.md) for the package layout, or go straight to [Running experiments](../guides/running-experiments.md) for full-data training, Academy replays, and checkpoint screening.
+Read [Architecture](../concepts/architecture.md) for the system design, or [Running experiments](../guides/running-experiments.md) for training, pretraining, screening, and Academy replays.
