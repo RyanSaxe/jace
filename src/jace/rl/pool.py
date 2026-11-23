@@ -269,6 +269,8 @@ class TrainConfig:
     steps_per_env: int = 64
     seed: int = 1
     collect_device: str = "cpu"
+    native_workers: Literal[1, 2, 4] = 1
+    async_collect: bool = False
     update: UpdateConfig = UpdateConfig()
     games_path: Path | None = None
     record_fraction: float = 0.0

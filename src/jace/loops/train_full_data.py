@@ -42,6 +42,7 @@ from jace.loops.agent_factory import DecisionMemoryKind, build_agent, build_damp
 from jace.loops.collect_pool import MultiProcessCollector, WorkerPoolConfig
 from jace.loops.entry_points import default_device_name
 from jace.loops.fork_audit import BatchedForkSpec, add_fork_cli_args, open_batched_fork_hook
+from jace.loops.local_collector import LocalCollectorConfig, LocalShardedCollector, add_full_data_rl_args
 from jace.rl import (
     EmaWeights,
     SnapshotPool,
@@ -111,6 +112,8 @@ class FullDataConfig:
     snapshot_matching: Literal["uniform", "even_odds"] = "even_odds"
     log_grad_agreement: bool = True
     collect_workers: int = 8
+    native_workers: Literal[1, 2, 4] = 1
+    async_collect: bool = False
     eval_workers: int = 8
     shard_size: int = 512
     shard_refresh_every: int = 50
@@ -347,6 +350,8 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
         steps_per_env=cfg.steps_per_env,
         seed=cfg.seed,
         collect_device=cfg.collect_device,
+        native_workers=cfg.native_workers,
+        async_collect=cfg.async_collect,
         update=UpdateConfig(
             epochs=cfg.epochs,
             minibatch_size=cfg.minibatch_size,
@@ -391,7 +396,29 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
                 )
             ).collect
             if cfg.collect_workers > 0
-            else None
+            else stack.enter_context(
+                LocalShardedCollector(
+                    LocalCollectorConfig(
+                        num_envs=cfg.num_envs,
+                        steps_per_env=cfg.steps_per_env,
+                        collect_device=cfg.collect_device,
+                        native_workers=cfg.native_workers,
+                        seed=cfg.seed,
+                        games_path=layout.train_games_path(),
+                        record_fraction=cfg.record_train_fraction,
+                        enable_snapshots=cfg.snapshot_fraction > 0.0,
+                        shard_size=cfg.shard_size,
+                        shard_refresh_every=cfg.shard_refresh_every,
+                        card_pool_size=cfg.card_pool_size,
+                        curriculum_pools=curriculum_pools,
+                        curriculum_blend_updates=cfg.curriculum_blend_updates,
+                        start_update=start_update,
+                    ),
+                    catalog=catalog,
+                    obs_space=obs_space,
+                    template_agent=agent,
+                )
+            ).collect
         )
         prepare_aux = open_batched_fork_hook(
             stack,
@@ -423,24 +450,6 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
     return layout
 
 
-def _add_rl_cli_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--hidden-dim", type=int, default=160)
-    parser.add_argument("--attention-layers", type=int, default=2)
-    parser.add_argument("--decision-memory", choices=("none", "gru", "transformer"), default="none")
-    parser.add_argument("--lam-policy", type=float, default=0.5)
-    parser.add_argument("--lam-value", type=float, default=0.8)
-    parser.add_argument("--select", dest="select_kind", choices=("top25", "top50", "all"), default="top50")
-    parser.add_argument("--filter-scope", choices=("actor", "actor_critic"), default="actor")
-    parser.add_argument("--min-advantage", type=float, default=0.01)
-    parser.add_argument("--clip", type=float, default=0.2)
-    parser.add_argument("--collection-kl", type=float, default=0.1)
-    parser.add_argument("--magnet-kl", type=float, default=0.01)
-    parser.add_argument("--value-coef", type=float, default=1.0)
-    parser.add_argument("--schedule-kind", choices=("damped", "decay", "none"), default="decay")
-    parser.add_argument("--schedule-decay", type=float, default=9.0)
-    parser.add_argument("--ema", type=float, default=None)
-
-
 def _parse_args(argv: Sequence[str] | None) -> FullDataConfig:
     parser = argparse.ArgumentParser(description="Train Jace v2 across all 17Lands TLA human decks.")
     parser.add_argument("--runs-dir", type=Path, default=Path("../jace-runs"))
@@ -454,19 +463,7 @@ def _parse_args(argv: Sequence[str] | None) -> FullDataConfig:
     parser.add_argument("--minibatch-size", type=int, default=1024)
     parser.add_argument("--lr", dest="learning_rate", type=float, default=2.5e-4)
     parser.add_argument("--max-grad-norm", type=float, default=0.267)
-    _add_rl_cli_args(parser)
-    parser.add_argument("--snapshot-fraction", type=float, default=0.25)
-    parser.add_argument("--snapshot-every", type=int, default=10)
-    parser.add_argument("--snapshot-pool-size", type=int, default=16)
-    parser.add_argument("--snapshot-matching", choices=("uniform", "even_odds"), default="even_odds")
-    parser.add_argument("--log-grad-agreement", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--collect-workers", type=int, default=8)
-    parser.add_argument("--eval-workers", type=int, default=8)
-    parser.add_argument("--shard-size", type=int, default=512)
-    parser.add_argument("--shard-refresh-every", type=int, default=50)
-    parser.add_argument("--card-pool-size", type=int, default=None)
-    parser.add_argument("--curriculum-stages", type=str, default=None)
-    parser.add_argument("--curriculum-blend-updates", type=int, default=10)
+    add_full_data_rl_args(parser)
     parser.add_argument("--collect-device", default="cpu")
     parser.add_argument("--learn-device", default=default_device_name())
     parser.add_argument("--eval-every", type=int, default=40)

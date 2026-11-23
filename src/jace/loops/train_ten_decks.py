@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import torch
 from manabot.backends.torch.checkpoint import load_checkpoint
@@ -102,6 +103,8 @@ class LabConfig:
     snapshot_every: int = 10
     snapshot_pool_size: int = 16
     collect_workers: int = 0
+    native_workers: Literal[1, 2, 4] = 1
+    async_collect: bool = False
     collect_device: str = "cpu"
     learn_device: str = field(default_factory=default_device_name)
     eval_every: int = 25
@@ -370,6 +373,8 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
         steps_per_env=cfg.steps_per_env,
         seed=cfg.seed,
         collect_device=cfg.collect_device,
+        native_workers=cfg.native_workers,
+        async_collect=cfg.async_collect,
         update=UpdateConfig(
             epochs=cfg.epochs,
             minibatch_size=cfg.minibatch_size,
@@ -446,6 +451,8 @@ def _parse_args(argv: Sequence[str] | None) -> LabConfig:
     parser.add_argument("--snapshot-every", type=int, default=10)
     parser.add_argument("--snapshot-pool-size", type=int, default=16)
     parser.add_argument("--collect-workers", type=int, default=0)
+    parser.add_argument("--native-workers", type=int, choices=(1, 2, 4), default=1)
+    parser.add_argument("--async-collect", action="store_true", default=False)
     parser.add_argument("--collect-device", default="cpu")
     parser.add_argument("--learn-device", default=default_device_name())
     parser.add_argument("--eval-every", type=int, default=25)
