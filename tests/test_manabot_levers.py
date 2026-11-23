@@ -10,6 +10,7 @@ forward/backward updates with compact `MemoryArchive` IPC batch merging and live
 from __future__ import annotations
 
 import copy
+import itertools
 from typing import TYPE_CHECKING
 
 import managym
@@ -172,7 +173,9 @@ def test_ema_weights_smooths_parameters_and_copies_to_eval_module() -> None:
     with pytest.raises(ValueError, match="decay"):
         EmaWeights(layer, decay=1.0)
 
-    ema_layer = EmaWeights(layer, decay=0.9)
+    ema_layer = EmaWeights(layer, decay=0.9, warmup=False)
+    assert ema_layer.warmup is False
+    assert ema_layer.effective_decay() == pytest.approx(0.9)
     with torch.no_grad():
         layer.weight.fill_(3.0)
         layer.bias.fill_(2.0)
@@ -184,6 +187,62 @@ def test_ema_weights_smooths_parameters_and_copies_to_eval_module() -> None:
     ema_layer.copy_to(eval_copy)
     assert torch.allclose(eval_copy.weight, torch.full_like(eval_copy.weight, 1.2))
     assert torch.allclose(eval_copy.bias, torch.full_like(eval_copy.bias, 0.2))
+
+
+def test_ema_weights_warmup_sheds_init_approaches_decay_and_roundtrips_state() -> None:
+    layer = nn.Linear(3, 2)
+    with torch.no_grad():
+        layer.weight.fill_(1.0)
+        layer.bias.fill_(0.0)
+
+    ema = EmaWeights(layer, decay=0.999)
+    assert ema.warmup is True
+    assert ema.effective_decay() == pytest.approx(0.1)
+
+    with torch.no_grad():
+        layer.weight.fill_(3.0)
+        layer.bias.fill_(2.0)
+    ema.update(layer)
+
+    eval_copy = nn.Linear(3, 2)
+    ema.copy_to(eval_copy)
+    # First update uses decay=0.1, shedding 90% of initial parameters immediately.
+    assert torch.allclose(eval_copy.weight, torch.full_like(eval_copy.weight, 2.8))
+    assert torch.allclose(eval_copy.bias, torch.full_like(eval_copy.bias, 1.8))
+
+    decays = [ema.effective_decay()]
+    for _ in range(89):
+        ema.update(layer)
+        decays.append(ema.effective_decay())
+    assert ema.updates == 90
+    assert all(prev < nxt for prev, nxt in itertools.pairwise(decays))
+    assert decays[8] == pytest.approx(10.0 / 19.0)
+    assert ema.effective_decay() == pytest.approx(0.91)
+
+    capped = EmaWeights(layer, decay=0.5)
+    for _ in range(9):
+        capped.update(layer)
+    assert capped.effective_decay() == pytest.approx(0.5)
+
+    # export_state/restore_state round-trip warmup, and omit-warmup payloads keep existing setting.
+    fixed_state = EmaWeights(layer, decay=0.9, warmup=False).export_state()
+    assert fixed_state["warmup"] is False
+    restored = EmaWeights(layer, decay=0.999, warmup=True)
+    restored.restore_state(fixed_state)
+    assert restored.warmup is False
+    assert restored.effective_decay() == pytest.approx(0.9)
+
+    legacy_payload = {k: v for k, v in ema.export_state().items() if k != "warmup"}
+    keep_true = EmaWeights(layer, decay=0.999, warmup=True)
+    keep_true.restore_state(legacy_payload)
+    assert keep_true.warmup is True
+    assert keep_true.updates == 90
+    assert keep_true.effective_decay() == pytest.approx(0.91)
+
+    keep_false = EmaWeights(layer, decay=0.999, warmup=False)
+    keep_false.restore_state(legacy_payload)
+    assert keep_false.warmup is False
+    assert keep_false.effective_decay() == pytest.approx(0.999)
 
 
 def test_ema_resume_roundtrip_preserves_live_and_shadow_weights(tmp_path: Path) -> None:
@@ -206,12 +265,13 @@ def test_ema_resume_roundtrip_preserves_live_and_shadow_weights(tmp_path: Path) 
     fresh_agent, _ = build_agent(hidden_dim=16, attention_layers=1)
     fresh_opt = torch.optim.Adam(fresh_agent.parameters(), lr=5e-4)
     fresh_pool = SnapshotPool(max_size=4, matching="even_odds")
-    fresh_ema = EmaWeights(fresh_agent, decay=0.5)
+    fresh_ema = EmaWeights(fresh_agent, decay=0.5, warmup=False)
     completed = load_resume_state(
         layout, agent=fresh_agent, optimizer=fresh_opt, snapshot_pool=fresh_pool, ema=fresh_ema
     )
     assert completed == 10
     assert fresh_ema.decay == pytest.approx(0.9)
+    assert fresh_ema.warmup is True
     assert fresh_ema.updates == 1
     for key, live_val in agent.state_dict().items():
         assert torch.allclose(fresh_agent.state_dict()[key], live_val)
