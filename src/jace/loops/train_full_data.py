@@ -1,7 +1,7 @@
 """Full-data 17Lands TLA self-play training loop with held-out parallel eval and resume.
 
 Trains Jace v2's width-160 `ActorCritic` across all 91,359 human Limited decks in
-`decks.pt` using sharded multi-process CPU collection and MPS updates. Supports
+`decks.pt` using sharded multi-process CPU collection and GPU/CPU updates. Supports
 AlphaStar-style even-odds snapshot matching, batch-to-batch gradient-agreement logging,
 atomic checkpoint resume, and fast 8-worker mirrored evaluations strictly on the 10,137
 unseen held-out human decks.
@@ -15,7 +15,7 @@ import json
 import logging
 import sys
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -39,6 +39,7 @@ from jace.eval import (
     top_card_pool,
 )
 from jace.loops.collect_pool import MultiProcessCollector, WorkerPoolConfig
+from jace.loops.entry_points import default_device_name
 from jace.loops.train_ten_decks import build_agent
 from jace.rl import (
     CreditFn,
@@ -121,7 +122,7 @@ class FullDataConfig:
     curriculum_stages: str | None = None
     curriculum_blend_updates: int = 10
     collect_device: str = "cpu"
-    learn_device: str = "mps"
+    learn_device: str = field(default_factory=default_device_name)
     eval_every: int = 40
     eval_deals: int = 100
     forensics_deals: int = 20
@@ -472,7 +473,7 @@ def _parse_args(argv: Sequence[str] | None) -> FullDataConfig:
     parser.add_argument("--curriculum-stages", type=str, default=None)
     parser.add_argument("--curriculum-blend-updates", type=int, default=10)
     parser.add_argument("--collect-device", default="cpu")
-    parser.add_argument("--learn-device", default="mps" if torch.backends.mps.is_available() else "cpu")
+    parser.add_argument("--learn-device", default=default_device_name())
     parser.add_argument("--eval-every", type=int, default=40)
     parser.add_argument("--eval-deals", type=int, default=100)
     parser.add_argument("--forensics-deals", type=int, default=20)

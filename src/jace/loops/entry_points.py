@@ -32,6 +32,7 @@ __all__ = (
     "RunArguments",
     "add_card_flags",
     "add_run_flags",
+    "default_device_name",
     "device_named",
     "load_card_table",
     "set_cards",
@@ -77,10 +78,18 @@ def add_run_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--manabot-commit", default="unknown")
 
 
+def default_device_name() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def device_named(name: str) -> torch.device:
     if name != "auto":
         return torch.device(name)
-    return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    return torch.device(default_device_name())
 
 
 def start_run(

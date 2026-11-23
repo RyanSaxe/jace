@@ -17,9 +17,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-import torch
-
 from jace.eval import AdaptiveEvalConfig, AdaptiveEvalResult, play_adaptive_parallel
+from jace.loops.entry_points import default_device_name
 from jace.loops.forks import ForkConfig
 from jace.loops.train_ten_decks import LabConfig, run_ten_deck_lab
 
@@ -222,7 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             record_train_fraction=0.0,
             init_checkpoint=ns.init_checkpoint,
             fork_config=_build_fork_config(ns),
-            learn_device="mps" if torch.backends.mps.is_available() else "cpu",
+            learn_device=default_device_name(),
             seed=ns.seed,
         )
         layout = run_ten_deck_lab(lab_cfg)

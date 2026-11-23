@@ -295,7 +295,7 @@ class _Arguments(RunArguments):
 def _arguments(argv: Sequence[str]) -> _Arguments:
     parser = argparse.ArgumentParser(description="Train the deck score and the deck builder on human decks.")
     add_run_flags(parser)
-    parser.add_argument("--device", default="auto", help="cpu, mps or cuda; auto takes mps when it is available")
+    parser.add_argument("--device", default="auto", help="cpu, mps or cuda; auto prefers cuda, then mps")
     parser.add_argument(
         "--score-steps",
         type=int,

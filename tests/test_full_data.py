@@ -29,6 +29,7 @@ from jace.eval.human_decks import (
     top_card_pool,
 )
 from jace.loops.collect_pool import MultiProcessCollector, WorkerPoolConfig
+from jace.loops.entry_points import default_device_name, device_named
 from jace.loops.train_ten_decks import build_agent
 from jace.rl.diagnostics import GradientAgreementTracker, snapshot_win_rate
 from jace.rl.pool import SnapshotPool
@@ -205,3 +206,21 @@ def test_nested_curriculum_pools_and_smooth_blending(tmp_path: Path) -> None:
         catalog, count=10, seed=3, update_idx=15, stage_pools=stage_pools, blend_updates=10
     )
     assert len(blended.decks) == 10
+
+
+# Hardware backends (CUDA and MPS) cannot both be present on the same test host.
+# ast-grep-ignore: python.question-mocks
+def test_default_device_prefers_cuda_then_mps_then_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    assert default_device_name() == "cuda"
+    assert device_named("auto") == torch.device("cuda")
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert default_device_name() == "mps"
+    assert device_named("auto") == torch.device("mps")
+
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    assert default_device_name() == "cpu"
+    assert device_named("auto") == torch.device("cpu")
+    assert device_named("cpu") == torch.device("cpu")

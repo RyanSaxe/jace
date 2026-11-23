@@ -12,7 +12,7 @@ import logging
 import sys
 from collections.abc import Sequence
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import torch
@@ -32,6 +32,7 @@ from jace.eval import (
     run_forensics,
 )
 from jace.loops.collect_pool import MultiProcessCollector, WorkerPoolConfig
+from jace.loops.entry_points import default_device_name
 from jace.loops.forks import ForkCollectorPool, ForkConfig
 from jace.rl import (
     CollectFn,
@@ -102,7 +103,7 @@ class LabConfig:
     snapshot_pool_size: int = 16
     collect_workers: int = 0
     collect_device: str = "cpu"
-    learn_device: str = "mps"
+    learn_device: str = field(default_factory=default_device_name)
     eval_every: int = 25
     eval_deals: int = 20
     probe_count: int = 64
@@ -464,7 +465,7 @@ def _parse_args(argv: Sequence[str] | None) -> LabConfig:
     parser.add_argument("--snapshot-pool-size", type=int, default=16)
     parser.add_argument("--collect-workers", type=int, default=0)
     parser.add_argument("--collect-device", default="cpu")
-    parser.add_argument("--learn-device", default="mps" if torch.backends.mps.is_available() else "cpu")
+    parser.add_argument("--learn-device", default=default_device_name())
     parser.add_argument("--eval-every", type=int, default=25)
     parser.add_argument("--eval-deals", type=int, default=20)
     parser.add_argument("--probe-count", type=int, default=64)
