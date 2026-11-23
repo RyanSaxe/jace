@@ -40,6 +40,7 @@ from jace.eval import (
 )
 from jace.loops.collect_pool import MultiProcessCollector, WorkerPoolConfig
 from jace.loops.entry_points import default_device_name
+from jace.loops.fork_audit import BatchedForkSpec, add_fork_cli_args, open_batched_fork_hook
 from jace.loops.train_ten_decks import build_agent
 from jace.rl import (
     CreditFn,
@@ -62,6 +63,7 @@ from jace.runs import (
     RunLayout,
     academy_commands,
     append_metric,
+    append_train_metric,
     create_run,
     load_resume_state,
     save_forensics,
@@ -130,6 +132,7 @@ class FullDataConfig:
     record_train_fraction: float = 0.01
     init_checkpoint: Path | None = None
     resume: bool = False
+    fork: BatchedForkSpec = field(default_factory=BatchedForkSpec)
     seed: int = 1
 
 
@@ -266,36 +269,6 @@ def _open_or_create_layout(cfg: FullDataConfig, *, catalog: HumanDeckCatalog, pa
     return create_run(runs_dir=cfg.runs_dir, experiment=cfg.experiment, run_id=cfg.run_id, config=run_config)
 
 
-def _log_train_step(layout: RunLayout, record: StepRecord) -> None:
-    stats = record.stats
-    row: dict[str, object] = {
-        "kind": "train",
-        "update": record.update,
-        "opponent": record.opponent,
-        "lr": round(record.learning_rate, 7),
-        "tau": round(record.magnet_tau, 6),
-        "rows": stats.rows,
-        "selected_rows": stats.selected_rows,
-        "completed_games": stats.completed_games,
-        "policy_loss": round(stats.policy_loss, 5),
-        "value_loss": round(stats.value_loss, 5),
-        "collection_kl": round(stats.collection_kl, 5),
-        "magnet_kl": round(stats.magnet_kl, 5),
-        "entropy": round(stats.entropy, 5),
-        "clip_fraction": round(stats.clip_fraction, 5),
-        "grad_norm": round(stats.grad_norm, 4),
-        "mean_advantage_abs": round(stats.mean_advantage_abs, 5),
-        "collect_s": round(record.collect_s, 3),
-        "learn_s": round(record.learn_s, 3),
-        "tps": round(stats.rows / max(record.collect_s + record.learn_s, 1e-6), 1),
-    }
-    if record.grad_cosine is not None:
-        row["grad_cosine"] = round(record.grad_cosine, 5)
-    if record.snapshot_win_rate is not None:
-        row["snapshot_win_rate"] = round(record.snapshot_win_rate, 4)
-    append_metric(layout, row)
-
-
 def _init_training_state(
     cfg: FullDataConfig,
     *,
@@ -365,7 +338,7 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
         run_eval(iteration=0, record_games=False)
 
     def on_update(record: StepRecord) -> None:
-        _log_train_step(layout, record)
+        append_train_metric(layout, record)
         if record.update % cfg.eval_every == 0 or record.update == cfg.updates:
             run_eval(iteration=record.update, record_games=True)
 
@@ -418,6 +391,16 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
             if cfg.collect_workers > 0
             else None
         )
+        prepare_aux = open_batched_fork_hook(
+            stack,
+            cfg.fork,
+            hidden_dim=cfg.hidden_dim,
+            attention_layers=cfg.attention_layers,
+            decks_path=cfg.decks_path,
+            learn_device=cfg.learn_device,
+            seed=cfg.seed + 50_000,
+            layout=layout,
+        )
         train_self_play(
             agent,
             optimizer,
@@ -429,6 +412,7 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
             loss_schedule=loss_schedule,
             config=train_cfg,
             collect_fn=collect_fn,
+            prepare_aux=prepare_aux,
             on_update=on_update,
             snapshot_pool=pool,
         )
@@ -481,8 +465,12 @@ def _parse_args(argv: Sequence[str] | None) -> FullDataConfig:
     parser.add_argument("--record-train-fraction", type=float, default=0.01)
     parser.add_argument("--init-checkpoint", type=Path, default=None)
     parser.add_argument("--resume", action="store_true", default=False)
+    add_fork_cli_args(parser)
     parser.add_argument("--seed", type=int, default=1)
-    return FullDataConfig(**vars(parser.parse_args(argv)))
+    ns = parser.parse_args(argv)
+    fork_spec = BatchedForkSpec.from_namespace(ns)
+    raw = {key: val for key, val in vars(ns).items() if not key.startswith("fork")}
+    return FullDataConfig(**raw, fork=fork_spec)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

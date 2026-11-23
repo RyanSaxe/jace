@@ -8,11 +8,13 @@ horizon-vs-full-game correlation audit finishes without errors on tiny models.
 
 from __future__ import annotations
 
+from typing import NoReturn
+
 import torch
 
 from jace.eval.deals import build_deals, elemental_decks
-from jace.loops.fork_audit import audit_horizon_correlation, build_batched_fork_aux_loss
-from jace.loops.fork_batch import BatchedForkCollectorPool, BatchedForkConfig
+from jace.loops.fork_audit import audit_horizon_correlation, build_batched_fork_aux_loss, parse_fork_kinds
+from jace.loops.fork_batch import BatchedForkCollectorPool, BatchedForkConfig, _safe_clone, _safe_step
 from jace.loops.train_ten_decks import build_agent
 
 
@@ -67,3 +69,35 @@ def test_horizon_correlation_audit_runs_cleanly_on_tiny_agent() -> None:
     for summary in summaries:
         assert -1.0 <= summary.pearson_r <= 1.0
         assert 0.0 <= summary.sign_agreement <= 1.0
+
+
+def test_safe_step_and_clone_isolate_native_panic_exception() -> None:
+    class PanicException(BaseException):
+        pass
+
+    class PanickingEnv:
+        def step(self, action: int) -> NoReturn:
+            msg = f"native rust panic on action {action}"
+            raise PanicException(msg)
+
+        def is_game_over(self) -> bool:
+            return False
+
+        def clone_env(self) -> NoReturn:
+            msg = "native rust clone panic"
+            raise PanicException(msg)
+
+    env = PanickingEnv()
+    obs, is_done, is_failed = _safe_step(env, 0)
+    assert obs is None
+    assert is_done is True
+    assert is_failed is True
+    assert _safe_clone(env) is None
+
+
+def test_parse_fork_kinds_handles_all_and_csv() -> None:
+    assert parse_fork_kinds(None) is None
+    assert parse_fork_kinds("all") is None
+    assert parse_fork_kinds("  ") is None
+    assert parse_fork_kinds("declare_attacker") == ("declare_attacker",)
+    assert parse_fork_kinds("declare_attacker, declare_blocker") == ("declare_attacker", "declare_blocker")

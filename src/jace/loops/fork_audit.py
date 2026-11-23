@@ -19,6 +19,7 @@ import torch
 from manabot.backends.torch.arrays import on_device
 
 from jace.loops.fork_batch import (
+    BatchedForkCollectorPool,
     BatchedForkConfig,
     BatchedForkResult,
     ContinuationValueSample,
@@ -34,19 +35,29 @@ from jace.loops.fork_batch import (
 )
 from jace.loops.forks import ForkStats
 from jace.rl.losses import categorical_value_loss, fork_pairwise_loss, policy_log_probs
+from jace.runs import RunLayout, append_metric
 
 if TYPE_CHECKING:
+    import argparse
     from collections.abc import Callable, Mapping, Sequence
+    from contextlib import ExitStack
+    from pathlib import Path
 
     from manabot.backends.torch.policy import ActorCritic, PolicyInference
     from manabot.env.observation import ObservationSpace
 
     from jace.eval.deals import Deal
+    from jace.rl.loop import PrepareAuxFn
 
 __all__ = (
+    "BatchedForkSpec",
     "HorizonAuditSummary",
+    "add_fork_cli_args",
     "audit_horizon_correlation",
     "build_batched_fork_aux_loss",
+    "make_batched_fork_prepare_aux",
+    "open_batched_fork_hook",
+    "parse_fork_kinds",
 )
 
 _DECISIVE_GAP = 0.25
@@ -311,3 +322,154 @@ def audit_horizon_correlation(
         )
         for horizon in ordered_horizons
     ]
+
+
+def parse_fork_kinds(spec: str | None) -> tuple[str, ...] | None:
+    if spec is None:
+        return None
+    cleaned = spec.strip()
+    if not cleaned or cleaned.lower() == "all":
+        return None
+    return tuple(part.strip() for part in cleaned.split(",") if part.strip())
+
+
+def add_fork_cli_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--forks-per-update", type=int, default=0)
+    parser.add_argument("--fork-every", type=int, default=1)
+    parser.add_argument("--fork-playouts", type=int, default=4)
+    parser.add_argument("--fork-kinds", type=str, default="declare_attacker")
+    parser.add_argument("--fork-weight", type=float, default=0.03)
+    parser.add_argument("--fork-value-weight", type=float, default=0.25)
+    parser.add_argument("--fork-workers", type=int, default=8)
+
+
+@dataclass(frozen=True, slots=True)
+class BatchedForkSpec:
+    forks_per_update: int = 0
+    fork_every: int = 1
+    fork_playouts: int = 4
+    fork_kinds: str = "declare_attacker"
+    fork_weight: float = 0.03
+    fork_value_weight: float = 0.25
+    fork_workers: int = 8
+
+    @classmethod
+    def from_namespace(cls, namespace: argparse.Namespace) -> BatchedForkSpec:
+        forks = getattr(namespace, "forks_per_update", 0)
+        every = getattr(namespace, "fork_every", 1)
+        playouts = getattr(namespace, "fork_playouts", 4)
+        kinds = getattr(namespace, "fork_kinds", "declare_attacker")
+        weight = getattr(namespace, "fork_weight", 0.03)
+        value_weight = getattr(namespace, "fork_value_weight", 0.25)
+        workers = getattr(namespace, "fork_workers", 8)
+        if not isinstance(forks, int) or forks < 0:
+            msg = f"forks_per_update must be a non-negative int, got {forks!r}"
+            raise ValueError(msg)
+        if not isinstance(every, int) or every < 1:
+            msg = f"fork_every must be >= 1, got {every!r}"
+            raise ValueError(msg)
+        if not isinstance(playouts, int) or playouts < 1:
+            msg = f"fork_playouts must be >= 1, got {playouts!r}"
+            raise ValueError(msg)
+        if not isinstance(workers, int) or workers < 1:
+            msg = f"fork_workers must be >= 1, got {workers!r}"
+            raise ValueError(msg)
+        if not isinstance(weight, (int, float)) or not isinstance(value_weight, (int, float)):
+            msg = "fork weights must be numeric"
+            raise TypeError(msg)
+        return cls(
+            forks_per_update=forks,
+            fork_every=every,
+            fork_playouts=playouts,
+            fork_kinds=str(kinds),
+            fork_weight=float(weight),
+            fork_value_weight=float(value_weight),
+            fork_workers=workers,
+        )
+
+
+def open_batched_fork_hook(
+    stack: ExitStack,
+    spec: BatchedForkSpec,
+    *,
+    hidden_dim: int,
+    attention_layers: int,
+    decks_path: Path | None,
+    learn_device: str,
+    seed: int,
+    layout: RunLayout | None = None,
+) -> PrepareAuxFn | None:
+    if spec.forks_per_update <= 0:
+        return None
+    fork_cfg = BatchedForkConfig(
+        forks_per_update=spec.forks_per_update,
+        playouts_per_action=spec.fork_playouts,
+        decision_kinds=parse_fork_kinds(spec.fork_kinds),
+        num_workers=spec.fork_workers,
+        fork_weight=spec.fork_weight,
+        value_reuse_weight=spec.fork_value_weight,
+    )
+    fork_pool = stack.enter_context(
+        BatchedForkCollectorPool(
+            hidden_dim=hidden_dim,
+            attention_layers=attention_layers,
+            num_workers=spec.fork_workers,
+            human_decks_path=decks_path,
+        )
+    )
+    return make_batched_fork_prepare_aux(
+        fork_pool,
+        config=fork_cfg,
+        device=torch.device(learn_device),
+        seed=seed,
+        fork_every=spec.fork_every,
+        layout=layout,
+    )
+
+
+def make_batched_fork_prepare_aux(
+    pool: BatchedForkCollectorPool,
+    *,
+    config: BatchedForkConfig,
+    device: torch.device,
+    seed: int,
+    fork_every: int = 1,
+    layout: RunLayout | None = None,
+) -> PrepareAuxFn:
+    """Build a `train_self_play` `prepare_aux` callback backed by `BatchedForkCollectorPool`.
+
+    Collects closed-deck counterfactual forks and continuation value samples every
+    `fork_every` updates, logs a `kind="fork"` metric row when `layout` is given, and
+    returns the staged auxiliary loss closure.
+    """
+    interval = max(1, fork_every)
+
+    def _prepare(agent: ActorCritic, update_idx: int) -> Callable[[], torch.Tensor | None] | None:
+        if update_idx % interval != 0:
+            return None
+        t0 = time.perf_counter()
+        result = pool.collect(agent, config=config, seed=seed + update_idx * 97)
+        collect_s = time.perf_counter() - t0
+        aux_fn, stats = build_batched_fork_aux_loss(
+            agent, result=result, config=config, device=device, collect_s=collect_s
+        )
+        if layout is not None:
+            append_metric(
+                layout,
+                {
+                    "kind": "fork",
+                    "update": update_idx,
+                    "total_forks": stats.total_forks,
+                    "decisive_forks": stats.decisive_forks,
+                    "alt_better_forks": stats.alt_better_forks,
+                    "value_samples": len(result.value_samples),
+                    "mean_gap": round(stats.mean_gap, 4),
+                    "mean_top_prob": round(stats.mean_top_prob, 4),
+                    "mean_alt_prob": round(stats.mean_alt_prob, 4),
+                    "fork_loss": round(stats.fork_loss, 5),
+                    "collect_s": round(stats.collect_s, 3),
+                },
+            )
+        return aux_fn
+
+    return _prepare
