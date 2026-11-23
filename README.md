@@ -4,10 +4,7 @@ jace learns to draft, build decks and play Magic: The Gathering by playing
 against itself. It plays its games on managym, the engine of
 [manabot](https://github.com/loopflowstudio/manabot), at version 0.2.3.
 
-> **Status: early.** Every part below has a first version with tests. The
-> drafter and the deck models have been trained on human data, and one short
-> run of the whole loop on real games taught a player to beat random play.
-> [Status](docs/status.md) has the measurements.
+> **Status: Stage A gameplay cleared 70%.** On 400 unseen 17Lands Avatar: The Last Airbender Limited decks (347 cards, closed decklists), Jace v2's self-play player (`jace.rl` + `jace.loops.train_full_data`) wins **71.5%** against `managym`'s scripted Heuristic (258,696 games / 34.2M decisions). The drafter and deck models are pretrained on human data and queued to reconnect in Stage B. [Status](docs/status.md) has the measurements.
 
 ## The approach
 
@@ -58,18 +55,12 @@ it is built from source, which needs a Rust toolchain.
 git clone https://github.com/RyanSaxe/jace.git
 cd jace
 uv sync
-uv run pytest -q                   # the tests
-uv run python -m jace.loops.toy    # train a player on a toy game
+uv run pytest -q                                       # unit tests
+uv run python -m jace.loops.train_ten_decks --help     # 10-deck lab loop
+uv run python -m jace.loops.train_full_data --help     # full 17Lands self-play loop
 ```
 
-The last command needs no game engine. The player learns a game where the
-highest card wins, and prints how often it picks its best card:
-
-```text
-iteration  1  best card 0.35  win rate 0.51
-iteration 20  best card 0.63  win rate 0.72
-iteration 40  best card 0.78  win rate 0.77
-```
+`train_ten_decks` runs closed-decklist self-play on the 10 built-in elemental decks without external data. `train_full_data` trains across all 91,359 17Lands TLA training decks in `decks.pt` and evaluates on 10,137 held-out human decks.
 
 ## Documentation
 

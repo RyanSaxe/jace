@@ -1,35 +1,30 @@
 # Status
 
-jace is at an early stage. A first version of every module exists and is
-tested. The drafter has been trained to copy human picks, and the deck
-score and deck builder have been trained on human decks, each with
-settings tuned on held-out data. The whole loop has run on real games
-several times. In an early run of 60 iterations, the player it trained
-came to beat random play.
+Jace v2 separates gameplay RL (Stage A) from drafting and deckbuilding (Stage B).
+The gameplay player uses `manabot`'s `ActorCritic` with Jace's own RL core
+(`jace.rl`), evaluation suite (`jace.eval`), multi-process collector, and
+batched counterfactual fork engine. On 400 unseen 17Lands Avatar: The Last
+Airbender Limited decks (347 unique cards, closed decklists), the `u3800`
+player beats `managym`'s scripted Heuristic **71.5%** (95% CI 67.5% to 75.5%).
+The drafter, deck score, and deck builder are pretrained on human data and
+queued to reconnect once gameplay experiments settle.
 
 Every number on this page is from Avatar: The Last Airbender. The text
 before each table describes what it was measured on.
 
 ## What works
 
-`uv run pytest -q` runs the tests.
+`uv run pytest -q` runs the test suite.
 
 | Area        | Shown by the tests                                                  |
 | ----------- | ------------------------------------------------------------------- |
+| Gameplay RL (`jace.rl`) | GAE over WDL critics, top-fraction advantage selection, damped policy and pairwise fork losses, power-law and decay schedules, even-odds snapshot pool, and gradient-agreement tracking |
+| Evaluation (`jace.eval`) | Deterministic mirrored deals, parallel workers with panic isolation, policy forensics, checkpoint diffs, and 17Lands human-deck splitting and nested curricula |
+| Full-data training (`jace.loops`) | Multi-process CPU collection with worker error surfacing, atomic checkpoint resume, batched counterfactual fork rollouts with value reuse, and fast calibrated experiment harness |
+| Run records (`jace.runs`) | Academy-compatible run layouts, atomic resume state round-trips, and JSONL metric logging |
 | Drafting    | Pods draft by the rules, many at once, with one model call per pick |
 | Deck build  | Every sampled deck is legal, a sampled deck's log-probability matches the one training computes for it, and the search returns distinct decks best first |
-| Deck score check | The search switches to the learning deck score only once its test loss is lower by the margin, and never back |
-| Real games  | The adapter on managym 0.2.3 replays a seed exactly and hides the opponent's decklist |
-| Models      | All six run on a larger card pool than they were built with         |
-| Training    | A player learns the toy game, `play_games` plays exactly the games it is given, and a model whose rate is zero does not change |
-| End to end  | One limited iteration on the toy game updates every model it trains |
-| Real engine | The player, its win chance and the guess model take one training step on real games |
-| Records     | A run whose writer was killed can be resumed, and a tampered checkpoint does not load |
-| Human data  | Drafts and decks load from 17Lands tables, and a drafter learns a pick rule from them |
-| Human decks | A deck score learns which card wins, and a deck builder learns a deck rule, on held-out decks |
-
-On the toy game, the share of decisions where the player picks its best
-card rises from 0.34 to 0.81 in 40 iterations.
+| Human data  | Drafts and decks load from 17Lands tables, and a drafter, deck score, and deck builder learn from them |
 
 ## Pretraining on human picks
 
@@ -183,27 +178,26 @@ does not load. Training on half the decks cost only 0.06 nats a deck at
 did.
 
 
-## Training on real games
+## Training on real games (Jace v2)
 
-Two early runs of `jace.loops.train_limited` ran on a Mac CPU. The player
-was scored against uniformly random play on held-out human decks, with
-about 80 games per point. Both runs came before the loop played every game
-to its end, shuffled its updates and stopped training the embedding, so
-they measured an older loop than the current one.
+The runs below trained a width-160, 2-layer `ActorCritic` (2.38M parameters,
+`v11` observations, closed decklists) on an Apple M3 Max using 8 CPU
+collection workers and MPS learning (`jace.loops.train_full_data`). All
+win rates below were measured on fresh mirrored deals drawn strictly from
+the 10,137 held-out 17Lands TLA human decks (347 unique cards, zero training
+overlap).
 
-| Player's settings                                           | Iterations | Win rate against random |
-| ----------------------------------------------------------- | ---------- | ----------------------- |
-| Credit horizon 0.95, learning rate 3e-4, no advantage filter | 60, in 24 minutes and 5,004 games | From 54% to 77% |
-| Ataraxos's published settings: credit horizon 0.5, learning rate 1e-4, the top quarter of advantages | 42 | Stayed near 50% |
+| Checkpoint | Cumulative updates | Cumulative games / decisions | Train-loop hours | vs. Heuristic (400g det.) | vs. Heuristic (400g stoch.) | Head-to-head |
+| ---------- | ------------------ | ---------------------------- | ---------------- | ------------------------- | --------------------------- | ------------ |
+| 10-deck `u1200` (`w160-l2-overnight`) | 1,200 | 10 elemental decks | — | 55.0% (200g zero-shot) | 55.0% (200g) | baseline |
+| `full-17lands-curr-1800u` (`u1800`) | 1,800 | 122,375 / 17.0M | 5.92 h | 61.8% [57.8%–65.7%] | 63.0% [59.1%–66.9%] | 62.3% vs. 10-deck `u1200` (400g) |
+| `full-17lands-cont-2000u` (`u3800`) | 3,800 | 258,696 / 34.2M | 12.00 h | **71.5%** [67.5%–75.5%] | **71.5%** [67.5%–75.5%] | 57.0% vs. `u1800` (400g), 71.5% vs. `u1200` (200g) |
 
-The credit horizon is `--lam-advantage`, and the filter is
-`--keep-quantile`. Which of the three settings makes the difference is
-being measured and is not known yet.
+Key behavior verified on `u3800`:
 
-Both runs came before a bug was fixed. The optimizers of the deck score
-and the deck builder also included the card embedding's parameters, which
-had an optimizer of their own. So each of their updates stepped the
-embedding twice.
+- Missed main-phase land drops reached **0.0%** and stayed near zero throughout the run.
+- Raising magnet `tau` (`0.005` down to `0.0017`) during `u1800` to `u3800` unlocked selective blocking (**50.0%** block rate vs. Heuristic's 51.2%).
+- Attack declarations remain pinned at **100.0%**, which is the target of the next batched counterfactual fork experiment (`jace.loops.fork_batch`).
 
 ## The guess model
 
