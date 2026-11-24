@@ -1,6 +1,8 @@
 # Architecture
 
-jace organizes Limited Magic learning into small, focused packages plus standalone operational scripts in `scripts/`, governed by an acyclic dependency graph.
+jace organizes Limited Magic learning into small, focused packages plus
+standalone operational scripts in `scripts/`, governed by an acyclic dependency
+graph.
 
 ## End-to-end data and model flow
 
@@ -45,7 +47,8 @@ flowchart LR
 
 ## Enforced import boundaries
 
-`ast-grep` rules in `.byor/rules/project/` enforce the module graph on every commit and CI run:
+`ast-grep` rules in `.byor/rules/project/` enforce the module graph on every
+commit and CI run:
 
 | Rule | Contract |
 | --- | --- |

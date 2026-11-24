@@ -1,6 +1,9 @@
 # Documentation
 
-Start with [Architecture](concepts/architecture.md) for the end-to-end system flow and package layout, then dive into [Gameplay RL](concepts/gameplay-rl.md), [Limited models](concepts/limited-models.md), and [Evaluation](concepts/evaluation.md).
+Start with [Architecture](concepts/architecture.md) for the end-to-end system
+flow and package layout, then dive into [Gameplay RL](concepts/gameplay-rl.md),
+[Limited models](concepts/limited-models.md), and
+[Evaluation](concepts/evaluation.md).
 
 | Page                                               | Topic                                                          |
 | -------------------------------------------------- | -------------------------------------------------------------- |

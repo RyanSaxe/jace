@@ -1,10 +1,13 @@
 # Running experiments
 
-Training, pretraining, and screening entry points run through `uv run python -m <module>`, while standalone operational scripts live in `scripts/`. Pass `--help` to any command for its full flag list and defaults.
+Training, pretraining, and screening entry points run through
+`uv run python -m <module>`, while standalone operational scripts live in
+`scripts/`. Pass `--help` to any command for its full flag list and defaults.
 
 ## 10-deck self-play lab
 
-Train on the 10 built-in closed-decklist `elemental-world-v2` decks with no external data:
+Train on the 10 built-in closed-decklist `elemental-world-v2` decks with no
+external data:
 
 ```sh
 uv run python -m jace.train.ten_decks \
@@ -15,11 +18,14 @@ uv run python -m jace.train.ten_decks \
   --eval-every 25
 ```
 
-Runs write checkpoints, metrics, forensics, and Academy replays under `<runs-dir>/v2-ten-deck-lab/<run-id>/` (default `--runs-dir ../jace-runs`).
+Runs write checkpoints, metrics, forensics, and Academy replays under
+`<runs-dir>/v2-ten-deck-lab/<run-id>/` (default `--runs-dir ../jace-runs`).
 
 ## Full-data 17Lands self-play
 
-Train across cached 17Lands decks (`decks.pt`) with a nested color-balanced card-pool curriculum, periodic held-out mirrored evaluation, and atomic resume checkpoints:
+Train across cached 17Lands decks (`decks.pt`) with a nested color-balanced
+card-pool curriculum, periodic held-out mirrored evaluation, and atomic resume
+checkpoints:
 
 ```sh
 uv run python -m jace.train.full_data \
@@ -32,7 +38,8 @@ uv run python -m jace.train.full_data \
   --eval-workers 8
 ```
 
-Resume an interrupted or continuing run from its latest atomic `resume-state.pt` (restoring policy weights, Adam state, EMA shadow weights, and `SnapshotPool`):
+Resume an interrupted or continuing run from its latest atomic `resume-state.pt`
+(restoring policy weights, Adam state, EMA shadow weights, and `SnapshotPool`):
 
 ```sh
 uv run python -m jace.train.full_data \
@@ -42,13 +49,22 @@ uv run python -m jace.train.full_data \
   --resume
 ```
 
-Pass `--init-checkpoint <path>` with a new `--run-id` to start a fresh schedule from an existing `.safetensors` checkpoint.
+Pass `--init-checkpoint <path>` with a new `--run-id` to start a fresh schedule
+from an existing `.safetensors` checkpoint.
 
 ## Running on Google Colab GPUs
 
-`scripts/colab_run.py` is a standalone PEP 723 launcher that provisions a Colab GPU VM via `uvx --from google-colab-cli colab`, uploads `decks.pt`, bootstraps Rust and `uv` on the runtime, and executes `jace.train.full_data` over one foreground SSH session. Keeping SSH attached prevents Colab's idle-client reaper from disconnecting long runs. A background thread downloads `metrics.jsonl`, `config.json`, and `checkpoints/resume-state.pt` over the Jupyter HTTP API while training runs, and cleanup runs one final sync before stopping the VM unless `--keep-vm` is set.
+`scripts/colab_run.py` is a standalone PEP 723 launcher that provisions a Colab
+GPU VM via `uvx --from google-colab-cli colab`, uploads `decks.pt`, bootstraps
+Rust and `uv` on the runtime, and executes `jace.train.full_data` over one
+foreground SSH session. Keeping SSH attached prevents Colab's idle-client reaper
+from disconnecting long runs. A background thread downloads `metrics.jsonl`,
+`config.json`, and `checkpoints/resume-state.pt` over the Jupyter HTTP API while
+training runs, and cleanup runs one final sync before stopping the VM unless
+`--keep-vm` is set.
 
-Inspect the local commands and remote bootstrap script before allocating a GPU with `--dry-run`:
+Inspect the local commands and remote bootstrap script before allocating a GPU
+with `--dry-run`:
 
 ```sh
 uv run scripts/colab_run.py \
@@ -63,7 +79,10 @@ uv run scripts/colab_run.py \
   --curriculum-stages 90:0,180:200,347:400
 ```
 
-Drop `--dry-run` to launch the run. Every argument after `--` forwards directly to `jace.train.full_data`. Because `--backup-dir` mirrors the run folder layout, you can resume an earlier or interrupted session on a new Colab runtime with `--resume-from`:
+Drop `--dry-run` to launch the run. Every argument after `--` forwards directly
+to `jace.train.full_data`. Because `--backup-dir` mirrors the run folder layout,
+you can resume an earlier or interrupted session on a new Colab runtime with
+`--resume-from`:
 
 ```sh
 uv run scripts/colab_run.py \
@@ -79,7 +98,9 @@ uv run scripts/colab_run.py \
 
 ## Experiment screening and head-to-head judging
 
-`jace.train.harness` runs short warm-start screens or standalone adaptive mirrored head-to-head checks (`100 -> 200 -> 500` deals) and prints a JSON verdict (`PROMOTE`, `KILL`, or `INCONCLUSIVE`):
+`jace.train.harness` runs short warm-start screens or standalone adaptive
+mirrored head-to-head checks (`100 -> 200 -> 500` deals) and prints a JSON
+verdict (`PROMOTE`, `KILL`, or `INCONCLUSIVE`):
 
 ```sh
 # Warm-start screen with counterfactual forks on declare_attacker
@@ -98,7 +119,9 @@ uv run python -m jace.train.harness \
 
 ## Playing and replaying checkpoints in Academy
 
-Every gameplay checkpoint includes a companion `.policy.json` file and native `managym` JSONL game recordings. Exact commands are recorded in each `forensics/iter-XXXX.json`:
+Every gameplay checkpoint includes a companion `.policy.json` file and native
+`managym` JSONL game recordings. Exact commands are recorded in each
+`forensics/iter-XXXX.json`:
 
 ```sh
 # Play interactively against a saved checkpoint
@@ -112,7 +135,8 @@ uv run managym academy replay path/to/games/eval-iter-0100.jsonl
 
 ## Pretraining the drafter and deck models on 17Lands
 
-Download a set with `uv run spells add TLA`, then pretrain the drafter and shared program `CardEncoder`, followed by `DeckScore` and `DeckBuilder`:
+Download a set with `uv run spells add TLA`, then pretrain the drafter and
+shared program `CardEncoder`, followed by `DeckScore` and `DeckBuilder`:
 
 ```sh
 # 1. Pretrain DrafterModel + CardEncoder (caches drafts.pt in --data-dir)

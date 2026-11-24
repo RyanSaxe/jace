@@ -1,6 +1,9 @@
 # Evaluation
 
-Magic has high deal variance from draws, mana screw, and play/draw order. `jace.eval` pairs mirrored deals, parallel CPU execution, sequential adaptive stopping, behavioral forensics, and probe-state diffs so every checkpoint is judged on both win rate and decision quality.
+Magic has high deal variance from draws, mana screw, and play/draw order.
+`jace.eval` pairs mirrored deals, parallel CPU execution, sequential adaptive
+stopping, behavioral forensics, and probe-state diffs so every checkpoint is
+judged on both win rate and decision quality.
 
 ## Mirrored paired deals
 
@@ -13,12 +16,19 @@ flowchart LR
     Pair --> CI["Paired SE & 95% CI\n(1-1 splits add zero variance)"]
 ```
 
-- **Parallel execution (`play_deals_parallel`).** Shards deals round-robin across spawned single-threaded CPU workers, caches each checkpoint once per worker, and isolates rare engine errors per leg without aborting the match.
-- **Disjoint held-out decks (`jace.collect.decks`, `jace.eval.deals.build_human_deals`).** Uses the deterministic CRC-32 `split_key` partition from `jace.data.store` so evaluation draws strictly from unseen held-out decks.
+- **Parallel execution (`play_deals_parallel`).** Shards deals round-robin
+  across spawned single-threaded CPU workers, caches each checkpoint once per
+  worker, and isolates rare engine errors per leg without aborting the match.
+- **Disjoint held-out decks (`jace.collect.decks`,
+  `jace.eval.deals.build_human_deals`).** Uses the deterministic CRC-32
+  `split_key` partition from `jace.data.store` so evaluation draws strictly from
+  unseen held-out decks.
 
 ## Adaptive sequential judging
 
-`evaluate_adaptive` and `jace.train.harness` step through a shared deterministic deal stream (`100 -> 200 -> 500` deals = `200 -> 400 -> 1,000` games) to stop early on clear wins or losses while saving budget for close matchups:
+`evaluate_adaptive` and `jace.train.harness` step through a shared deterministic
+deal stream (`100 -> 200 -> 500` deals = `200 -> 400 -> 1,000` games) to stop
+early on clear wins or losses while saving budget for close matchups:
 
 ```mermaid
 flowchart LR
@@ -35,7 +45,9 @@ flowchart LR
 
 ## Behavioral forensics (`jace.eval.forensics`)
 
-`run_forensics` audits live mirrored games against `managym.Heuristic` (default 20 deals = 40 games) and optionally records `managym` Academy replays (`ScalarCapture`):
+`run_forensics` audits live mirrored games against `managym.Heuristic` (default
+20 deals = 40 games) and optionally records `managym` Academy replays
+(`ScalarCapture`):
 
 | Metric                                            | What it catches                                                                 |
 | ------------------------------------------------- | ------------------------------------------------------------------------------- |
@@ -47,7 +59,9 @@ flowchart LR
 
 ## Probe-state checkpoint diffs (`jace.eval.diffs`)
 
-`capture_probes` saves deterministic decision states `(deal, prefix_actions)` covering priority, attack, block, and targeting. `diff_checkpoints` replays those states once and compares two checkpoints on identical observations:
+`capture_probes` saves deterministic decision states `(deal, prefix_actions)`
+covering priority, attack, block, and targeting. `diff_checkpoints` replays
+those states once and compares two checkpoints on identical observations:
 
 | Metric                 | Meaning                                                                  |
 | ---------------------- | ------------------------------------------------------------------------ |

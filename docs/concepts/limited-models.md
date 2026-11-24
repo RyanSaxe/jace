@@ -1,6 +1,8 @@
 # Limited models
 
-Drafting and deck building share one program-based card representation so every model scores cards from their mechanics alone, with no per-card IDs, no fixed card output heads, and no usage statistics.
+Drafting and deck building share one program-based card representation so every
+model scores cards from their mechanics alone, with no per-card IDs, no fixed
+card output heads, and no usage statistics.
 
 ## Shared program card encoder
 
@@ -24,7 +26,9 @@ flowchart TD
 
 ## Drafter (`jace.draft`)
 
-`DrafterModel` in [`jace/draft/model.py`](../../src/jace/draft/model.py) is a causal transformer (default width `256`, `6` layers, `8` heads, dropout `0.2`) over a seat's pick sequence:
+`DrafterModel` in [`jace/draft/model.py`](../../src/jace/draft/model.py) is a
+causal transformer (default width `256`, `6` layers, `8` heads, dropout `0.2`)
+over a seat's pick sequence:
 
 ```mermaid
 flowchart LR
@@ -34,12 +38,17 @@ flowchart LR
     Dot --> Mask["Mask Outside Pack (-inf)\n-> Pick Logits"]
 ```
 
-- **Single-pass training (`whole_draft`).** Interleaves picked tokens and query tokens under one `2t`-length causal mask, producing exact pick-by-pick logits for an entire draft in one forward pass.
-- **Parallel pods (`jace.draft.pod`).** `advance` steps batches of 8-seat booster pods from `Picking` to `Complete` in one batched model call per pick.
+- **Single-pass training (`whole_draft`).** Interleaves picked tokens and query
+  tokens under one `2t`-length causal mask, producing exact pick-by-pick logits
+  for an entire draft in one forward pass.
+- **Parallel pods (`jace.draft.pod`).** `advance` steps batches of 8-seat
+  booster pods from `Picking` to `Complete` in one batched model call per pick.
 
 ## Deck builder and deck score (`jace.decks`)
 
-Both models read distinct cards and `log1p`-scaled copy counts through `CardSetEncoder` (permutation-invariant transformer, default width `128`, `3` layers, `4` heads).
+Both models read distinct cards and `log1p`-scaled copy counts through
+`CardSetEncoder` (permutation-invariant transformer, default width `128`, `3`
+layers, `4` heads).
 
 ```mermaid
 flowchart LR
