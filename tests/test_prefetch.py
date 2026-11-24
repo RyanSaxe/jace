@@ -18,8 +18,8 @@ import torch
 from manabot.training.decks import UniformDecks
 from torch import nn
 
-from jace.eval import elemental_decks
-from jace.loops.agent_factory import build_agent
+from jace.collect.agent import build_agent
+from jace.collect.decks import elemental_decks
 from jace.rl import (
     SnapshotEntry,
     SnapshotPool,

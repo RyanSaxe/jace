@@ -17,10 +17,10 @@ Here they are hand-added priors, off unless `pretrain_drafter` is given a
 
 The card encoder reads each card's engine program. The pick loss trains it
 together with the drafter, each with its own optimizer. The encoder is saved as
-the run's "embedding" checkpoint, which `pretrain_decks` and the self-play loops
-read frozen.
+the run's "embedding" checkpoint, which `jace.pretrain.decks` and the self-play
+loops read frozen.
 
-Run it with `uv run python -m jace.loops.pretrain --help`. The card set must
+Run it with `uv run python -m jace.pretrain.draft --help`. The card set must
 already be downloaded with `uv run spells add <set>`.
 """
 
@@ -41,19 +41,19 @@ from jace.cards import FIRST_PROGRAM_TOKEN, CardEncoder, Rarity, own_parameters
 from jace.data import HumanDrafts, SetCards, load_drafts, program_tokens, read_set
 from jace.data.catalog import program_vocabulary
 from jace.draft import DrafterModel
-from jace.loops.entry_points import (
+from jace.modules import device_named
+from jace.pretrain.common import (
     ADAM_BETAS,
     RunArguments,
     add_card_flags,
     add_run_flags,
-    device_named,
     set_cards,
     start_run,
 )
-from jace.loops.formats import limited_format
-from jace.loops.schedules import RateScale, current_rates, scale_rates, warm_up_then_decay
-from jace.loops.supervised import apply, choice_loss
-from jace.tracking import Running, log_update, save_checkpoint, writing
+from jace.pretrain.formats import limited_format
+from jace.pretrain.schedules import RateScale, current_rates, scale_rates, warm_up_then_decay
+from jace.pretrain.supervised import apply, choice_loss
+from jace.storage.pretrain import Running, log_update, save_checkpoint, writing
 
 __all__ = (
     "CurvePoint",
@@ -408,7 +408,7 @@ def _baselines(
 def main(argv: Sequence[str]) -> None:
     """Pretrain a drafter on one card set and save its record, checkpoints and learning curve.
 
-    `jace.tracking` creates the run folder under `--run-dir`, and the run saves
+    `jace.storage.pretrain` creates the run folder under `--run-dir`, and the run saves
     a "drafter" and an "embedding" checkpoint in it. The curve file
     `<run id>.curve.json` is written beside the folder. Along with the curve,
     it contains the device, the wall time and two baselines scored on the same

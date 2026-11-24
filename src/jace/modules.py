@@ -1,10 +1,11 @@
-"""Helpers the models share: the standard transformer, and encoding without padding.
+"""Helpers the models share: standard transformers, unpadded encoding, and device selection.
 
 `transformer` builds the encoder that most of the models use. The deck
 models' `CardSetEncoder` builds its own from the same constants, so the
 encoder's settings are chosen in one place. `encode_real` runs an encoder
-on the real tokens only. That matters because the engine pads every board
-to a fixed size, and most of a board's rows are padding.
+on the real tokens only, because the engine pads every board to a fixed size.
+`default_device_name` and `device_named` resolve accelerator selection across
+pretraining and self-play entry points.
 """
 
 from dataclasses import dataclass
@@ -13,7 +14,15 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional
 
-__all__ = ("DROPOUT", "FEEDFORWARD_EXPANSION", "DropoutInEncodeRealError", "encode_real", "transformer")
+__all__ = (
+    "DROPOUT",
+    "FEEDFORWARD_EXPANSION",
+    "DropoutInEncodeRealError",
+    "default_device_name",
+    "device_named",
+    "encode_real",
+    "transformer",
+)
 
 # A transformer layer's feed-forward block is this many times the model width,
 # the ratio the original transformer used.
@@ -26,6 +35,20 @@ DROPOUT = 0.0
 # as a linear layer or a layer norm. With the counts rounded, a training block's update on MPS took about a tenth less
 # time. The dummy tokens add at most 1 / 2 ** _PADDING_SHARE_BITS of the count.
 _PADDING_SHARE_BITS = 4
+
+
+def default_device_name() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def device_named(name: str) -> torch.device:
+    if name != "auto":
+        return torch.device(name)
+    return torch.device(default_device_name())
 
 
 def transformer(width: int, *, layers: int, heads: int, dropout: float = DROPOUT) -> nn.TransformerEncoder:

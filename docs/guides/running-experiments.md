@@ -1,13 +1,13 @@
 # Running experiments
 
-Every training, pretraining, and evaluation loop runs through `uv run python -m <module>`. Pass `--help` to any module for its full flag list and defaults.
+Training, pretraining, and screening entry points run through `uv run python -m <module>`, while standalone operational scripts live in `scripts/`. Pass `--help` to any command for its full flag list and defaults.
 
 ## 10-deck self-play lab
 
 Train on the 10 built-in closed-decklist `elemental-world-v2` decks with no external data:
 
 ```sh
-uv run python -m jace.loops.train_ten_decks \
+uv run python -m jace.train.ten_decks \
   --run-id lab-baseline \
   --updates 150 \
   --num-envs 32 \
@@ -22,7 +22,7 @@ Runs write checkpoints, metrics, forensics, and Academy replays under `<runs-dir
 Train across cached 17Lands decks (`decks.pt`) with a nested color-balanced card-pool curriculum, periodic held-out mirrored evaluation, and atomic resume checkpoints:
 
 ```sh
-uv run python -m jace.loops.train_full_data \
+uv run python -m jace.train.full_data \
   --run-id tla-self-play \
   --decks-path ../jace-runs/data/decks.pt \
   --updates 600 \
@@ -32,10 +32,10 @@ uv run python -m jace.loops.train_full_data \
   --eval-workers 8
 ```
 
-Resume an interrupted or continuing run from its latest atomic `resume-state.pt` (restoring policy weights, Adam state, and `SnapshotPool`):
+Resume an interrupted or continuing run from its latest atomic `resume-state.pt` (restoring policy weights, Adam state, EMA shadow weights, and `SnapshotPool`):
 
 ```sh
-uv run python -m jace.loops.train_full_data \
+uv run python -m jace.train.full_data \
   --run-id tla-self-play \
   --decks-path ../jace-runs/data/decks.pt \
   --updates 1000 \
@@ -44,20 +44,53 @@ uv run python -m jace.loops.train_full_data \
 
 Pass `--init-checkpoint <path>` with a new `--run-id` to start a fresh schedule from an existing `.safetensors` checkpoint.
 
+## Running on Google Colab GPUs
+
+`scripts/colab_run.py` is a standalone PEP 723 launcher that provisions a Colab GPU VM via `uvx --from google-colab-cli colab`, uploads `decks.pt`, bootstraps Rust and `uv` on the runtime, and executes `jace.train.full_data` over one foreground SSH session. Keeping SSH attached prevents Colab's idle-client reaper from disconnecting long runs. A background thread downloads `metrics.jsonl`, `config.json`, and `checkpoints/resume-state.pt` over the Jupyter HTTP API while training runs, and cleanup runs one final sync before stopping the VM unless `--keep-vm` is set.
+
+Inspect the local commands and remote bootstrap script before allocating a GPU with `--dry-run`:
+
+```sh
+uv run scripts/colab_run.py \
+  --session tla-colab \
+  --gpu L4 \
+  --decks-path ../jace-runs/data/decks.pt \
+  --backup-dir ../jace-runs/v2-colab/tla-self-play \
+  --run-id tla-self-play \
+  --dry-run \
+  -- \
+  --updates 600 \
+  --curriculum-stages 90:0,180:200,347:400
+```
+
+Drop `--dry-run` to launch the run. Every argument after `--` forwards directly to `jace.train.full_data`. Because `--backup-dir` mirrors the run folder layout, you can resume an earlier or interrupted session on a new Colab runtime with `--resume-from`:
+
+```sh
+uv run scripts/colab_run.py \
+  --session tla-colab-resume \
+  --gpu L4 \
+  --decks-path ../jace-runs/data/decks.pt \
+  --backup-dir ../jace-runs/v2-colab/tla-self-play \
+  --resume-from ../jace-runs/v2-colab/tla-self-play \
+  --run-id tla-self-play \
+  -- \
+  --updates 1000
+```
+
 ## Experiment screening and head-to-head judging
 
-`jace.loops.harness` runs short warm-start screens or standalone adaptive mirrored head-to-head checks (`100 -> 200 -> 500` deals) and prints a JSON verdict (`PROMOTE`, `KILL`, or `INCONCLUSIVE`):
+`jace.train.harness` runs short warm-start screens or standalone adaptive mirrored head-to-head checks (`100 -> 200 -> 500` deals) and prints a JSON verdict (`PROMOTE`, `KILL`, or `INCONCLUSIVE`):
 
 ```sh
 # Warm-start screen with counterfactual forks on declare_attacker
-uv run python -m jace.loops.harness \
+uv run python -m jace.train.harness \
   --run-id fork-screen \
   --init-checkpoint path/to/baseline.safetensors \
   --forks-per-update 32 \
   --fork-kinds declare_attacker
 
 # Standalone adaptive head-to-head evaluation between two checkpoints
-uv run python -m jace.loops.harness \
+uv run python -m jace.train.harness \
   --eval-only \
   --candidate path/to/candidate.safetensors \
   --baseline path/to/baseline.safetensors
@@ -83,13 +116,13 @@ Download a set with `uv run spells add TLA`, then pretrain the drafter and share
 
 ```sh
 # 1. Pretrain DrafterModel + CardEncoder (caches drafts.pt in --data-dir)
-uv run python -m jace.loops.pretrain \
+uv run python -m jace.pretrain.draft \
   --data-dir ../jace-runs/data \
   --run-dir ../jace-runs/pretrain \
   --set TLA
 
 # 2. Pretrain DeckScore + DeckBuilder on frozen card vectors (caches decks.pt)
-uv run python -m jace.loops.pretrain_decks \
+uv run python -m jace.pretrain.decks \
   --data-dir ../jace-runs/data \
   --run-dir ../jace-runs/pretrain \
   --embedding-run ../jace-runs/pretrain/<drafter-run-id> \
@@ -100,14 +133,14 @@ uv run python -m jace.loops.pretrain_decks \
 
 `jace.rl` exposes composable callables rather than a monolithic trainer class:
 
-| Extension point | Signature / protocol                                         | Built-in implementations                           |
-| --------------- | ------------------------------------------------------------ | -------------------------------------------------- |
-| Credit          | `CreditFn: (Trajectory) -> CreditTargets`                    | `gae_wdl`, `monte_carlo`                           |
-| Row selection   | `SelectFn: (Tensor) -> Tensor`                               | `top_fraction`, `all_rows`                         |
-| Policy/value loss | `LossFn: (PolicyBatch) -> LossBreakdown`                   | `damped_policy_loss`, `ppo_loss`                   |
-| Schedule        | `LossScheduleFn: (int) -> tuple[float, float, LossFn]`       | `DecaySchedule`, `DampedSchedule`                  |
-| Collection      | `CollectFn(agent, *, opponent_entry, update_idx) -> RolloutBatch` | Local collector or `MultiProcessCollector.collect` |
-| Auxiliary loss  | `PrepareAuxFn: (ActorCritic, int) -> AuxLossFn | None`       | `ForkCollectorPool`, `build_batched_fork_aux_loss` |
+| Extension point | Signature / protocol | Built-in implementations |
+| --- | --- | --- |
+| Credit | `CreditFn: (Trajectory) -> CreditTargets` | `gae_wdl`, `monte_carlo` |
+| Row selection | `SelectFn: (Tensor) -> Tensor` | `top_fraction`, `all_rows` |
+| Policy/value loss | `LossFn: (PolicyBatch) -> LossBreakdown` | `damped_policy_loss`, `ppo_loss` |
+| Schedule | `LossScheduleFn: (int) -> tuple[float, float, LossFn]` | `DecaySchedule`, `DampedSchedule` |
+| Collection | `CollectFn(agent, *, opponent_entry, update_idx) -> RolloutBatch` | `LocalShardedCollector` or `MultiProcessCollector.collect` (`jace.collect`) |
+| Auxiliary loss | `PrepareAuxFn: (ActorCritic, int) -> AuxLossFn | None` | `ForkCollectorPool`, `build_batched_fork_aux_loss` (`jace.forks`) |
 
 ```python
 from jace.rl import TrainConfig, UpdateConfig, damped_policy_loss, gae_wdl, top_fraction, train_self_play

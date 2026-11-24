@@ -1,10 +1,10 @@
-"""Human 17Lands Limited deck loading, card-pool filtering, and eval deal builders.
+"""Human 17Lands Limited deck loading, built-in deck packs, and card-pool curricula.
 
 Reads the cached `decks.pt` tensor archive produced by `jace.data.decks` so self-play
 workers and evaluation scripts never re-parse raw 17Lands Parquet files. Applies the
-exact deterministic CRC-32 held-out split from `jace.data.store`, and samples compact
-`UniformDecks` shards so spawned workers validate hundreds of decks rather than all
-91,359 on startup.
+exact deterministic CRC-32 held-out split from `jace.data.store`, builds color-balanced
+nested card-pool curricula, and samples compact `UniformDecks` shards so spawned workers
+validate hundreds of decks rather than all 91,359 on startup.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from manabot.training.decks import UniformDecks
 from torch import Tensor
 
 from jace.data.store import SPLIT_KEYS
-from jace.eval.deals import Deal
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -32,9 +31,9 @@ __all__ = (
     "HumanDeckCatalog",
     "build_curriculum_deck_source",
     "build_curriculum_stage_pools",
-    "build_human_deals",
     "build_human_deck_source",
     "curriculum_blend_spec",
+    "elemental_decks",
     "load_human_deck_catalog",
     "needs_curriculum_refresh",
     "nested_card_pools",
@@ -305,39 +304,13 @@ def sample_human_decks(
     ]
 
 
-def build_human_deals(
-    catalog: HumanDeckCatalog,
-    *,
-    split: Literal["train", "held_out"] = "held_out",
-    count: int,
-    seed: int = 20_000,
-    decklists: DecklistDisclosure = "closed",
-    allowed_cards: frozenset[str] | None = None,
-) -> list[Deal]:
-    sampled = sample_human_decks(
-        catalog,
-        split=split,
-        count=count * 2,
-        seed=seed,
-        allowed_cards=allowed_cards,
-    )
-    deals: list[Deal] = []
-    for index in range(count):
-        name_a, deck_a = sampled[2 * index]
-        name_b, deck_b = sampled[2 * index + 1]
-        deals.append(
-            Deal(
-                seed=seed + index * 1009,
-                deck_a_name=name_a,
-                deck_b_name=name_b,
-                deck_a=dict(deck_a.main),
-                deck_b=dict(deck_b.main),
-                sideboard_a=dict(deck_a.sideboard),
-                sideboard_b=dict(deck_b.sideboard),
-                decklists=decklists,
-            )
-        )
-    return deals
+def elemental_decks() -> list[tuple[str, managym.Deck]]:
+    pack = "elemental-world-v2"
+    result: list[tuple[str, managym.Deck]] = []
+    for key in managym.authored_deck_keys(pack):
+        setup = managym.authored_deck_setup(pack, key)
+        result.append((key, managym.Deck(dict(setup.decklist), dict(setup.sideboard))))
+    return result
 
 
 def build_human_deck_source(

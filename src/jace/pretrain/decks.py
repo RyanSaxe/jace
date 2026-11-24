@@ -16,11 +16,11 @@ therefore never reads the basics counted in a human pool, and its basics head
 chooses how many of each basic fill the land slots that are left. The builder
 trains and is tested only on human decks that the rules allow, while the deck
 score trains on every deck. Both models are measured with
-`jace.loops.deck_measures`, on held-out decks and on as many training decks, so
+`jace.pretrain.deck_measures`, on held-out decks and on as many training decks, so
 the two curves show when a model starts to fit its training decks better than
 decks it has not seen.
 
-Run it with `uv run python -m jace.loops.pretrain_decks --help`. The card
+Run it with `uv run python -m jace.pretrain.decks --help`. The card
 set must already be downloaded with `uv run spells add <set>`.
 """
 
@@ -41,7 +41,16 @@ from torch.optim import Optimizer
 from jace.cards import own_parameters
 from jace.data import RESULT_FLOOR, HumanDecks, load_decks, read_set
 from jace.decks import BuildRules, Builds, DeckBuilder, DeckScore, build_log_probs, builds_from_decks, sample_builds
-from jace.loops.deck_measures import (
+from jace.modules import device_named
+from jace.pretrain.common import (
+    ADAM_BETAS,
+    RunArguments,
+    add_run_flags,
+    load_card_table,
+    set_cards,
+    start_run,
+)
+from jace.pretrain.deck_measures import (
     GAMES_FOR_A_RATE,
     allowed_by,
     build_log_loss,
@@ -49,20 +58,11 @@ from jace.loops.deck_measures import (
     land_total_match,
     score_fit,
 )
-from jace.loops.entry_points import (
-    ADAM_BETAS,
-    RunArguments,
-    add_run_flags,
-    device_named,
-    load_card_table,
-    set_cards,
-    start_run,
-)
-from jace.loops.formats import deck_rules, limited_format
-from jace.loops.schedules import RateScale, current_rates, scale_rates, warm_up_then_decay
-from jace.loops.supervised import apply, score_loss
-from jace.tracking import Running, log_update, save_checkpoint
-from jace.tracking import writing as writing_run
+from jace.pretrain.formats import deck_rules, limited_format
+from jace.pretrain.schedules import RateScale, current_rates, scale_rates, warm_up_then_decay
+from jace.pretrain.supervised import apply, score_loss
+from jace.storage.pretrain import Running, log_update, save_checkpoint
+from jace.storage.pretrain import writing as writing_run
 
 __all__ = (
     "BuilderPoint",
@@ -338,7 +338,7 @@ def main(argv: Sequence[str]) -> None:
     """Pretrain a deck score and a deck builder on one card set and save the run.
 
     The score trains first and the builder second, both on one card table.
-    `jace.tracking` creates the run folder under `--run-dir`, and the run saves
+    `jace.storage.pretrain` creates the run folder under `--run-dir`, and the run saves
     a "deck_score", a "deck_builder" and an "embedding" checkpoint in it. The
     curve file `<run id>.curve.json` is written beside the folder, with a
     baseline for each model.

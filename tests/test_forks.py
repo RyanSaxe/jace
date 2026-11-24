@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import torch
 
-from jace.loops.forks import ForkCollectorPool, ForkConfig, build_fork_aux_loss
-from jace.loops.train_ten_decks import build_agent
+from jace.collect.agent import build_agent
+from jace.forks.collect import ForkCollectorPool, ForkConfig, build_fork_aux_loss
 from jace.rl import fork_pairwise_loss, fork_targets_from_returns
 
 

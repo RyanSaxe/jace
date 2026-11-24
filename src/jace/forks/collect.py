@@ -29,7 +29,8 @@ from manabot.env.observation import ObservationSpace
 from manabot.infra.config import ModelConfig, ObservationConfig
 from managym.enums import ActionSpaceEnum
 
-from jace.eval.deals import Deal, build_deals, elemental_decks
+from jace.collect.decks import elemental_decks
+from jace.eval.deals import Deal, build_deals
 from jace.rl.losses import fork_pairwise_loss, policy_log_probs
 
 if TYPE_CHECKING:

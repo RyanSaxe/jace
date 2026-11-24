@@ -1,49 +1,67 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 384" role="img" aria-label="Package layers of jace. Top row: jace.loops (CLI training, pretraining, collector pool, forks, screening). Second row: jace.rl (GAE, losses, snapshots, loop), jace.eval (mirrored deals, forensics, diffs), jace.draft (booster pods and drafter), and jace.decks (builder, score, and search). Third row: jace.runs (gameplay checkpoints and replays) and jace.tracking (locked pretraining run records). Bottom foundation row: jace.cards (card pool and program encoder), jace.data (17Lands loaders and engine catalog), and jace.modules (packed transformers). On the right: managym and manabot runtime, accessed through the blue-highlighted seam modules.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 448" role="img" aria-label="Package layers of jace. Imports flow strictly down the DAG and right-to-left within a row. Row 1: jace.train (gameplay self-play CLIs) and jace.pretrain (supervised pretraining CLIs and helpers). Row 2: jace.forks imports jace.eval which imports jace.collect (right-to-left). Row 3: jace.storage.gameplay (checkpoints, replays, resume; TYPE_CHECKING refs to jace.rl) and jace.storage.pretrain (locked pretraining records). Row 4: jace.rl (pure-tensor RL math and loop), jace.draft (pods and drafter), and jace.decks (builder, score, search). Row 5 foundation leaves: jace.data imports jace.cards which imports jace.modules (right-to-left). On the right: managym and manabot runtime, connected via the blue seam bracket spanning the blue-highlighted seam packages.">
 <style>
-text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#1f2328;text-anchor:middle;font-size:15.5px}
-.t{font-weight:600}.s{font-size:13px;fill:#59636e}.m{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14.5px;font-weight:600}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#1f2328;text-anchor:middle;font-size:15px}
+.t{font-weight:600}.s{font-size:12.5px;fill:#59636e}.m{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;font-weight:600}
 .line{fill:none;stroke:#1f2328;stroke-width:1.5}.head{fill:#1f2328}
+.seam{fill:none;stroke:#3a5bd9;stroke-width:1.6}.seam-head{fill:#3a5bd9}
 .box{fill:#ffffff;stroke:#b8bec6}.round{fill:#eef2fd;stroke:#3a5bd9}.side{fill:none;stroke:#8c959f;stroke-dasharray:4 3}
 </style>
-<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker></defs>
-<rect class="round" x="18" y="18" width="596" height="60" rx="10"/>
-<text x="316" y="44" class="m">jace.loops</text>
-<text x="316" y="65" class="s">CLI entry points, multi-process collection, batched forks, screening, pretraining</text>
-<rect class="round" x="18" y="96" width="138" height="62" rx="10"/>
-<text x="87" y="123" class="m">jace.rl</text>
-<text x="87" y="144" class="s">GAE, losses &amp; loop</text>
-<rect class="round" x="171" y="96" width="138" height="62" rx="10"/>
-<text x="240" y="123" class="m">jace.eval</text>
-<text x="240" y="144" class="s">deals &amp; forensics</text>
-<rect class="box" x="324" y="96" width="138" height="62" rx="10"/>
-<text x="393" y="123" class="m">jace.draft</text>
-<text x="393" y="144" class="s">pods &amp; drafter</text>
-<rect class="box" x="476" y="96" width="138" height="62" rx="10"/>
-<text x="545" y="123" class="m">jace.decks</text>
-<text x="545" y="144" class="s">builder &amp; score</text>
-<rect class="round" x="18" y="176" width="291" height="60" rx="10"/>
-<text x="163" y="202" class="m">jace.runs</text>
-<text x="163" y="223" class="s">gameplay checkpoints, replays &amp; resume</text>
-<rect class="box" x="324" y="176" width="290" height="60" rx="10"/>
-<text x="469" y="202" class="m">jace.tracking</text>
-<text x="469" y="223" class="s">locked pretraining run records</text>
-<rect class="box" x="18" y="254" width="189" height="62" rx="10"/>
-<text x="112" y="281" class="m">jace.cards</text>
-<text x="112" y="302" class="s">program card encoder</text>
-<rect class="round" x="222" y="254" width="189" height="62" rx="10"/>
-<text x="316" y="281" class="m">jace.data</text>
-<text x="316" y="302" class="s">17Lands &amp; catalog</text>
-<rect class="box" x="426" y="254" width="188" height="62" rx="10"/>
-<text x="520" y="281" class="m">jace.modules</text>
-<text x="520" y="302" class="s">packed transformers</text>
-<rect class="side" x="646" y="18" width="156" height="298" rx="10"/>
-<text x="724" y="122" class="t">managym /</text>
-<text x="724" y="142" class="t">manabot</text>
-<text x="724" y="172" class="s">Rust rules engine</text>
-<text x="724" y="191" class="s">card program catalog</text>
-<text x="724" y="210" class="s">ActorCritic &amp; v11 obs</text>
-<text x="724" y="229" class="s">rollouts &amp; Academy</text>
-<path class="line" d="M614 48 H642" marker-end="url(#a)"/>
-<text x="410" y="348" class="s">Imports flow downward only. Blue boxes mark the narrow engine seam</text>
-<text x="410" y="368" class="s">(jace.loops, jace.rl.loop, jace.eval, jace.runs, and jace.data.catalog).</text>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+<marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="seam-head"/></marker>
+</defs>
+<rect class="round" x="18" y="18" width="288" height="58" rx="10"/>
+<text x="162" y="43" class="m">jace.train</text>
+<text x="162" y="63" class="s">full_data, ten_decks, harness</text>
+<rect class="box" x="324" y="18" width="288" height="58" rx="10"/>
+<text x="468" y="43" class="m">jace.pretrain</text>
+<text x="468" y="63" class="s">draft, decks, formats, schedules</text>
+<rect class="round" x="18" y="92" width="182" height="58" rx="10"/>
+<text x="109" y="117" class="m">jace.collect</text>
+<text x="109" y="137" class="s">agent, decks, local, pool</text>
+<rect class="round" x="224" y="92" width="182" height="58" rx="10"/>
+<text x="315" y="117" class="m">jace.eval</text>
+<text x="315" y="137" class="s">deals, forensics &amp; diffs</text>
+<rect class="round" x="430" y="92" width="182" height="58" rx="10"/>
+<text x="521" y="117" class="m">jace.forks</text>
+<text x="521" y="137" class="s">collect, batch &amp; audit</text>
+<path class="line" d="M430 121 H409" marker-end="url(#a)"/>
+<path class="line" d="M224 121 H203" marker-end="url(#a)"/>
+<rect class="round" x="18" y="166" width="288" height="58" rx="10"/>
+<text x="162" y="191" class="m">jace.storage.gameplay</text>
+<text x="162" y="211" class="s">checkpoints, replays &amp; resume</text>
+<rect class="box" x="324" y="166" width="288" height="58" rx="10"/>
+<text x="468" y="191" class="m">jace.storage.pretrain</text>
+<text x="468" y="211" class="s">locked pretraining run records</text>
+<rect class="round" x="18" y="240" width="182" height="58" rx="10"/>
+<text x="109" y="265" class="m">jace.rl</text>
+<text x="109" y="285" class="s">credit, losses &amp; loop</text>
+<rect class="box" x="224" y="240" width="182" height="58" rx="10"/>
+<text x="315" y="265" class="m">jace.draft</text>
+<text x="315" y="285" class="s">pods &amp; drafter</text>
+<rect class="box" x="430" y="240" width="182" height="58" rx="10"/>
+<text x="521" y="265" class="m">jace.decks</text>
+<text x="521" y="285" class="s">builder, score &amp; search</text>
+<rect class="box" x="18" y="314" width="182" height="58" rx="10"/>
+<text x="109" y="339" class="m">jace.modules</text>
+<text x="109" y="359" class="s">transformers &amp; devices</text>
+<rect class="box" x="224" y="314" width="182" height="58" rx="10"/>
+<text x="315" y="339" class="m">jace.cards</text>
+<text x="315" y="359" class="s">program card encoder</text>
+<rect class="round" x="430" y="314" width="182" height="58" rx="10"/>
+<text x="521" y="339" class="m">jace.data</text>
+<text x="521" y="359" class="s">17Lands &amp; catalog</text>
+<path class="line" d="M430 343 H409" marker-end="url(#a)"/>
+<path class="line" d="M224 343 H203" marker-end="url(#a)"/>
+<path class="seam" d="M620 26 H628 V364 H620"/>
+<path class="seam" d="M628 195 H649" marker-end="url(#b)"/>
+<rect class="side" x="652" y="18" width="150" height="354" rx="10"/>
+<text x="727" y="142" class="t">managym /</text>
+<text x="727" y="162" class="t">manabot</text>
+<text x="727" y="194" class="s">Rust rules engine</text>
+<text x="727" y="213" class="s">card program catalog</text>
+<text x="727" y="232" class="s">ActorCritic &amp; v11 obs</text>
+<text x="727" y="251" class="s">rollouts &amp; Academy</text>
+<text x="410" y="404" class="s">Imports flow strictly down the DAG (and right-to-left within a row).</text>
+<text x="410" y="424" class="s">Blue boxes mark the seam to managym and manabot (train, collect, eval, forks, storage.gameplay, rl.loop, data.catalog).</text>
 </svg>

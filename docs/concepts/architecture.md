@@ -1,6 +1,6 @@
 # Architecture
 
-jace organizes Limited Magic learning into ten small packages with a strict acyclic dependency graph.
+jace organizes Limited Magic learning into small, focused packages plus standalone operational scripts in `scripts/`, governed by an acyclic dependency graph.
 
 ## End-to-end data and model flow
 
@@ -9,7 +9,7 @@ flowchart LR
     Catalog["managym Card Catalog\n(engine programs)"] --> Encoder["Program Card Encoder\n(jace.cards / ActorCritic)"]
     Encoder --> Draft["Drafter\n(jace.draft)"]
     Encoder --> Decks["Deck Builder & Score\n(jace.decks)"]
-    Encoder --> Play["Gameplay Policy & Critic\n(jace.rl)"]
+    Encoder --> Play["Gameplay Policy & Critic\n(jace.collect / jace.rl)"]
     Draft -->|"42-card pool"| Decks
     Decks -->|"40-card deck"| Play
     Play -->|"trajectories & outcomes"| RL["Self-Play RL\n(jace.rl)"]
@@ -17,57 +17,63 @@ flowchart LR
     RL -->|"weights & win-rate signal"| Decks
     RL -->|"weights & snapshots"| Play
     RL -->|"checkpoints"| Eval["Mirrored Evaluation\n(jace.eval)"]
-    Eval --> Runs["Run Storage\n(jace.runs / jace.tracking)"]
+    Eval --> Runs["Run Storage\n(jace.storage)"]
 ```
 
 ## Package layers
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../assets/modules-dark.svg">
-  <img alt="Package layers of jace. Imports flow downward only, and blue boxes mark the narrow seam to managym and manabot." src="../assets/modules-light.svg">
+  <img alt="Package layers of jace. Imports flow strictly down the DAG (and right-to-left within a row); blue boxes mark the seam to managym and manabot." src="../assets/modules-light.svg">
 </picture>
 
-| Package         | Responsibility                                                                                |
-| --------------- | --------------------------------------------------------------------------------------------- |
-| `jace.loops`    | CLI entry points, multi-process collector, batched forks, fast screening harness, format specs |
-| `jace.rl`       | Pure-tensor RL math (`credit`, `losses`, `select`, `pool`, `diagnostics`) and training `loop` |
-| `jace.eval`     | Mirrored paired deals, parallel CPU eval, adaptive judge, forensics, probe diffs, deck splits |
-| `jace.draft`    | Booster specs, multi-pod draft state machine, and causal transformer `DrafterModel`           |
-| `jace.decks`    | `DeckBuilder`, `DeckScore`, `BuildRules`, and batch-sampled deck search                       |
-| `jace.runs`     | Gameplay run folders (`.safetensors`, `.policy.json`, JSONL metrics, atomic resume)           |
-| `jace.tracking` | File-locked, SHA-256 verified pretraining run records                                         |
-| `jace.cards`    | `CardPool`, program-based `CardEncoder`, and frozen `CardTable`                               |
-| `jace.data`     | 17Lands and MTGJSON loaders, deterministic CRC-32 splits, program tokens, `catalog` seam      |
-| `jace.modules`  | Shared transformer builder and packed unpadded `encode_real`                                  |
+| Package / path | Responsibility |
+| --- | --- |
+| `jace.train` | Top-level gameplay self-play CLIs (`full_data`, `ten_decks`, `harness`) |
+| `jace.pretrain` | Supervised pretraining CLIs and helpers (`draft`, `decks`, `common`, `formats`, `schedules`, `supervised`, `deck_measures`) |
+| `jace.forks` | Counterfactual fork collection, batched playouts, and horizon audits (`collect`, `batch`, `audit`) |
+| `jace.eval` | Mirrored paired deals, parallel adaptive judging, forensics, and probe diffs (`deals`, `parallel`, `forensics`, `diffs`) |
+| `jace.collect` | v11 `ActorCritic` factory, deck/curriculum loading, and in-process / multi-process collectors (`agent`, `decks`, `local`, `pool`) |
+| `jace.rl` | Pure-tensor RL math (`credit`, `losses`, `select`, `schedules`, `ema`, `pool`, `prefetch`, `diagnostics`) and training `loop` |
+| `jace.draft` | Booster specs, multi-pod draft state machine, and causal transformer `DrafterModel` |
+| `jace.decks` | `DeckBuilder`, `DeckScore`, `BuildRules`, and batch-sampled deck search |
+| `jace.storage` | Gameplay run folders (`gameplay.py`) and file-locked, SHA-256 verified pretraining run records (`pretrain.py`) |
+| `jace.cards` | `CardPool`, program-based `CardEncoder`, and frozen `CardTable` |
+| `jace.data` | 17Lands and MTGJSON loaders, deterministic CRC-32 splits, program tokens, and `catalog` seam |
+| `jace.modules` | Shared transformer builder, packed unpadded `encode_real`, and accelerator selection |
+| `scripts/` | Standalone operational scripts with PEP 723 metadata (such as `colab_run.py`) |
 
 ## Enforced import boundaries
 
-Six `ast-grep` rules in `.byor/rules/project/` enforce the module graph on every commit and CI run:
+`ast-grep` rules in `.byor/rules/project/` enforce the module graph on every commit and CI run:
 
-| Rule                              | Contract                                                                                   |
-| --------------------------------- | ------------------------------------------------------------------------------------------ |
-| `jace.no-manabot-learner-recipes` | All RL updates, schedules, and loops live in `jace.rl`                                     |
-| `jace.manabot-import-boundaries`  | Only `jace.data.catalog`, `jace.rl.loop`, `jace.eval`, `jace.runs`, and `jace.loops` touch the engine |
-| `jace.pure-rl-math-boundaries`    | `jace.rl.credit`, `jace.rl.losses`, and `jace.rl.select` stay pure PyTorch/NumPy math      |
-| `jace.leaf-packages-stay-leaf`    | `jace.cards`, `jace.data`, `jace.modules`, and `jace.tracking` never import higher layers  |
-| `jace.only-loops-import-draft`    | Outside `jace.draft`, only `jace.loops` imports `jace.draft`                               |
-| `jace.nothing-imports-loops`      | Loops are top-level wiring only                                                            |
+| Rule | Contract |
+| --- | --- |
+| `jace.no-manabot-learner-recipes` | All RL updates, schedules, and loops live in `jace.rl` |
+| `jace.manabot-import-boundaries` | Only `jace.data.catalog`, `jace.rl.loop`, `jace.collect`, `jace.eval`, `jace.forks`, `jace.storage.gameplay`, and `jace.train` touch the engine |
+| `jace.pure-rl-math-boundaries` | Every `jace.rl` module except `__init__.py` and `loop.py` stays pure PyTorch/NumPy math and never imports `jace.rl.loop` |
+| `jace.collect-stays-below-eval` | `jace.collect` never imports `jace.eval`, `jace.forks`, `jace.pretrain`, or `jace.train` |
+| `jace.leaf-packages-stay-leaf` | `jace.cards`, `jace.data`, `jace.modules`, `jace.storage.__init__`, and `jace.storage.pretrain` never import higher layers |
+| `jace.only-entry-points-import-draft` | Outside `jace.draft`, only `jace.pretrain` and `jace.train` import `jace.draft` |
+| `jace.nothing-imports-pretrain` | Nothing outside `jace.pretrain` imports `jace.pretrain` |
+| `jace.nothing-imports-train` | Nothing outside `jace.train` imports `jace.train` |
 
-## CLI entry points
+## Entry points
 
-| Module                       | Purpose                                                               |
-| ---------------------------- | --------------------------------------------------------------------- |
-| `jace.loops.train_ten_decks` | Self-play lab on 10 built-in elemental decks with optional forks      |
-| `jace.loops.train_full_data` | Full 17Lands self-play with nested curricula, snapshots, and resume   |
-| `jace.loops.harness`         | Fast screening and standalone `--eval-only` adaptive head-to-head     |
-| `jace.loops.pretrain`        | Supervised pretraining of `DrafterModel` and `CardEncoder`            |
-| `jace.loops.pretrain_decks`  | Supervised pretraining of `DeckScore` and `DeckBuilder`               |
+| Command | Purpose |
+| --- | --- |
+| `uv run python -m jace.train.ten_decks` | Self-play lab on 10 built-in elemental decks with optional forks |
+| `uv run python -m jace.train.full_data` | Full 17Lands self-play with nested curricula, snapshots, and resume |
+| `uv run python -m jace.train.harness` | Fast screening and standalone `--eval-only` adaptive head-to-head |
+| `uv run python -m jace.pretrain.draft` | Supervised pretraining of `DrafterModel` and `CardEncoder` |
+| `uv run python -m jace.pretrain.decks` | Supervised pretraining of `DeckScore` and `DeckBuilder` |
+| `uv run scripts/colab_run.py` | Provision, sync, and tear down Google Colab GPU training sessions |
 
 ## Explicit state machines
 
-| Component       | States                                                          | Owner                                           |
-| --------------- | --------------------------------------------------------------- | ----------------------------------------------- |
-| Draft pod       | `Picking` → `Complete`                                          | `jace.draft.pod.advance`                        |
-| Pretraining run | `created` → `running` → `completed` / `failed` / `interrupted` | `jace.tracking.writing`                         |
-| Historical pool | Bounded FIFO ring of CPU weight snapshots + EMA win rates       | `jace.rl.pool.SnapshotPool`                     |
-| Worker pool     | Persistent spawned CPU workers (`req_queues` / `res_queue`)     | `jace.loops.collect_pool.MultiProcessCollector` |
+| Component | States | Owner |
+| --- | --- | --- |
+| Draft pod | `Picking` -> `Complete` | `jace.draft.pod.advance` |
+| Pretraining run | `created` -> `running` -> `completed` / `failed` / `interrupted` | `jace.storage.pretrain.writing` |
+| Historical pool | Bounded FIFO ring of CPU weight snapshots + EMA win rates | `jace.rl.pool.SnapshotPool` |
+| Worker pool | Persistent spawned CPU workers (`req_queues` / `res_queue`) | `jace.collect.pool.MultiProcessCollector` |

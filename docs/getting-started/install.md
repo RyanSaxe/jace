@@ -21,10 +21,10 @@ uv run pytest -q
 
 ## Quick 10-deck lab run
 
-`jace.loops.train_ten_decks` runs closed-decklist self-play on the 10 built-in `elemental-world-v2` decks bundled with `managym`:
+`jace.train.ten_decks` runs closed-decklist self-play on the 10 built-in `elemental-world-v2` decks bundled with `managym`:
 
 ```sh
-uv run python -m jace.loops.train_ten_decks \
+uv run python -m jace.train.ten_decks \
   --run-id smoke \
   --updates 2 \
   --num-envs 8 \
@@ -39,7 +39,7 @@ Artifacts are written to `../jace-runs/v2-ten-deck-lab/smoke/` (override with `-
 
 ## Download 17Lands data
 
-Full-data self-play (`jace.loops.train_full_data`) and supervised pretraining (`jace.loops.pretrain`, `jace.loops.pretrain_decks`) read public 17Lands Premier Draft exports and MTGJSON attributes via [spells](https://github.com/oelarnes/spells):
+Full-data self-play (`jace.train.full_data`) and supervised pretraining (`jace.pretrain.draft`, `jace.pretrain.decks`) read public 17Lands Premier Draft exports and MTGJSON attributes via [spells](https://github.com/oelarnes/spells):
 
 ```sh
 uv run spells add TLA

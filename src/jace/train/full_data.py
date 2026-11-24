@@ -23,26 +23,28 @@ from typing import TYPE_CHECKING, Literal
 import torch
 from manabot.backends.torch.checkpoint import load_checkpoint
 
+from jace.collect.agent import DecisionMemoryKind, build_agent, build_damped_rl_components
+from jace.collect.decks import (
+    HumanDeckCatalog,
+    build_curriculum_stage_pools,
+    build_human_deck_source,
+    load_human_deck_catalog,
+    top_card_pool,
+)
+from jace.collect.local import LocalCollectorConfig, LocalShardedCollector, add_full_data_rl_args
+from jace.collect.pool import MultiProcessCollector, WorkerPoolConfig
 from jace.eval import (
     Deal,
-    HumanDeckCatalog,
     ProbeState,
-    build_curriculum_stage_pools,
     build_human_deals,
-    build_human_deck_source,
     capture_probes,
     diff_checkpoints,
-    load_human_deck_catalog,
     play_deals_parallel,
     run_forensics,
     summarize_paired_deals,
-    top_card_pool,
 )
-from jace.loops.agent_factory import DecisionMemoryKind, build_agent, build_damped_rl_components
-from jace.loops.collect_pool import MultiProcessCollector, WorkerPoolConfig
-from jace.loops.entry_points import default_device_name
-from jace.loops.fork_audit import BatchedForkSpec, add_fork_cli_args, open_batched_fork_hook
-from jace.loops.local_collector import LocalCollectorConfig, LocalShardedCollector, add_full_data_rl_args
+from jace.forks.audit import BatchedForkSpec, add_fork_cli_args, open_batched_fork_hook
+from jace.modules import default_device_name
 from jace.rl import (
     EmaWeights,
     SnapshotPool,
@@ -51,7 +53,7 @@ from jace.rl import (
     UpdateConfig,
     train_self_play,
 )
-from jace.runs import (
+from jace.storage.gameplay import (
     RunLayout,
     academy_commands,
     append_metric,

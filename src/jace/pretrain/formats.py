@@ -58,7 +58,7 @@ _FORMATS: Mapping[str, LimitedFormat] = {"TLA": TLA_LIMITED}
 
 class UnknownFormatError(ValueError):
     def __init__(self, set_code: str) -> None:
-        super().__init__(f"no limited format is defined for set {set_code}; add one to jace.loops.formats")
+        super().__init__(f"no limited format is defined for set {set_code}; add one to jace.pretrain.formats")
 
 
 def limited_format(set_code: str) -> LimitedFormat:

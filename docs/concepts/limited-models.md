@@ -58,7 +58,7 @@ flowchart LR
 | `build_log_probs` | Recomputes differentiable log-probabilities in one pass for teacher forcing or policy gradient |
 | `build_decks`   | Samples candidates, deduplicates, scores each unique deck once with `DeckScore`, keeps top `k`  |
 
-## Limited formats (`jace.loops.formats`)
+## Limited formats (`jace.pretrain.formats`)
 
 `LimitedFormat` centralizes format geometry so no model hardcodes set sizes:
 

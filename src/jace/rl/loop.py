@@ -42,13 +42,12 @@ from jace.rl.pool import (
     TrainConfig,
     UpdateConfig,
     UpdateStats,
-    current_optimizer_lr,
     load_snapshot,
     resolve_snapshot_pool,
-    set_optimizer_lr,
     update_snapshot_pool,
 )
 from jace.rl.prefetch import RolloutScheduler
+from jace.rl.schedules import current_optimizer_lr, set_optimizer_lr
 from jace.rl.select import SelectFn, bucketed_minibatch_order, training_row_indexes
 
 if TYPE_CHECKING:

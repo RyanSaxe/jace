@@ -1,9 +1,10 @@
 """Train a Jace v2 self-play agent on the 10-deck TLA lab with Academy-native artifacts.
 
-Wires `jace.rl`, `jace.eval`, and `jace.runs` over the ten closed-decklist `elemental-world-v2`
-decks using upstream `manabot` v11 observations and `ActorCritic` (`policy_film=True`,
-`categorical_wdl`, `masked_mean`). Supports decaying damped-KL schedules, raw unnormalized
-win-probability advantages, a historical snapshot opponent pool, and full Academy replays.
+Wires `jace.rl`, `jace.collect`, `jace.eval`, `jace.forks`, and `jace.storage.gameplay`
+over the ten closed-decklist `elemental-world-v2` decks using upstream `manabot` v11
+observations and `ActorCritic` (`policy_film=True`, `categorical_wdl`, `masked_mean`).
+Supports decaying damped-KL schedules, raw unnormalized win-probability advantages, a
+historical snapshot opponent pool, and full Academy replays.
 """
 
 import argparse
@@ -22,19 +23,19 @@ from manabot.backends.torch.policy import ActorCritic
 from manabot.env.observation import ObservationSpace
 from manabot.training.decks import UniformDecks
 
+from jace.collect.agent import build_agent
+from jace.collect.decks import elemental_decks
+from jace.collect.pool import MultiProcessCollector, WorkerPoolConfig
 from jace.eval import (
     Deal,
     ProbeState,
     build_deals,
     capture_probes,
     diff_checkpoints,
-    elemental_decks,
     run_forensics,
 )
-from jace.loops.agent_factory import build_agent
-from jace.loops.collect_pool import MultiProcessCollector, WorkerPoolConfig
-from jace.loops.entry_points import default_device_name
-from jace.loops.forks import ForkCollectorPool, ForkConfig
+from jace.forks.collect import ForkCollectorPool, ForkConfig
+from jace.modules import default_device_name
 from jace.rl import (
     CollectFn,
     CreditFn,
@@ -55,7 +56,7 @@ from jace.rl import (
     train_self_play,
 )
 from jace.rl.loop import AuxLossFn
-from jace.runs import (
+from jace.storage.gameplay import (
     RunLayout,
     academy_commands,
     append_metric,

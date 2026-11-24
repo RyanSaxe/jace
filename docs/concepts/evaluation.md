@@ -14,11 +14,11 @@ flowchart LR
 ```
 
 - **Parallel execution (`play_deals_parallel`).** Shards deals round-robin across spawned single-threaded CPU workers, caches each checkpoint once per worker, and isolates rare engine errors per leg without aborting the match.
-- **Disjoint held-out decks (`jace.eval.human_decks`).** Uses the deterministic CRC-32 `split_key` partition from `jace.data.store` so evaluation draws strictly from unseen held-out decks.
+- **Disjoint held-out decks (`jace.collect.decks`, `jace.eval.deals.build_human_deals`).** Uses the deterministic CRC-32 `split_key` partition from `jace.data.store` so evaluation draws strictly from unseen held-out decks.
 
 ## Adaptive sequential judging
 
-`evaluate_adaptive` and `jace.loops.harness` step through a shared deterministic deal stream (`100 -> 200 -> 500` deals = `200 -> 400 -> 1,000` games) to stop early on clear wins or losses while saving budget for close matchups:
+`evaluate_adaptive` and `jace.train.harness` step through a shared deterministic deal stream (`100 -> 200 -> 500` deals = `200 -> 400 -> 1,000` games) to stop early on clear wins or losses while saving budget for close matchups:
 
 ```mermaid
 flowchart LR

@@ -12,7 +12,7 @@ import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self
 
 import managym
 from manabot.backends.torch.bot import evaluate_observation
@@ -21,12 +21,15 @@ from manabot.env.observation import ObservationSpace
 from managym.disclosure import DecklistDisclosure
 from managym.recording import ScalarCapture
 
+from jace.collect.decks import HumanDeckCatalog, elemental_decks, sample_human_decks
+
 __all__ = (
     "Deal",
     "MatchScore",
     "PlayerFn",
     "PolicyPlayer",
     "build_deals",
+    "build_human_deals",
     "elemental_decks",
     "heuristic_player",
     "play_match",
@@ -180,15 +183,6 @@ def random_player(*, seed: int = 0) -> PlayerFn:
     return choose
 
 
-def elemental_decks() -> list[tuple[str, managym.Deck]]:
-    pack = "elemental-world-v2"
-    result: list[tuple[str, managym.Deck]] = []
-    for key in managym.authored_deck_keys(pack):
-        setup = managym.authored_deck_setup(pack, key)
-        result.append((key, managym.Deck(dict(setup.decklist), dict(setup.sideboard))))
-    return result
-
-
 def build_deals(
     decks: Sequence[tuple[str, managym.Deck]],
     *,
@@ -207,6 +201,41 @@ def build_deals(
         i, j = pairs[index % len(pairs)]
         name_a, deck_a = decks[i]
         name_b, deck_b = decks[j]
+        deals.append(
+            Deal(
+                seed=seed + index * 1009,
+                deck_a_name=name_a,
+                deck_b_name=name_b,
+                deck_a=dict(deck_a.main),
+                deck_b=dict(deck_b.main),
+                sideboard_a=dict(deck_a.sideboard),
+                sideboard_b=dict(deck_b.sideboard),
+                decklists=decklists,
+            )
+        )
+    return deals
+
+
+def build_human_deals(
+    catalog: HumanDeckCatalog,
+    *,
+    split: Literal["train", "held_out"] = "held_out",
+    count: int,
+    seed: int = 20_000,
+    decklists: DecklistDisclosure = "closed",
+    allowed_cards: frozenset[str] | None = None,
+) -> list[Deal]:
+    sampled = sample_human_decks(
+        catalog,
+        split=split,
+        count=count * 2,
+        seed=seed,
+        allowed_cards=allowed_cards,
+    )
+    deals: list[Deal] = []
+    for index in range(count):
+        name_a, deck_a = sampled[2 * index]
+        name_b, deck_b = sampled[2 * index + 1]
         deals.append(
             Deal(
                 seed=seed + index * 1009,

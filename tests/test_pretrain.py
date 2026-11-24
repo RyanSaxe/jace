@@ -1,4 +1,4 @@
-"""Check pretraining on human picks through `jace.loops.pretrain` and the drafter.
+"""Check pretraining on human picks through `jace.pretrain.draft` and the drafter.
 
 The pretraining test makes up its drafts. Every pack is random, and the
 "human" always takes the card with the lowest id in the pack. A tiny model
@@ -18,8 +18,8 @@ import torch
 from jace.cards import CardTable
 from jace.data import HumanDrafts
 from jace.draft import DrafterModel
-from jace.loops.pretrain import PretrainSettings, pick_accuracy, pretrain_drafter
-from jace.tracking import Identity, create_run, writing
+from jace.pretrain.draft import PretrainSettings, pick_accuracy, pretrain_drafter
+from jace.storage.pretrain import Identity, create_run, writing
 
 __all__ = ()
 

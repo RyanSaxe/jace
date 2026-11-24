@@ -15,9 +15,9 @@ import pytest
 import torch
 from torch import nn
 
-from jace.eval.human_decks import (
+from jace.collect.agent import build_agent
+from jace.collect.decks import (
     build_curriculum_deck_source,
-    build_human_deals,
     build_human_deck_source,
     curriculum_blend_spec,
     load_human_deck_catalog,
@@ -28,12 +28,12 @@ from jace.eval.human_decks import (
     sample_human_decks,
     top_card_pool,
 )
-from jace.loops.collect_pool import MultiProcessCollector, WorkerPoolConfig
-from jace.loops.entry_points import default_device_name, device_named
-from jace.loops.train_ten_decks import build_agent
+from jace.collect.pool import MultiProcessCollector, WorkerPoolConfig
+from jace.eval.deals import build_human_deals
+from jace.modules import default_device_name, device_named
 from jace.rl.diagnostics import GradientAgreementTracker, snapshot_win_rate
 from jace.rl.pool import SnapshotPool
-from jace.runs import create_run, load_resume_state, save_policy_checkpoint, save_resume_state
+from jace.storage.gameplay import create_run, load_resume_state, save_policy_checkpoint, save_resume_state
 
 if TYPE_CHECKING:
     from pathlib import Path

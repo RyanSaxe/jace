@@ -12,10 +12,11 @@ from typing import NoReturn
 
 import torch
 
-from jace.eval.deals import build_deals, elemental_decks
-from jace.loops.fork_audit import audit_horizon_correlation, build_batched_fork_aux_loss, parse_fork_kinds
-from jace.loops.fork_batch import BatchedForkCollectorPool, BatchedForkConfig, _safe_clone, _safe_step
-from jace.loops.train_ten_decks import build_agent
+from jace.collect.agent import build_agent
+from jace.collect.decks import elemental_decks
+from jace.eval.deals import build_deals
+from jace.forks.audit import audit_horizon_correlation, build_batched_fork_aux_loss, parse_fork_kinds
+from jace.forks.batch import BatchedForkCollectorPool, BatchedForkConfig, _safe_clone, _safe_step
 
 
 def test_batched_fork_pool_collects_examples_value_samples_and_backprops() -> None:

@@ -17,7 +17,7 @@ import pytest
 import torch
 from torch import nn
 
-from jace.tracking import (
+from jace.storage.pretrain import (
     CheckpointMismatchError,
     Identity,
     RunLockedError,

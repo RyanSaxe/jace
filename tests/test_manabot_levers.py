@@ -24,15 +24,14 @@ from manabot.training.decks import UniformDecks
 from manabot.training.rollout.collection import RolloutBatch, close_collector, collect, open_collector
 from torch import nn
 
-from jace.eval import PolicyPlayer, build_deals, heuristic_player, play_match
-from jace.loops.agent_factory import (
+from jace.collect.agent import (
     DECISION_MEMORY_CAPACITIES,
     build_agent,
     merge_rollout_batches,
     pack_batch_for_ipc,
     unpack_batch_from_ipc,
 )
-from jace.loops.train_full_data import _parse_args
+from jace.eval import PolicyPlayer, build_deals, heuristic_player, play_match
 from jace.rl import (
     DampedSchedule,
     EmaWeights,
@@ -46,7 +45,8 @@ from jace.rl import (
     training_row_indexes,
     update_step,
 )
-from jace.runs import create_run, load_resume_state, save_policy_checkpoint, save_resume_state
+from jace.storage.gameplay import create_run, load_resume_state, save_policy_checkpoint, save_resume_state
+from jace.train.full_data import _parse_args
 
 if TYPE_CHECKING:
     from collections.abc import Callable

@@ -18,9 +18,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from jace.eval import AdaptiveEvalConfig, AdaptiveEvalResult, play_adaptive_parallel
-from jace.loops.entry_points import default_device_name
-from jace.loops.forks import ForkConfig
-from jace.loops.train_ten_decks import LabConfig, run_ten_deck_lab
+from jace.forks.collect import ForkConfig
+from jace.modules import default_device_name
+from jace.train.ten_decks import LabConfig, run_ten_deck_lab
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

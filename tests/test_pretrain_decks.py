@@ -1,4 +1,4 @@
-"""Check pretraining on human decks through `jace.loops.pretrain_decks`.
+"""Check pretraining on human decks through `jace.pretrain.decks`.
 
 The decks here are made up. Every pool has six random spells out of ten and
 two copies of one basic. The "human" deck contains the pool's four spells
@@ -19,9 +19,9 @@ from torch import Tensor
 from jace.cards import CardTable
 from jace.data import HumanDecks
 from jace.decks import BuildRules, DeckBuilder, DeckScore, builds_from_decks, sample_builds
-from jace.loops.deck_measures import build_log_loss, deck_overlap, score_fit
-from jace.loops.pretrain_decks import DeckSettings, pretrain_deck_builder, pretrain_deck_score
-from jace.tracking import Identity, create_run, writing
+from jace.pretrain.deck_measures import build_log_loss, deck_overlap, score_fit
+from jace.pretrain.decks import DeckSettings, pretrain_deck_builder, pretrain_deck_score
+from jace.storage.pretrain import Identity, create_run, writing
 
 __all__ = ()
 

@@ -1,33 +1,34 @@
 id: jace.leaf-packages-stay-leaf
 language: Python
 severity: error
-message: Leaf packages (cards, data, modules, tracking) must not import draft, decks, rl, eval, runs, or loops.
+message: Leaf packages (cards, data, modules, storage.__init__, storage.pretrain) must not import draft, decks, rl, collect, eval, forks, storage.gameplay, pretrain, or train.
 files:
   - src/jace/cards/**
   - src/jace/data/**
   - src/jace/modules.py
-  - src/jace/tracking.py
+  - src/jace/storage/__init__.py
+  - src/jace/storage/pretrain.py
 rule:
   any:
     - kind: import_from_statement
       has:
         field: module_name
-        regex: ^jace\.(draft|decks|rl|eval|runs|loops)(\.|$)
+        regex: ^jace\.(draft|decks|rl|collect|eval|forks|storage\.gameplay|pretrain|train)(\.|$)
     - kind: import_statement
       has:
         any:
           - kind: dotted_name
-            regex: ^jace\.(draft|decks|rl|eval|runs|loops)(\.|$)
+            regex: ^jace\.(draft|decks|rl|collect|eval|forks|storage\.gameplay|pretrain|train)(\.|$)
           - kind: aliased_import
             has:
               kind: dotted_name
-              regex: ^jace\.(draft|decks|rl|eval|runs|loops)(\.|$)
+              regex: ^jace\.(draft|decks|rl|collect|eval|forks|storage\.gameplay|pretrain|train)(\.|$)
 metadata:
   byor:
     rationale: >
       Enforcing a strict acyclic package graph keeps cards, data, shared neural
-      building blocks, and run tracking reusable across Limited and Constructed
-      without circular dependencies.
+      building blocks, and pretraining run tracking reusable across Limited and
+      Constructed without circular dependencies.
     agent_prompt: >
       Do not import higher-level jace packages from this leaf module. Pass
       needed values as arguments from the calling layer instead.
