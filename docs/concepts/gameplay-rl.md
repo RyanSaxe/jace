@@ -1,6 +1,9 @@
 # Gameplay RL
 
-Gameplay training learns a closed-decklist Magic policy and 3-class Win/Draw/Loss critic over `managym` using pure-tensor RL primitives in `jace.rl`, rollout collection in `jace.collect`, counterfactual forks in `jace.forks`, and CLI wiring in `jace.train`.
+Gameplay training learns a closed-decklist Magic policy and 3-class
+Win/Draw/Loss critic over `managym` using pure-tensor RL primitives in
+`jace.rl`, rollout collection in `jace.collect`, counterfactual forks in
+`jace.forks`, and CLI wiring in `jace.train`.
 
 ## Self-play update loop
 
@@ -39,7 +42,9 @@ flowchart LR
 
 ## Damped policy objective
 
-`damped_policy_loss` in [`jace/rl/losses.py`](../../src/jace/rl/losses.py) implements the Ataraxos damped policy-gradient objective with float64 importance-ratio math:
+`damped_policy_loss` in [`jace/rl/losses.py`](../../src/jace/rl/losses.py)
+implements the Ataraxos damped policy-gradient objective with float64
+importance-ratio math:
 
 ```text
 L = L_clip(ratio, A)
@@ -58,13 +63,25 @@ Plain clipped `ppo_loss` with an entropy bonus is also available for baselines.
 
 ## Historical snapshots and nested curricula
 
-- **`SnapshotPool` (`jace.rl.pool`).** Keeps a bounded FIFO ring of detached CPU weights (`max_size=16`, saved every 10 updates). On `snapshot_fraction=0.25` of updates, one seat plays a past checkpoint. `matching="even_odds"` tracks an EMA win rate `p` per snapshot and samples proportionally to `max(0.05, p * (1 - p))`.
-- **Sharded deck loading (`jace.collect.pool` / `jace.collect.local`).** Workers load `decks.pt` once and rotate `UniformDecks` shards (`shard_size=512`, refreshed every 50 updates) to avoid per-startup validation overhead.
-- **Nested color-balanced curricula (`jace.collect.decks`).** `nested_card_pools` greedily expands card pools to maximize log-balanced coverage across all 10 two-color pairs, keeping all five colors represented at small pool sizes. `--curriculum-stages` blends transitions smoothly over `--curriculum-blend-updates` updates.
+- **`SnapshotPool` (`jace.rl.pool`).** Keeps a bounded FIFO ring of detached CPU
+  weights (`max_size=16`, saved every 10 updates). On `snapshot_fraction=0.25`
+  of updates, one seat plays a past checkpoint. `matching="even_odds"` tracks an
+  EMA win rate `p` per snapshot and samples proportionally to
+  `max(0.05, p * (1 - p))`.
+- **Sharded deck loading (`jace.collect.pool` / `jace.collect.local`).** Workers
+  load `decks.pt` once and rotate `UniformDecks` shards (`shard_size=512`,
+  refreshed every 50 updates) to avoid per-startup validation overhead.
+- **Nested color-balanced curricula (`jace.collect.decks`).**
+  `nested_card_pools` greedily expands card pools to maximize log-balanced
+  coverage across all 10 two-color pairs, keeping all five colors represented at
+  small pool sizes. `--curriculum-stages` blends transitions smoothly over
+  `--curriculum-blend-updates` updates.
 
 ## Batched counterfactual forks
 
-To break collapsed low-entropy habits (such as attacking with every creature every turn), `jace.forks.batch` and `jace.rl.losses.fork_pairwise_loss` intervene directly with exact engine cloning (`env.clone_env()`):
+To break collapsed low-entropy habits (such as attacking with every creature
+every turn), `jace.forks.batch` and `jace.rl.losses.fork_pairwise_loss`
+intervene directly with exact engine cloning (`env.clone_env()`):
 
 ```mermaid
 flowchart LR
@@ -75,5 +92,10 @@ flowchart LR
     Step -->|"reservoir states"| ValLoss["Auxiliary WDL\nValue Supervision"]
 ```
 
-- **Full-strength gradient under collapse.** Restricted to `(a0, a1)`, the pairwise cross-entropy gradient `p - target` stays strong even when a collapsed policy puts `p = 0.999` on the worse move.
-- **Horizon auditing.** `audit_horizon_correlation` in [`jace/forks/audit.py`](../../src/jace/forks/audit.py) checks correlation and sign agreement between value-head gaps at candidate horizons and full-game outcomes before enabling truncated rollouts.
+- **Full-strength gradient under collapse.** Restricted to `(a0, a1)`, the
+  pairwise cross-entropy gradient `p - target` stays strong even when a
+  collapsed policy puts `p = 0.999` on the worse move.
+- **Horizon auditing.** `audit_horizon_correlation` in
+  [`jace/forks/audit.py`](../../src/jace/forks/audit.py) checks correlation and
+  sign agreement between value-head gaps at candidate horizons and full-game
+  outcomes before enabling truncated rollouts.

@@ -1,9 +1,12 @@
 # jace
 
-jace learns to draft, build decks, and play Limited Magic: The Gathering by self-play on the `managym` Rust rules engine.
+jace learns to draft, build decks, and play Limited Magic: The Gathering by
+self-play on the `managym` Rust rules engine.
 
 > [!NOTE]
-> Work in progress. Development is currently focused on Phase A (gameplay self-play); Phase B will connect drafting and deck building into the end-to-end loop.
+> Work in progress. Development is currently focused on Phase A (gameplay
+> self-play); Phase B will connect drafting and deck building into the
+> end-to-end loop.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/approach-dark.svg">
@@ -12,15 +15,30 @@ jace learns to draft, build decks, and play Limited Magic: The Gathering by self
 
 ## The problem and approach
 
-Limited Magic combines three coupled decisions under imperfect information: drafting a card pool from unseen boosters, assembling a legal 40-card deck, and playing games with hidden hands, libraries, and decklists across hundreds of distinct cards.
+Limited Magic combines three coupled decisions under imperfect information:
+drafting a card pool from unseen boosters, assembling a legal 40-card deck, and
+playing games with hidden hands, libraries, and decklists across hundreds of
+distinct cards.
 
-- **One shared program card encoder.** Every model reads cards from their `managym` engine program tokens alone, with no per-card IDs, no fixed card output heads, and no usage statistics, so unseen cards generalize directly from their mechanics.
-- **Draft, build, and play in one loop.** A causal transformer drafts in 8-seat pods, a 3-stage masked set transformer builds and scores legal decks, and an actor-critic policy plays closed-decklist games with a 3-class Win/Draw/Loss critic.
-- **Stabilized self-play and paired evaluation.** Self-play combines undiscounted WDL GAE, top-fraction advantage filtering, a damped dual-KL policy loss, even-odds historical snapshots, color-balanced card-pool curricula, and batched counterfactual forks. Evaluation measures checkpoints with mirrored paired deals, adaptive sequential stopping, behavioral forensics, and probe-state diffs.
+- **One shared program card encoder.** Every model reads cards from their
+  `managym` engine program tokens alone, with no per-card IDs, no fixed card
+  output heads, and no usage statistics, so unseen cards generalize directly
+  from their mechanics.
+- **Draft, build, and play in one loop.** A causal transformer drafts in 8-seat
+  pods, a 3-stage masked set transformer builds and scores legal decks, and an
+  actor-critic policy plays closed-decklist games with a 3-class Win/Draw/Loss
+  critic.
+- **Stabilized self-play and paired evaluation.** Self-play combines
+  undiscounted WDL GAE, top-fraction advantage filtering, a damped dual-KL
+  policy loss, even-odds historical snapshots, color-balanced card-pool
+  curricula, and batched counterfactual forks. Evaluation measures checkpoints
+  with mirrored paired deals, adaptive sequential stopping, behavioral
+  forensics, and probe-state diffs.
 
 ## Quick start
 
-jace requires Python 3.13, [uv](https://docs.astral.sh/uv/), and a Rust toolchain to compile `managym`.
+jace requires Python 3.13, [uv](https://docs.astral.sh/uv/), and a Rust
+toolchain to compile `managym`.
 
 ```sh
 git clone https://github.com/RyanSaxe/jace.git
@@ -34,7 +52,8 @@ uv run python -m jace.pretrain.decks --help       # deck builder & deck score pr
 uv run scripts/colab_run.py --help                # Google Colab GPU launcher
 ```
 
-See [Install](docs/getting-started/install.md) for setup and 17Lands dataset instructions.
+See [Install](docs/getting-started/install.md) for setup and 17Lands dataset
+instructions.
 
 ## Documentation
 

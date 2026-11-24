@@ -31,44 +31,34 @@ pythonpath = ["scripts"]
 line-length = 120
 target-version = "py313"
 src = ["src", "scripts"]
-# BYOR vendors and manages these check scripts; they follow BYOR's own config.
-# The repository's own check scripts sit beside them and are linted.
-extend-exclude = [
-    ".byor/scripts/lib",
-    ".byor/scripts/module-contract.py",
-    ".byor/scripts/no-suppression-comments.py",
-    ".byor/scripts/no-thin-docstrings.py",
-    ".byor/scripts/ruff.py",
-]
 
 [tool.ruff.lint]
 select = ["ALL"]
 unfixable = [
-    # Leave unused imports visible for review instead of deleting them during
-    # autofix; import removals can change public/API intent.
+    # A fix leaves an unused import for review instead of deleting it, since
+    # removing one can change what the package exports.
     "F401",
 ]
 ignore = [
-    # Not a personal code-quality rule; legal headers are project-specific.
+    # The license file covers the project, so no file carries a copyright notice.
     "CPY001",
-    # Standalone scripts and scratch modules are valid in many projects.
+    # Scripts and test folders aren't packages, so they have no __init__.py.
     "INP001",
-    # BYOR owns module-docstring format and public export checks.
-    "D100",
-    "D104",
-    # Do not require docstrings on every public class/function/method.
+    # Every source module has a docstring, and a class or function has one only
+    # where it says what the names and types don't.
     "D101",
     "D102",
     "D103",
     "D105",
     "D106",
     "D107",
-    # Known pydocstyle and formatter conflicts.
+    # These contradict D211 and D212, which stay on.
     "D203",
     "D213",
+    # ruff format owns trailing commas, and this conflicts with it.
     "COM812",
-    "ISC001",
-    # BYOR's keyword-only rule allows many keyword-only parameters.
+    # A long signature is fine when the parameters after the first two are
+    # keyword-only, which PLR0917 enforces below.
     "PLR0913",
     # Seeded pseudo-random generators drive simulations here; nothing is cryptographic.
     "S311",
@@ -79,42 +69,44 @@ ignore = [
 ]
 
 [tool.ruff.lint.mccabe]
-# A function with more than this many independent paths is split into named helpers.
+# Complexity budget: 6 is human-ideal, >10 is tangled, 8 is the cross-language
+# agent benchmark; jace stays stricter at 6.
 max-complexity = 6
+
+[tool.ruff.lint.pylint]
+# PLR0917 caps positional arguments at two; pass any further parameters as
+# keyword-only arguments after `*`.
+max-positional-args = 2
+max-branches = 10
+max-nested-blocks = 4
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
 
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"typing.cast".msg = "Narrow or fix the types instead of casting."
+"typing_extensions.cast".msg = "Narrow or fix the types instead of casting."
+"unittest".msg = "Use pytest and plain fakes instead of unittest."
+"unittest.mock".msg = "Inject small dependencies and test with fakes instead of mocks."
+"importlib.import_module".msg = "Use explicit static imports instead of dynamic loading."
+"importlib.util".msg = "Use explicit static imports instead of dynamic loading."
+"importlib.machinery".msg = "Use explicit static imports instead of dynamic loading."
+"importlib.reload".msg = "Avoid module reloading; structure state explicitly instead."
+"importlib.abc".msg = "Use explicit static imports instead of custom import hooks."
+
 [tool.ruff.lint.per-file-ignores]
-".byor/scripts/max-file-lines.py" = [
-    # This check runs git with fixed arguments, never with outside input.
-    "S603",
-]
 "scripts/colab_run.py" = [
     # Runs `uvx --from google-colab-cli colab` with argv tuples, never through a local shell.
     "S603",
 ]
 "tests/**/*.py" = [
-    # Pytest's assertion introspection is the test framework contract.
+    # pytest checks with plain asserts.
     "S101",
-    # Test literals are part of the expected behavior being documented.
+    # A test's literal values are the behavior it documents.
     "PLR2004",
+    # Module docstrings are for source modules, not test files.
+    "D100",
 ]
-
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
-line-ending = "auto"
 
 [tool.ty.environment]
 extra-paths = ["scripts"]
-
-[tool.ty.src]
-# BYOR vendors and manages these check scripts; they follow BYOR's own config.
-exclude = [
-    ".byor/scripts/lib",
-    ".byor/scripts/module-contract.py",
-    ".byor/scripts/no-suppression-comments.py",
-    ".byor/scripts/no-thin-docstrings.py",
-    ".byor/scripts/ruff.py",
-]

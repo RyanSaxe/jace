@@ -8,6 +8,7 @@ on the real tokens only, because the engine pads every board to a fixed size.
 pretraining and self-play entry points.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -37,18 +38,27 @@ DROPOUT = 0.0
 _PADDING_SHARE_BITS = 4
 
 
-def default_device_name() -> str:
-    if torch.cuda.is_available():
+def default_device_name(
+    *,
+    cuda_available: Callable[[], bool] = torch.cuda.is_available,
+    mps_available: Callable[[], bool] = torch.backends.mps.is_available,
+) -> str:
+    if cuda_available():
         return "cuda"
-    if torch.backends.mps.is_available():
+    if mps_available():
         return "mps"
     return "cpu"
 
 
-def device_named(name: str) -> torch.device:
+def device_named(
+    name: str,
+    *,
+    cuda_available: Callable[[], bool] = torch.cuda.is_available,
+    mps_available: Callable[[], bool] = torch.backends.mps.is_available,
+) -> torch.device:
     if name != "auto":
         return torch.device(name)
-    return torch.device(default_device_name())
+    return torch.device(default_device_name(cuda_available=cuda_available, mps_available=mps_available))
 
 
 def transformer(width: int, *, layers: int, heads: int, dropout: float = DROPOUT) -> nn.TransformerEncoder:

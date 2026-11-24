@@ -211,22 +211,16 @@ def test_nested_curriculum_pools_and_smooth_blending(tmp_path: Path) -> None:
     assert len(blended.decks) == 10
 
 
-# Hardware backends (CUDA and MPS) cannot both be present on the same test host.
-# ast-grep-ignore: python.question-mocks
-def test_default_device_prefers_cuda_then_mps_then_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-    assert default_device_name() == "cuda"
-    assert device_named("auto") == torch.device("cuda")
+def test_default_device_prefers_cuda_then_mps_then_cpu() -> None:
+    assert default_device_name(cuda_available=lambda: True, mps_available=lambda: True) == "cuda"
+    assert device_named("auto", cuda_available=lambda: True, mps_available=lambda: True) == torch.device("cuda")
 
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    assert default_device_name() == "mps"
-    assert device_named("auto") == torch.device("mps")
+    assert default_device_name(cuda_available=lambda: False, mps_available=lambda: True) == "mps"
+    assert device_named("auto", cuda_available=lambda: False, mps_available=lambda: True) == torch.device("mps")
 
-    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
-    assert default_device_name() == "cpu"
-    assert device_named("auto") == torch.device("cpu")
-    assert device_named("cpu") == torch.device("cpu")
+    assert default_device_name(cuda_available=lambda: False, mps_available=lambda: False) == "cpu"
+    assert device_named("auto", cuda_available=lambda: False, mps_available=lambda: False) == torch.device("cpu")
+    assert device_named("cpu", cuda_available=lambda: True, mps_available=lambda: True) == torch.device("cpu")
 
 
 def test_evaluate_full_data_logs_live_scores_only_when_ema_active(tmp_path: Path) -> None:
