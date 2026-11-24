@@ -229,7 +229,7 @@ def _evaluate_full_data(
 def _open_or_create_layout(cfg: FullDataConfig, *, catalog: HumanDeckCatalog, params: int) -> RunLayout:
     root = cfg.runs_dir / cfg.experiment / cfg.run_id
     if cfg.resume and root.exists():
-        return RunLayout.for_root(root)
+        return RunLayout.for_root(root).ensure_dirs()
     run_config: dict[str, object] = {
         **asdict(cfg),
         "runs_dir": str(cfg.runs_dir),

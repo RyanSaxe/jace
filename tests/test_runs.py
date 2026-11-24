@@ -19,6 +19,7 @@ from managym.policy import PolicyRegistry, PolicySpec
 
 from jace.storage.gameplay import (
     RunExistsError,
+    RunLayout,
     academy_commands,
     append_metric,
     create_run,
@@ -46,6 +47,18 @@ def test_metrics_and_forensics_persist_cleanly(tmp_path: Path) -> None:
 
     forensics_path = save_forensics(layout, iteration=10, report={"wrong_side_rate": 0.02})
     assert json.loads(forensics_path.read_text()) == {"wrong_side_rate": 0.02}
+
+
+def test_resume_layout_creates_missing_forensics_and_games_dirs(tmp_path: Path) -> None:
+    partial_root = tmp_path / "bench" / "resumed"
+    (partial_root / "checkpoints").mkdir(parents=True)
+    layout = RunLayout.for_root(partial_root)
+    forensics_path = save_forensics(layout, iteration=400, report={"ok": True})
+    assert json.loads(forensics_path.read_text()) == {"ok": True}
+
+    layout.ensure_dirs()
+    assert layout.games_dir.is_dir()
+    assert layout.forensics_dir.is_dir()
 
 
 def test_saved_policy_checkpoint_reloads_and_registers_in_academy(tmp_path: Path) -> None:

@@ -1,23 +1,23 @@
 """Failure-mode invariant tests for the standalone `scripts/colab_run.py` launcher.
 
 Uses an injected `_RecordingRunner` strictly to guard local lifecycle and billing
-invariants (fail-fast input checks before `colab new`, guaranteed final sync and VM
-teardown on SSH or transient download failures unless `--keep-vm`, remote directory
-preparation before resume uploads, and side-effect-free `--dry-run` / `--` flag
-forwarding). Live `google-colab-cli` flag compatibility is verified against real
-sessions rather than mocked subprocesses.
+invariants: fail-fast input checks before `colab new`, guaranteed VM teardown without
+clobbering local backups when setup fails, chunked SHA-256 uploads for large resume
+states, tunnel-free `colab exec` keepalive polling with timeout recovery and exit-code
+propagation, and side-effect-free `--dry-run` / `--` flag forwarding. Live
+`google-colab-cli` flag compatibility is verified against real Colab runtimes rather
+than mocked subprocesses.
 """
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
-import threading
-import time
 from typing import TYPE_CHECKING
 
 import pytest
 
-from colab_run import ColabRunConfig, main, run_colab_training
+from colab_run import ColabRunConfig, CommandResult, main, run_colab_training
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -25,20 +25,40 @@ if TYPE_CHECKING:
 
 
 class _RecordingRunner:
-    def __init__(self, *, fail_on_subcommand: str | None = None) -> None:
-        self.calls: list[tuple[tuple[str, ...], bool]] = []
+    def __init__(
+        self,
+        *,
+        fail_on_subcommand: str | None = None,
+        exec_responses: Sequence[CommandResult | Exception] = (CommandResult(0, "ALIVE=False EXIT=0\n"),),
+    ) -> None:
+        self.calls: list[tuple[tuple[str, ...], bool, str | None, float | None]] = []
         self._fail_on_subcommand = fail_on_subcommand
+        self._exec_responses = list(exec_responses)
 
-    def __call__(self, args: Sequence[str], *, check: bool = True) -> int:
+    def __call__(
+        self,
+        args: Sequence[str],
+        *,
+        check: bool = True,
+        input_text: str | None = None,
+        timeout: float | None = None,
+    ) -> CommandResult:
         cmd = tuple(args)
-        self.calls.append((cmd, check))
+        self.calls.append((cmd, check, input_text, timeout))
         subcommand = cmd[4] if len(cmd) > 4 else ""
         if self._fail_on_subcommand == subcommand:
             raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
-        return 0
+        if subcommand == "exec":
+            next_resp = (
+                self._exec_responses.pop(0) if self._exec_responses else CommandResult(0, "ALIVE=False EXIT=0\n")
+            )
+            if isinstance(next_resp, Exception):
+                raise next_resp
+            return next_resp
+        return CommandResult(returncode=0)
 
     def subcommands(self) -> list[str]:
-        return [cmd[4] for cmd, _ in self.calls]
+        return [cmd[4] for cmd, _, _, _ in self.calls]
 
 
 def _make_decks(tmp_path: Path) -> Path:
@@ -74,7 +94,7 @@ def test_missing_decks_or_resume_state_fails_before_provisioning(tmp_path: Path)
     assert runner.calls == []
 
 
-def test_ssh_or_download_failure_still_syncs_and_stops_unless_keep_vm(tmp_path: Path) -> None:
+def test_setup_failure_stops_vm_without_syncing_and_download_errors_still_stop(tmp_path: Path) -> None:
     decks = _make_decks(tmp_path)
     stop_runner = _RecordingRunner(fail_on_subcommand="ssh")
     stop_cfg = ColabRunConfig(
@@ -82,11 +102,12 @@ def test_ssh_or_download_failure_still_syncs_and_stops_unless_keep_vm(tmp_path: 
         decks_path=decks,
         backup_dir=tmp_path / "backup-stop",
         run_id="r-fail",
+        poll_interval_s=0,
         sync_interval_s=0,
     )
     with pytest.raises(subprocess.CalledProcessError):
         run_colab_training(stop_cfg, runner=stop_runner)
-    assert stop_runner.subcommands() == ["new", "upload", "ssh", "download", "download", "download", "stop", "usage"]
+    assert stop_runner.subcommands() == ["new", "upload", "ssh", "stop", "usage"]
 
     keep_runner = _RecordingRunner(fail_on_subcommand="ssh")
     keep_cfg = ColabRunConfig(
@@ -94,12 +115,13 @@ def test_ssh_or_download_failure_still_syncs_and_stops_unless_keep_vm(tmp_path: 
         decks_path=decks,
         backup_dir=tmp_path / "backup-keep",
         run_id="r-keep",
+        poll_interval_s=0,
         sync_interval_s=0,
         keep_vm=True,
     )
     with pytest.raises(subprocess.CalledProcessError):
         run_colab_training(keep_cfg, runner=keep_runner)
-    assert keep_runner.subcommands() == ["new", "upload", "ssh", "download", "download", "download"]
+    assert keep_runner.subcommands() == ["new", "upload", "ssh"]
 
     sync_runner = _RecordingRunner(fail_on_subcommand="download")
     sync_cfg = ColabRunConfig(
@@ -107,22 +129,34 @@ def test_ssh_or_download_failure_still_syncs_and_stops_unless_keep_vm(tmp_path: 
         decks_path=decks,
         backup_dir=tmp_path / "backup-sync",
         run_id="r-sync",
+        poll_interval_s=0,
         sync_interval_s=0,
     )
     assert run_colab_training(sync_cfg, runner=sync_runner) == 0
-    assert sync_runner.subcommands() == ["new", "upload", "ssh", "download", "download", "download", "stop", "usage"]
+    assert sync_runner.subcommands() == [
+        "new",
+        "upload",
+        "ssh",
+        "exec",
+        "download",
+        "download",
+        "download",
+        "stop",
+        "usage",
+    ]
 
 
-def test_resume_from_prepares_remote_dirs_before_uploads_and_appends_resume(tmp_path: Path) -> None:
+def test_resume_from_prepares_dirs_chunks_large_state_and_verifies_sha256(tmp_path: Path) -> None:
     decks = _make_decks(tmp_path)
     resume_dir = tmp_path / "prior-run"
     ckpts_dir = resume_dir / "checkpoints"
     ckpts_dir.mkdir(parents=True)
     (resume_dir / "config.json").write_text("{}\n")
     (resume_dir / "metrics.jsonl").write_text('{"update": 40}\n')
-    (ckpts_dir / "resume-state.pt").write_bytes(b"state")
-    (ckpts_dir / "iter-0040.safetensors").write_bytes(b"weights")
-    (ckpts_dir / "iter-0040.policy.json").write_text("{}\n")
+    large_state = b"0123456789" * 5  # 50 bytes -> 3 chunks at chunk_bytes=20
+    (ckpts_dir / "resume-state.pt").write_bytes(large_state)
+    (ckpts_dir / "iter-0040.safetensors").write_bytes(b"wt")
+    (ckpts_dir / "iter-0040.policy.json").write_text("{}")
 
     runner = _RecordingRunner()
     cfg = ColabRunConfig(
@@ -131,22 +165,48 @@ def test_resume_from_prepares_remote_dirs_before_uploads_and_appends_resume(tmp_
         backup_dir=tmp_path / "backup",
         run_id="run-02",
         resume_from=resume_dir,
+        poll_interval_s=0,
         sync_interval_s=0,
+        upload_chunk_bytes=20,
     )
-    run_colab_training(cfg, runner=runner)
+    assert run_colab_training(cfg, runner=runner) == 0
 
-    mkdir_idx = next(
-        idx for idx, (cmd, _) in enumerate(runner.calls) if cmd[4] == "ssh" and cmd[8:10] == ("mkdir", "-p")
-    )
-    resume_upload_indices = [
-        idx for idx, (cmd, _) in enumerate(runner.calls) if cmd[4] == "upload" and cmd[8].startswith("/content/runs/")
+    expected_sha = hashlib.sha256(large_state).hexdigest()
+    part_uploads = [
+        cmd for cmd, _, _, _ in runner.calls if cmd[4] == "upload" and "resume-state.pt.parts/part-" in cmd[8]
     ]
-    assert len(resume_upload_indices) == 5
-    assert all(idx > mkdir_idx for idx in resume_upload_indices)
+    assert len(part_uploads) == 3
 
-    ssh_calls = [cmd for cmd, _ in runner.calls if cmd[4] == "ssh"]
-    assert len(ssh_calls) == 2
-    assert "--decks-path /content/decks.pt --resume" in ssh_calls[1][10]
+    ssh_cmds = [cmd for cmd, _, _, _ in runner.calls if cmd[4] == "ssh"]
+    assert any("forensics" in " ".join(cmd) and "games" in " ".join(cmd) for cmd in ssh_cmds)
+    assert any(expected_sha in cmd[-1] and "sha256sum" in cmd[-1] for cmd in ssh_cmds)
+    assert any("--decks-path /content/decks.pt --resume" in cmd[-1] for cmd in ssh_cmds)
+
+
+def test_poll_loop_recovers_timeout_syncs_periodically_and_returns_remote_exit(tmp_path: Path) -> None:
+    decks = _make_decks(tmp_path)
+    runner = _RecordingRunner(
+        exec_responses=[
+            subprocess.TimeoutExpired(cmd=("colab", "exec"), timeout=90.0),
+            CommandResult(0, "ALIVE=True EXIT= PID=42 GPU=[7000 MiB, 23034 MiB, 85 %] LAST={}\n"),
+            CommandResult(0, "ALIVE=False EXIT=7 PID=42 GPU=[0 MiB, 23034 MiB, 0 %] LAST={}\n"),
+        ]
+    )
+    cfg = ColabRunConfig(
+        session="poll-test",
+        decks_path=decks,
+        backup_dir=tmp_path / "backup-poll",
+        run_id="r-poll",
+        poll_interval_s=0,
+        sync_interval_s=1,
+    )
+    assert run_colab_training(cfg, runner=runner) == 7
+    exec_calls = [call for call in runner.calls if call[0][4] == "exec"]
+    assert len(exec_calls) == 3
+    assert all(timeout == 90.0 for _, _, _, timeout in exec_calls)
+    download_calls = [call for call in runner.calls if call[0][4] == "download"]
+    assert len(download_calls) == 12  # 3 periodic ticks * 3 files + final sync * 3 files
+    assert runner.subcommands()[-2:] == ["stop", "usage"]
 
 
 def test_cli_dry_run_forwards_after_double_dash_and_executes_zero_commands(
@@ -190,43 +250,7 @@ def test_cli_dry_run_forwards_after_double_dash_and_executes_zero_commands(
     assert not backup_dir.exists()
     output = capsys.readouterr().out
     assert 'export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"' in output
-    assert "exec uv run python -m jace.train.full_data" in output
+    assert "nohup bash -lc" in output
+    assert "uv run python -m jace.train.full_data" in output
     assert "--updates 25 --eval-every 5" in output
     assert " -- --updates" not in output
-
-
-def test_periodic_and_final_sync_serialize_downloads(tmp_path: Path) -> None:
-    decks = _make_decks(tmp_path)
-    sync_entered = threading.Event()
-    counter_lock = threading.Lock()
-    active_downloads = 0
-    max_concurrent_downloads = 0
-    download_calls = 0
-
-    def _runner(args: Sequence[str], *, check: bool = True) -> int:
-        nonlocal active_downloads, max_concurrent_downloads, download_calls
-        _ = check
-        subcommand = args[4] if len(args) > 4 else ""
-        if subcommand == "download":
-            with counter_lock:
-                active_downloads += 1
-                download_calls += 1
-                max_concurrent_downloads = max(max_concurrent_downloads, active_downloads)
-            sync_entered.set()
-            time.sleep(0.05)
-            with counter_lock:
-                active_downloads -= 1
-        elif subcommand == "ssh":
-            assert sync_entered.wait(timeout=5.0)
-        return 0
-
-    cfg = ColabRunConfig(
-        session="sync-lock",
-        decks_path=decks,
-        backup_dir=tmp_path / "backup-lock",
-        run_id="r-lock",
-        sync_interval_s=1,
-    )
-    assert run_colab_training(cfg, runner=_runner) == 0
-    assert download_calls >= 6
-    assert max_concurrent_downloads == 1
