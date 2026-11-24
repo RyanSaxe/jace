@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 378" role="img" aria-label="End-to-end data and model flow in jace. The managym Card Catalog feeds engine programs into the Program Card Encoder (jace.cards and ActorCritic), which supplies card embeddings to Drafter (jace.draft), Deck Builder and Score (jace.decks), and Gameplay Policy and Critic (jace.collect and jace.rl). Drafter outputs a 42-card pool to Deck Builder and Score, which outputs a 40-card deck to Gameplay Policy and Critic, which sends trajectories and outcomes to Self-Play RL (jace.rl). Self-Play RL feeds weights and win-rate signals back to Drafter and Deck Builder, weights and snapshots back to Gameplay Policy, and checkpoints to Mirrored Evaluation (jace.eval), which writes to Run Storage (jace.storage).">
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#e6edf3;text-anchor:middle;font-size:15px}
+.t{font-weight:600}.s{font-size:12.5px;fill:#9198a1}.l{text-anchor:start}.r{text-anchor:end}.m{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13.5px;font-weight:600}
+.line{fill:none;stroke:#e6edf3;stroke-width:1.5}.head{fill:#e6edf3}
+.bline{fill:none;stroke:#6e8cf0;stroke-width:1.5}.bhead{fill:#6e8cf0}
+.dline{fill:none;stroke:#9198a1;stroke-width:1.5;stroke-dasharray:5 3}.dhead{fill:#9198a1}
+.box{fill:#0d1117;stroke:#3d444d}.round{fill:#152042;stroke:#6e8cf0}
+</style>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+<marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="bhead"/></marker>
+<marker id="d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dhead"/></marker>
+</defs>
+<rect class="box" x="24" y="20" width="204" height="62" rx="10"/>
+<text x="126" y="47" class="t">managym Card Catalog</text>
+<text x="126" y="67" class="s">engine programs</text>
+<path class="line" d="M228 51 H264" marker-end="url(#a)"/>
+<rect class="round" x="268" y="20" width="528" height="62" rx="10"/>
+<text x="532" y="47" class="t">Program Card Encoder</text>
+<text x="532" y="67" class="s">jace.cards · ActorCritic</text>
+<path class="bline" d="M532 82 V104 M110 104 H690 M110 104 V124" marker-end="url(#b)"/>
+<path class="bline" d="M392 104 V124" marker-end="url(#b)"/>
+<path class="bline" d="M690 104 V124" marker-end="url(#b)"/>
+<rect class="box" x="24" y="128" width="172" height="74" rx="10"/>
+<text x="110" y="160" class="t">Drafter</text>
+<text x="110" y="182" class="s">jace.draft</text>
+<rect class="box" x="296" y="128" width="192" height="74" rx="10"/>
+<text x="392" y="160" class="t">Deck Builder &amp; Score</text>
+<text x="392" y="182" class="s">jace.decks</text>
+<rect class="box" x="584" y="128" width="212" height="74" rx="10"/>
+<text x="690" y="160" class="t">Gameplay Policy &amp; Critic</text>
+<text x="690" y="182" class="s">jace.collect · jace.rl</text>
+<path class="line" d="M196 165 H292" marker-end="url(#a)"/>
+<text x="244" y="156" class="s">42-card pool</text>
+<path class="line" d="M488 165 H580" marker-end="url(#a)"/>
+<text x="534" y="156" class="s">40-card deck</text>
+<rect class="box" x="24" y="282" width="172" height="74" rx="10"/>
+<text x="110" y="314" class="t">Run Storage</text>
+<text x="110" y="336" class="s">jace.storage</text>
+<rect class="box" x="252" y="282" width="200" height="74" rx="10"/>
+<text x="352" y="314" class="t">Mirrored Evaluation</text>
+<text x="352" y="336" class="s">jace.eval</text>
+<rect class="round" x="548" y="282" width="248" height="74" rx="10"/>
+<text x="672" y="314" class="t">Self-Play RL</text>
+<text x="672" y="336" class="s">jace.rl</text>
+<path class="line" d="M690 202 V278" marker-end="url(#a)"/>
+<text x="700" y="236" class="s l">trajectories</text>
+<text x="700" y="253" class="s l">&amp; outcomes</text>
+<path class="bline" d="M614 282 V206" marker-end="url(#b)"/>
+<path class="bline" d="M614 244 H110 V206" marker-end="url(#b)"/>
+<path class="bline" d="M392 244 V206" marker-end="url(#b)"/>
+<text x="251" y="235" class="s">weights &amp; win-rate signal</text>
+<text x="503" y="235" class="s">weights &amp; snapshots</text>
+<path class="line" d="M548 319 H456" marker-end="url(#a)"/>
+<text x="502" y="310" class="s">checkpoints</text>
+<path class="line" d="M252 319 H200" marker-end="url(#a)"/>
+</svg>

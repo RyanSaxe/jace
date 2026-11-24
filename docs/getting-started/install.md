@@ -2,29 +2,24 @@
 
 ## Requirements
 
-| Requirement                      | Purpose                                                                      |
-| -------------------------------- | ---------------------------------------------------------------------------- |
-| Python 3.13                      | Required by `pyproject.toml` (`>=3.13,<3.14`)                                |
-| [uv](https://docs.astral.sh/uv/) | Installs dependencies and runs every command                                 |
-| Rust toolchain                   | Required by `uv sync` to compile the pinned `managym` engine from source     |
+| Tool                             | Purpose                                                |
+| -------------------------------- | ------------------------------------------------------ |
+| Python 3.13                      | `>=3.13,<3.14` (`pyproject.toml`)                      |
+| [uv](https://docs.astral.sh/uv/) | Dependency install and command runner                  |
+| Rust toolchain                   | Compiles pinned `managym[academy]` from source on sync |
 
-## Install and verify
+## Setup
 
 ```sh
 git clone https://github.com/RyanSaxe/jace.git
 cd jace
-uv sync
-uv run pytest -q
+uv sync           # compiles managym[academy] (a few minutes first time)
+uv run pytest -q  # runs offline, no external data needed
 ```
 
-`uv sync` compiles `managym[academy]` from the pinned git revision in
-`pyproject.toml` (a few minutes on first build). All unit tests run without
-external datasets.
+## 10-deck smoke run
 
-## Quick 10-deck lab run
-
-`jace.train.ten_decks` runs closed-decklist self-play on the 10 built-in
-`elemental-world-v2` decks bundled with `managym`:
+Train on the 10 built-in `elemental-world-v2` decks:
 
 ```sh
 uv run python -m jace.train.ten_decks \
@@ -38,25 +33,19 @@ uv run python -m jace.train.ten_decks \
   --learn-device cpu
 ```
 
-Artifacts are written to `../jace-runs/v2-ten-deck-lab/smoke/` (override with
-`--runs-dir`).
+Writes to `../jace-runs/v2-ten-deck-lab/smoke/` (`--runs-dir` overrides).
 
-## Download 17Lands data
+## 17Lands data
 
-Full-data self-play (`jace.train.full_data`) and supervised pretraining
-(`jace.pretrain.draft`, `jace.pretrain.decks`) read public 17Lands Premier Draft
-exports and MTGJSON attributes via [spells](https://github.com/oelarnes/spells):
+`jace.train.full_data`, `jace.pretrain.draft`, and `jace.pretrain.decks` read
+17Lands exports and MTGJSON attributes via
+[spells](https://github.com/oelarnes/spells):
 
 ```sh
 uv run spells add TLA
 ```
 
-Files are stored in `~/.local/share/spells` (or `$SPELLS_DATA_HOME`). jace never
-downloads datasets automatically. See [Data](../reference/data.md) for caching
-and deterministic splits.
-
-## Next
-
-Read [Architecture](../concepts/architecture.md) for the system design, or
-[Running experiments](../guides/running-experiments.md) for training,
-pretraining, screening, and Academy replays.
+Stored in `~/.local/share/spells` (or `$SPELLS_DATA_HOME`); jace never downloads
+automatically. Next: [Data](../reference/data.md),
+[Architecture](../concepts/architecture.md), or
+[Running experiments](../guides/running-experiments.md).

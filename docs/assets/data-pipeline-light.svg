@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 264" role="img" aria-label="Cached tensor data pipeline. spells Parquet (17Lands and MTGJSON) and managym Catalog (jace.data.catalog) combine in card_table (SetCards), which feeds program_tokens (int64 [cards, longest]), load_drafts (drafts.pt plus CRC-32 split), and load_decks (decks.pt plus CRC-32 split).">
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#1f2328;text-anchor:middle;font-size:15px}
+.t{font-weight:600}.s{font-size:12.5px;fill:#59636e}.l{text-anchor:start}.r{text-anchor:end}.m{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13.5px;font-weight:600}
+.line{fill:none;stroke:#1f2328;stroke-width:1.5}.head{fill:#1f2328}
+.bline{fill:none;stroke:#3a5bd9;stroke-width:1.5}.bhead{fill:#3a5bd9}
+.dline{fill:none;stroke:#59636e;stroke-width:1.5;stroke-dasharray:5 3}.dhead{fill:#59636e}
+.box{fill:#ffffff;stroke:#b8bec6}.round{fill:#eef2fd;stroke:#3a5bd9}
+</style>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+<marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="bhead"/></marker>
+<marker id="d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dhead"/></marker>
+</defs>
+<rect class="box" x="24" y="42" width="228" height="68" rx="10"/>
+<text x="138" y="71" class="t">spells Parquet</text>
+<text x="138" y="91" class="s">17Lands + MTGJSON</text>
+<rect class="box" x="24" y="154" width="228" height="68" rx="10"/>
+<text x="138" y="183" class="t">managym Catalog</text>
+<text x="138" y="203" class="s">jace.data.catalog</text>
+<path class="line" d="M252 76 C276 76 276 122 294 122 H304" marker-end="url(#a)"/>
+<path class="line" d="M252 188 C276 188 276 142 294 142 H304" marker-end="url(#a)"/>
+<rect class="round" x="308" y="96" width="182" height="72" rx="10"/>
+<text x="399" y="128" class="m">card_table</text>
+<text x="399" y="148" class="s">SetCards</text>
+<path class="line" d="M490 120 C514 120 516 52 534 52 H544" marker-end="url(#a)"/>
+<path class="line" d="M490 132 H544" marker-end="url(#a)"/>
+<path class="line" d="M490 144 C514 144 516 212 534 212 H544" marker-end="url(#a)"/>
+<rect class="box" x="548" y="20" width="248" height="64" rx="10"/>
+<text x="672" y="48" class="m">program_tokens</text>
+<text x="672" y="68" class="s">int64 [cards, longest]</text>
+<rect class="box" x="548" y="100" width="248" height="64" rx="10"/>
+<text x="672" y="128" class="m">load_drafts</text>
+<text x="672" y="148" class="s">drafts.pt + CRC-32 split</text>
+<rect class="box" x="548" y="180" width="248" height="64" rx="10"/>
+<text x="672" y="208" class="m">load_decks</text>
+<text x="672" y="228" class="s">decks.pt + CRC-32 split</text>
+</svg>

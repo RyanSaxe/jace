@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 352" role="img" aria-label="Adaptive sequential judging. Stage 1 (100 deals) stops early on clear wins (CI &gt; 50% and WR &gt;= 58%) or losses (CI &lt; 50% and WR &lt;= 44%); inconclusive matchups continue to Stage 2 (200 deals), which stops if CI excludes 50% or WR lies outside 48% to 56%. Close matchups continue to Stage 3 (500 deals). All outcomes feed Harness Verdict (PROMOTE, KILL, or INCONCLUSIVE), which a Forensics Guardrail (missed land drop &gt; +3 pp) can auto-KILL.">
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#1f2328;text-anchor:middle;font-size:15px}
+.t{font-weight:600}.s{font-size:12.5px;fill:#59636e}.l{text-anchor:start}.r{text-anchor:end}.m{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13.5px;font-weight:600}
+.line{fill:none;stroke:#1f2328;stroke-width:1.5}.head{fill:#1f2328}
+.bline{fill:none;stroke:#3a5bd9;stroke-width:1.5}.bhead{fill:#3a5bd9}
+.dline{fill:none;stroke:#59636e;stroke-width:1.5;stroke-dasharray:5 3}.dhead{fill:#59636e}
+.box{fill:#ffffff;stroke:#b8bec6}.round{fill:#eef2fd;stroke:#3a5bd9}
+</style>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+<marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="bhead"/></marker>
+<marker id="d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dhead"/></marker>
+</defs>
+<rect class="box" x="24" y="20" width="190" height="56" rx="10"/>
+<text x="119" y="45" class="t">Stage 1: 100 Deals</text>
+<text x="119" y="64" class="s">200 games</text>
+<path class="line" d="M214 48 H310" marker-end="url(#a)"/>
+<text x="262" y="39" class="s">inconclusive</text>
+<rect class="box" x="314" y="20" width="190" height="56" rx="10"/>
+<text x="409" y="45" class="t">Stage 2: 200 Deals</text>
+<text x="409" y="64" class="s">400 games</text>
+<path class="line" d="M504 48 H600" marker-end="url(#a)"/>
+<text x="552" y="39" class="s">close zone</text>
+<rect class="box" x="604" y="20" width="190" height="56" rx="10"/>
+<text x="699" y="45" class="t">Stage 3: 500 Deals</text>
+<text x="699" y="64" class="s">1,000 games</text>
+<path class="line" d="M56 76 V150" marker-end="url(#a)"/>
+<text x="66" y="109" class="s l">CI &gt; 50% &amp; WR ≥ 58%</text>
+<text x="66" y="126" class="s l">or CI &lt; 50% &amp; WR ≤ 44%</text>
+<path class="line" d="M346 76 V150" marker-end="url(#a)"/>
+<text x="356" y="109" class="s l">CI excludes 50%</text>
+<text x="356" y="126" class="s l">or outside 48%–56%</text>
+<path class="line" d="M699 76 V150" marker-end="url(#a)"/>
+<rect class="box" x="24" y="154" width="190" height="52" rx="10"/>
+<text x="119" y="185" class="t">Early WIN / LOSS</text>
+<rect class="box" x="314" y="154" width="190" height="52" rx="10"/>
+<text x="409" y="185" class="t">WIN / LOSS / TIE</text>
+<rect class="box" x="604" y="154" width="190" height="52" rx="10"/>
+<text x="699" y="185" class="t">Final WIN / LOSS / TIE</text>
+<path class="line" d="M119 206 V236 H699 V206 M409 206 V236 M609 236 V262" marker-end="url(#a)"/>
+<rect class="box" x="24" y="266" width="290" height="66" rx="10"/>
+<text x="169" y="294" class="t">Forensics Guardrail</text>
+<text x="169" y="314" class="s">missed land drop &gt; +3 pp</text>
+<path class="dline" d="M314 299 H420" marker-end="url(#d)"/>
+<text x="367" y="290" class="s">auto KILL</text>
+<rect class="round" x="424" y="266" width="370" height="66" rx="10"/>
+<text x="609" y="294" class="t">Harness Verdict</text>
+<text x="609" y="314" class="s">PROMOTE · KILL · INCONCLUSIVE</text>
+</svg>

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 226" role="img" aria-label="Mirrored paired deals evaluation. Each Deal (Deck A, Deck B, seed, closed decklists) runs two mirrored legs: Leg 0 has Player A on the play with Deck A versus Player B on the draw with Deck B, and Leg 1 swaps seats. Both legs combine into a PairedDealResult (2-0, 1-1, or 0-2), yielding a Paired SE and 95% CI where 1-1 splits add zero variance.">
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#e6edf3;text-anchor:middle;font-size:15px}
+.t{font-weight:600}.s{font-size:12.5px;fill:#9198a1}.l{text-anchor:start}.r{text-anchor:end}.m{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13.5px;font-weight:600}
+.line{fill:none;stroke:#e6edf3;stroke-width:1.5}.head{fill:#e6edf3}
+.bline{fill:none;stroke:#6e8cf0;stroke-width:1.5}.bhead{fill:#6e8cf0}
+.dline{fill:none;stroke:#9198a1;stroke-width:1.5;stroke-dasharray:5 3}.dhead{fill:#9198a1}
+.box{fill:#0d1117;stroke:#3d444d}.round{fill:#152042;stroke:#6e8cf0}
+</style>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+<marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="bhead"/></marker>
+<marker id="d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dhead"/></marker>
+</defs>
+<rect class="box" x="16" y="66" width="152" height="94" rx="10"/>
+<text x="92" y="96" class="t">Deal</text>
+<text x="92" y="118" class="s">Deck A · Deck B</text>
+<text x="92" y="138" class="s">Seed · Closed Lists</text>
+<path class="line" d="M168 103 C186 103 184 57 196 57 H204" marker-end="url(#a)"/>
+<path class="line" d="M168 123 C186 123 184 169 196 169 H204" marker-end="url(#a)"/>
+<rect class="box" x="208" y="20" width="204" height="74" rx="10"/>
+<text x="310" y="45" class="t">Leg 0</text>
+<text x="310" y="64" class="s">Player A (Play, Deck A)</text>
+<text x="310" y="81" class="s">vs Player B (Draw, Deck B)</text>
+<rect class="box" x="208" y="132" width="204" height="74" rx="10"/>
+<text x="310" y="157" class="t">Leg 1</text>
+<text x="310" y="176" class="s">Player B (Play, Deck A)</text>
+<text x="310" y="193" class="s">vs Player A (Draw, Deck B)</text>
+<path class="line" d="M412 57 C428 57 426 103 438 103 H446" marker-end="url(#a)"/>
+<path class="line" d="M412 169 C428 169 426 123 438 123 H446" marker-end="url(#a)"/>
+<rect class="round" x="450" y="74" width="166" height="78" rx="10"/>
+<text x="533" y="108" class="m">PairedDealResult</text>
+<text x="533" y="130" class="s">2-0 / 1-1 / 0-2</text>
+<path class="line" d="M616 113 H636" marker-end="url(#a)"/>
+<rect class="box" x="640" y="70" width="164" height="86" rx="10"/>
+<text x="722" y="98" class="t">Paired SE &amp; 95% CI</text>
+<text x="722" y="120" class="s">1-1 splits add</text>
+<text x="722" y="138" class="s">zero variance</text>
+</svg>

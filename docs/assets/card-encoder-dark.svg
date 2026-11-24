@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 336" role="img" aria-label="Shared program card encoder pipeline. managym Engine Programs ((kind, value) token pairs) pass through Token and Position Embeddings (padding, no-program, unknown), a Packed Transformer (encode_real), and Masked Mean Pool plus LayerNorm (CardEncoder to frozen CardTable). The resulting card embeddings feed DrafterModel (Causal Transformer), DeckBuilder (3-Stage Masked Set Transformer), and DeckScore (Set Transformer Win Predictor).">
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#e6edf3;text-anchor:middle;font-size:15px}
+.t{font-weight:600}.s{font-size:12.5px;fill:#9198a1}.l{text-anchor:start}.r{text-anchor:end}.m{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13.5px;font-weight:600}
+.line{fill:none;stroke:#e6edf3;stroke-width:1.5}.head{fill:#e6edf3}
+.bline{fill:none;stroke:#6e8cf0;stroke-width:1.5}.bhead{fill:#6e8cf0}
+.dline{fill:none;stroke:#9198a1;stroke-width:1.5;stroke-dasharray:5 3}.dhead{fill:#9198a1}
+.box{fill:#0d1117;stroke:#3d444d}.round{fill:#152042;stroke:#6e8cf0}
+</style>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+<marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="bhead"/></marker>
+<marker id="d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dhead"/></marker>
+</defs>
+<rect class="box" x="24" y="20" width="236" height="64" rx="10"/>
+<text x="142" y="48" class="t">managym Engine Programs</text>
+<text x="142" y="68" class="s">(kind, value) token pairs</text>
+<path class="line" d="M260 52 H288" marker-end="url(#a)"/>
+<rect class="box" x="292" y="20" width="252" height="64" rx="10"/>
+<text x="418" y="48" class="t">Token + Position Embeddings</text>
+<text x="418" y="68" class="s">padding · no-program · unknown</text>
+<path class="line" d="M544 52 H572" marker-end="url(#a)"/>
+<rect class="box" x="576" y="20" width="220" height="64" rx="10"/>
+<text x="686" y="48" class="t">Packed Transformer</text>
+<text x="686" y="68" class="s">encode_real</text>
+<path class="line" d="M686 84 V106 H410 V124" marker-end="url(#a)"/>
+<rect class="round" x="160" y="128" width="500" height="64" rx="10"/>
+<text x="410" y="156" class="t">Masked Mean Pool + LayerNorm</text>
+<text x="410" y="176" class="s">CardEncoder → frozen CardTable</text>
+<path class="bline" d="M410 192 V236" marker-end="url(#b)"/>
+<path class="bline" d="M410 214 H138 V236" marker-end="url(#b)"/>
+<path class="bline" d="M410 214 H682 V236" marker-end="url(#b)"/>
+<rect class="box" x="24" y="240" width="228" height="74" rx="10"/>
+<text x="138" y="272" class="m">DrafterModel</text>
+<text x="138" y="294" class="s">Causal Transformer</text>
+<rect class="box" x="296" y="240" width="228" height="74" rx="10"/>
+<text x="410" y="272" class="m">DeckBuilder</text>
+<text x="410" y="294" class="s">3-Stage Masked Set Transformer</text>
+<rect class="box" x="568" y="240" width="228" height="74" rx="10"/>
+<text x="682" y="272" class="m">DeckScore</text>
+<text x="682" y="294" class="s">Set Transformer Win Predictor</text>
+</svg>
