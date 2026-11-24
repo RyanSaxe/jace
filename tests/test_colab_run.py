@@ -189,6 +189,7 @@ def test_cli_dry_run_forwards_after_double_dash_and_executes_zero_commands(
     assert code == 0
     assert not backup_dir.exists()
     output = capsys.readouterr().out
+    assert 'export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"' in output
     assert "exec uv run python -m jace.train.full_data" in output
     assert "--updates 25 --eval-every 5" in output
     assert " -- --updates" not in output

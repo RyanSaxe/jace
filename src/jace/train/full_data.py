@@ -39,6 +39,8 @@ from jace.eval import (
     build_human_deals,
     capture_probes,
     diff_checkpoints,
+    evaluate_agent_parallel,
+    paired_score_metrics,
     play_deals_parallel,
     run_forensics,
     summarize_paired_deals,
@@ -71,11 +73,7 @@ if TYPE_CHECKING:
     from manabot.backends.torch.policy import ActorCritic
     from manabot.env.observation import ObservationSpace
 
-__all__ = (
-    "FullDataConfig",
-    "main",
-    "run_full_data_training",
-)
+__all__ = ("FullDataConfig", "main", "run_full_data_training")
 
 _RESUME_FILENAME = "resume-state.pt"
 
@@ -170,13 +168,14 @@ def _evaluate_full_data(
         agent=agent,
         ema=ema_weights,
     )
+    eval_seed = cfg.seed + iteration * 13
     paired_det = summarize_paired_deals(
         play_deals_parallel(
             ckpt_path,
             "heuristic",
             deals=held_out_deals,
             num_workers=cfg.eval_workers,
-            seed=cfg.seed + iteration * 13,
+            seed=eval_seed,
             deterministic=True,
         )
     )
@@ -197,17 +196,21 @@ def _evaluate_full_data(
         "diff_from_init": diff.to_dict(),
         "academy": academy_commands(layout, iteration=iteration),
     }
+    live_metrics: dict[str, object] = {}
+    if ema_weights is not None:
+        live_det = evaluate_agent_parallel(
+            agent, obs_space=obs_space, deals=held_out_deals, num_workers=cfg.eval_workers, seed=eval_seed
+        )
+        payload["live_held_out_det"] = asdict(live_det)
+        live_metrics = paired_score_metrics(live_det, prefix="live_held_out_det")
     save_forensics(layout, iteration=iteration, report=payload)
     append_metric(
         layout,
         {
             "kind": "eval",
             "update": iteration,
-            "held_out_det_win_rate": round(paired_det.win_rate, 4),
-            "held_out_det_ci_low": round(paired_det.ci_low, 4),
-            "held_out_det_ci_high": round(paired_det.ci_high, 4),
-            "held_out_det_sweeps_won": paired_det.deal_sweeps_won,
-            "held_out_det_sweeps_lost": paired_det.deal_sweeps_lost,
+            **paired_score_metrics(paired_det, prefix="held_out_det"),
+            **live_metrics,
             "win_rate_vs_heuristic": round(report.win_rate, 4),
             "attack_rate": round(report.attack_rate, 4),
             "heuristic_attack_rate": round(report.heuristic_attack_rate, 4),

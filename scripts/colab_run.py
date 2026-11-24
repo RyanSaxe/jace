@@ -160,6 +160,7 @@ def build_remote_script(cfg: ColabRunConfig) -> str:
     lines = [
         "set -euo pipefail",
         'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"',
+        'export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"',
         "if ! command -v uv >/dev/null 2>&1; then curl -LsSf https://astral.sh/uv/install.sh | sh; fi",
         (
             "if ! command -v cargo >/dev/null 2>&1; then "

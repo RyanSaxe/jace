@@ -5,20 +5,24 @@ seats) in parallel across spawned CPU worker processes (`torch.set_num_threads(1
 worker) so 200 mirrored games run in ~35 seconds and 400 in ~70 seconds. Because paired
 deals cancel out pure mana-screw and mana-flood splits (`1-1` deals contribute zero
 paired variance), `summarize_paired_deals` computes paired standard errors and 95%
-confidence intervals that detect +3 to +5 percentage point Limited Magic gains.
+confidence intervals that detect +3 to +5 percentage point Limited Magic gains. Also
+provides `evaluate_agent_parallel` for scoring an in-memory `ActorCritic` without a
+pre-saved checkpoint and `paired_score_metrics` for flat metric logging.
 """
 
 from __future__ import annotations
 
+import copy
 import logging
 import math
 import multiprocessing as mp
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import torch
-from manabot.backends.torch.checkpoint import load_checkpoint
+from manabot.backends.torch.checkpoint import load_checkpoint, save_checkpoint
 
 from jace.eval.deals import (
     Deal,
@@ -34,6 +38,9 @@ from jace.eval.deals import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from manabot.backends.torch.policy import ActorCritic
+    from manabot.env.observation import ObservationSpace
+
 __all__ = (
     "AdaptiveEvalConfig",
     "AdaptiveEvalResult",
@@ -41,6 +48,8 @@ __all__ = (
     "PairedMatchScore",
     "PlayerSpec",
     "evaluate_adaptive",
+    "evaluate_agent_parallel",
+    "paired_score_metrics",
     "play_adaptive_parallel",
     "play_deals_parallel",
     "summarize_paired_deals",
@@ -375,3 +384,39 @@ def play_adaptive_parallel(
         ]
 
     return evaluate_adaptive(_run_chunk, config=config)
+
+
+def evaluate_agent_parallel(
+    agent: ActorCritic,
+    *,
+    obs_space: ObservationSpace,
+    opponent: PlayerSpec = "heuristic",
+    deals: Sequence[Deal],
+    num_workers: int = 8,
+    seed: int = 0,
+    deterministic: bool = True,
+) -> PairedMatchScore:
+    cpu_copy = copy.deepcopy(agent).to("cpu").eval()
+    with tempfile.TemporaryDirectory(prefix="jace-live-eval-") as tmp_dir:
+        ckpt_path = Path(tmp_dir) / "live.safetensors"
+        save_checkpoint(cpu_copy, obs_space, ckpt_path, player_configs=None)
+        return summarize_paired_deals(
+            play_deals_parallel(
+                ckpt_path,
+                opponent,
+                deals=deals,
+                num_workers=num_workers,
+                seed=seed,
+                deterministic=deterministic,
+            )
+        )
+
+
+def paired_score_metrics(score: PairedMatchScore, *, prefix: str) -> dict[str, object]:
+    return {
+        f"{prefix}_win_rate": round(score.win_rate, 4),
+        f"{prefix}_ci_low": round(score.ci_low, 4),
+        f"{prefix}_ci_high": round(score.ci_high, 4),
+        f"{prefix}_sweeps_won": score.deal_sweeps_won,
+        f"{prefix}_sweeps_lost": score.deal_sweeps_lost,
+    }
