@@ -1,38 +1,68 @@
-# Managed by BYOR. Manual edits may be overwritten.
+# prek runs these before each commit, and CI runs `prek run --all-files`.
+# Formatters fix files rather than only reporting them.
 repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        # CI's checkout stages nothing, so check every file it is given.
+        args: [--enforce-all]
+
+  - repo: https://github.com/rvben/rumdl-pre-commit
+    rev: v0.3.5
+    hooks:
+      - id: rumdl-check
+        args: [--fix]
+
   - repo: local
     hooks:
-      - id: byor-ast-grep
-        name: ast-grep scan
-        entry: uvx --from ast-grep-cli==0.42.3 ast-grep scan --error
-        language: system
-      - id: byor-ruff
-        name: ruff
-        entry: uv run --with ruff .byor/scripts/ruff.py
-        language: system
-        files: \.(py|pyi)$
-      - id: byor-ty
-        name: ty
-        entry: uv run ty check --output-format concise --no-progress --color never --error all --ignore unsound-return-statement
-        language: system
-        files: \.(py|pyi)$
-      - id: byor-no-suppression-comments
-        name: no-suppression-comments
-        entry: uv run .byor/scripts/no-suppression-comments.py
-        language: system
-        files: \.(py|pyi)$
-      - id: byor-module-contract
-        name: module-contract
-        entry: uv run .byor/scripts/module-contract.py
-        language: system
-        files: \.(py|pyi)$
-      - id: byor-no-thin-docstrings
-        name: no-thin-docstrings
-        entry: uv run .byor/scripts/no-thin-docstrings.py
-        language: system
-        files: \.(py|pyi)$
-      - id: byor-max-file-lines
+      - id: max-file-lines
         name: max-file-lines
-        entry: uv run .byor/scripts/max-file-lines.py
+        # Hard 1,000-line cap on source files; skips lockfiles, generated,
+        # minified, SVG, JSON, data and Markdown files.
+        entry: >-
+          python3 -c 'import pathlib, re, sys;
+          skip_ext = {".lock", ".svg", ".json", ".jsonc", ".csv", ".tsv", ".jsonl", ".ndjson", ".sql", ".xml", ".md", ".mdx", ".markdown", ".map", ".snap", ".po", ".pot"};
+          skip_re = re.compile(r"(^|/)([^/]+-lock\.[^/]+|[^/]+\.(min|generated|gen)\.[^/]+|[^/]+_pb2\.py|[^/]+\.pb\.go)$");
+          bad = [];
+          [bad.append((p, n)) for p in sys.argv[1:]
+           if pathlib.Path(p).suffix.lower() not in skip_ext and not skip_re.search(p)
+           and (n := sum(1 for _ in pathlib.Path(p).open("rb"))) > 1000];
+          [print(f"{p}: {n} lines (limit 1000) - split this file along a domain boundary.", file=sys.stderr) for p, n in bad];
+          sys.exit(1 if bad else 0)'
+        language: python
+        types: [text]
+
+      - id: ast-grep
+        name: ast-grep
+        # Pinned through uvx so Ubuntu CI runs it without a separate install.
+        entry: uvx --from ast-grep-cli@0.51.3 ast-grep scan
         language: system
-        files: \.(py|pyi)$
+        pass_filenames: false
+
+  # Python
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.6
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # Python: ty checks the whole project, with the dependencies in uv.lock.
+  - repo: https://github.com/astral-sh/ty-pre-commit
+    rev: v0.0.109
+    hooks:
+      - id: ty
+
+  # Python: keep uv.lock in sync with pyproject.toml.
+  - repo: local
+    hooks:
+      - id: uv-lock-check
+        name: uv-lock-check
+        entry: uv lock --check
+        language: system
+        files: ^(pyproject\.toml|uv\.lock)$
+        pass_filenames: false
