@@ -1,5 +1,24 @@
 # Agents
 
+## Setup and checks
+
+```sh
+uv sync
+prek install
+prek run --all-files
+uv run --locked pytest -q
+```
+
+## Workflow
+
+- Work lands on `main` through pull requests. There is no release process yet.
+- Write commit messages in Conventional Commits format.
+- Ask before adding a dependency, merging a pull request, or approving a
+  workflow run.
+- Do not add backwards-compatibility shims before the first release.
+- Keep unit tests fast, self-contained, and independent of downloaded 17Lands
+  data.
+
 ## Package layout
 
 jace separates pure models and RL math from engine collection, evaluation,
@@ -21,21 +40,6 @@ storage, and runnable CLIs. Imports flow downward only and are enforced by
 | `src/jace/data/` | 17Lands and MTGJSON loaders, deterministic splits, program tokens, and engine `catalog.py` seam (leaf) | Only `catalog.py` |
 | `src/jace/modules.py` | Shared transformer builder, packed `encode_real`, and device selection (leaf) | No |
 | `scripts/` | Standalone operational scripts with PEP 723 metadata (such as `colab_run.py`) | No |
-
-## Engine and manabot boundaries
-
-- Keep `manabot` and `managym` imports strictly inside `jace.data.catalog`,
-  `jace.rl.loop`, `jace.collect`, `jace.eval`, `jace.forks`,
-  `jace.storage.gameplay`, and `jace.train`.
-- Never import `manabot.training.updates`, `manabot.training.loops`, or
-  `manabot.recipes`; jace owns its RL algorithms in `jace.rl`.
-- Keep `jace.collect` free of `jace.eval` imports, and keep
-  `jace.storage.pretrain`, `jace.cards`, `jace.data`, and `jace.modules` free of
-  higher-layer imports.
-- Outside `jace.draft`, only `jace.pretrain` and `jace.train` may import
-  `jace.draft`, so constructed play requires no drafting code.
-- Nothing outside `jace.pretrain` may import `jace.pretrain`, and nothing
-  outside `jace.train` may import `jace.train`.
 
 ## Sources
 

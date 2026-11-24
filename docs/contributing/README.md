@@ -7,28 +7,20 @@ uv sync
 prek install
 ```
 
-The pre-commit hook runs every static check that CI runs.
+The pre-commit hook runs every static check that `.github/workflows/check.yml`
+runs in CI.
 
 ## Checks
 
 ```sh
-uv run pytest -q       # unit tests
-prek run --all-files   # lint, typing, and AST boundary checks
+uv run --locked pytest -q  # unit tests
+prek run --all-files       # format, lint, typing, lockfile, and boundary checks
 ```
 
-| Check                | Enforces                                                                               |
-| -------------------- | -------------------------------------------------------------------------------------- |
-| `ast-grep`           | Architecture boundaries and Python rules in `.byor/rules/project/`                     |
-| `ruff`               | Full lint rule set (`select = ["ALL"]` minus explicit ignores in `pyproject.toml`), line length 120, formatting |
-| `ty`                 | Strict type checking (`--error all`, ignoring only `unsound-return-statement`)         |
-| Complexity           | At most 6 independent paths (`max-complexity = 6`) per function                        |
-| File length          | At most 500 lines per Python file                                                      |
-| Module contract      | Module docstring (summary line + paragraph) and static `__all__` in every module       |
-| Thin docstrings      | No class or function docstring of three lines or fewer                                 |
-| Suppression comments | No `noqa`, `type: ignore`, or similar check-silencing comments                         |
-
-[byor](https://github.com/RyanSaxe/byor) manages these hooks. Add
-repository-specific AST checks as YAML rules under `.byor/rules/project/`.
+`.pre-commit-config.yaml` defines the repository checks, including Ruff (lint
+and format), `ty`, `rumdl`, `uv lock --check`, the 1,000-line source-file cap,
+and `ast-grep` against `.byor/rules/project/`. Add repository-specific AST
+boundary rules as YAML files under `.byor/rules/project/`.
 
 ## Design guidelines
 

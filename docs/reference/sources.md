@@ -746,21 +746,21 @@ what jace does instead.
   see as a tensor.
 
   In jace, code calls a module as `layer(x)`, as ordinary PyTorch code does, and
-  the strict ty check ignores its `unsound-return-statement` rule. Where a call
-  needs `forward`'s types or keyword arguments, the code calls `forward` itself.
+  `ty` checks the project under its default rules. Where a call needs
+  `forward`'s types or keyword arguments, the code calls `forward` itself.
 
 - [uv](https://docs.astral.sh/uv/). Astral.
 
   In jace, every install and command runs through it.
 
 - [RyanSaxe/byor](https://github.com/RyanSaxe/byor). RyanSaxe, Apache 2.0. It
-  manages code checks as rules and scripts.
+  manages agent-loop rules and checks.
 
-  In jace, the pre-commit hook and CI run byor's checks, among them
-  [ruff](https://github.com/astral-sh/ruff),
-  [ty](https://github.com/astral-sh/ty) and
-  [ast-grep](https://github.com/ast-grep/ast-grep). This repository's own rules
-  are in `.byor/rules/project/`.
+  In jace, `prek` and CI run [ruff](https://github.com/astral-sh/ruff),
+  [ty](https://github.com/astral-sh/ty), `rumdl` and
+  [ast-grep](https://github.com/ast-grep/ast-grep) against the repository's
+  boundary rules in `.byor/rules/project/`, while byor provides edit-loop
+  feedback locally.
 
 - Experiment trackers: [TensorBoard](https://github.com/tensorflow/tensorboard),
   [MLflow](https://github.com/mlflow/mlflow),
