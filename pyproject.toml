@@ -69,13 +69,16 @@ ignore = [
 ]
 
 [tool.ruff.lint.mccabe]
-# A function with more than this many independent paths is split into named helpers.
+# Complexity budget: 6 is human-ideal, >10 is tangled, 8 is the cross-language
+# agent benchmark; jace stays stricter at 6.
 max-complexity = 6
 
 [tool.ruff.lint.pylint]
 # PLR0917 caps positional arguments at two; pass any further parameters as
 # keyword-only arguments after `*`.
 max-positional-args = 2
+max-branches = 10
+max-nested-blocks = 4
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
