@@ -1,16 +1,16 @@
 # Gameplay RL
 
-Gameplay training learns a closed-decklist Magic policy and 3-class Win/Draw/Loss critic over `managym` using pure-tensor RL primitives in `jace.rl` and multi-process orchestration in `jace.loops`.
+Gameplay training learns a closed-decklist Magic policy and 3-class Win/Draw/Loss critic over `managym` using pure-tensor RL primitives in `jace.rl`, rollout collection in `jace.collect`, counterfactual forks in `jace.forks`, and CLI wiring in `jace.train`.
 
 ## Self-play update loop
 
 ```mermaid
 flowchart LR
-    Workers["Multi-Process CPU Workers\n(self-play + even-odds snapshots)"] -->|"complete games"| Credit["WDL GAE Credit\n(jace.rl.credit)"]
+    Workers["CPU / Sharded Collectors\n(jace.collect)"] -->|"complete games"| Credit["WDL GAE Credit\n(jace.rl.credit)"]
     Credit --> Select["Top-Fraction Filter\n(jace.rl.select)"]
     Select --> Buckets["Size-Bucketed Minibatches\n+ Epoch Catalog Cache"]
     Buckets --> Loss["Damped Dual-KL Loss\n(jace.rl.losses)"]
-    Forks["Batched Counterfactual Forks\n(jace.loops.fork_batch)"] -.->|"optional aux loss"| Loss
+    Forks["Batched Counterfactual Forks\n(jace.forks.batch)"] -.->|"optional aux loss"| Loss
     Loss -->|"updated weights"| Workers
     Loss -->|"periodic snapshot"| Pool["SnapshotPool\n(jace.rl.pool)"]
     Pool -->|"25% of updates"| Workers
@@ -22,7 +22,7 @@ flowchart LR
 | ------------------- | -------------------------------------------------------------------------------- |
 | Observations        | `policy_input_version=11`, closed decklists, 80 cards and 64 permanents per side |
 | Card representation | Semantic encoder over `managym` engine program tokens (cached once per epoch)    |
-| Trunk               | Transformer width 160 (`train_full_data`) or 64 (`train_ten_decks`), 2 layers, 4 heads |
+| Trunk               | Transformer width 160 (`full_data`) or 64 (`ten_decks`), 2 layers, 4 heads       |
 | Action head         | FiLM-conditioned legal action embeddings (`policy_film=True`)                    |
 | Value head          | `categorical_wdl` (3-class Loss / Draw / Win logits) with `masked_mean` pooling  |
 
@@ -51,7 +51,7 @@ L = L_clip(ratio, A)
 | Term            | Default               | Role                                                                            |
 | --------------- | --------------------- | ------------------------------------------------------------------------------- |
 | `collection_kl` | `0.1`                 | Pulls updated policy toward the frozen rollout behavior distribution            |
-| `magnet_kl`     | Scheduled (`tau`)     | Pulls toward `action_type_uniform` reference; decayed via `DecaySchedule` or `DampedSchedule` |
+| `magnet_kl`     | Scheduled (`tau`)     | Pulls toward `action_type_uniform` reference; decayed via `DecaySchedule` or `DampedSchedule` (`jace.rl.schedules`) |
 | `value_coef`    | `1.0`                 | Cross-entropy on 3-class WDL lambda-returns                                     |
 
 Plain clipped `ppo_loss` with an entropy bonus is also available for baselines.
@@ -59,12 +59,12 @@ Plain clipped `ppo_loss` with an entropy bonus is also available for baselines.
 ## Historical snapshots and nested curricula
 
 - **`SnapshotPool` (`jace.rl.pool`).** Keeps a bounded FIFO ring of detached CPU weights (`max_size=16`, saved every 10 updates). On `snapshot_fraction=0.25` of updates, one seat plays a past checkpoint. `matching="even_odds"` tracks an EMA win rate `p` per snapshot and samples proportionally to `max(0.05, p * (1 - p))`.
-- **Sharded deck loading (`jace.loops.collect_pool`).** Workers load `decks.pt` once and rotate `UniformDecks` shards (`shard_size=512`, refreshed every 50 updates) to avoid per-startup validation overhead.
-- **Nested color-balanced curricula (`jace.eval.human_decks`).** `nested_card_pools` greedily expands card pools to maximize log-balanced coverage across all 10 two-color pairs, keeping all five colors represented at small pool sizes. `--curriculum-stages` blends transitions smoothly over `--curriculum-blend-updates` updates.
+- **Sharded deck loading (`jace.collect.pool` / `jace.collect.local`).** Workers load `decks.pt` once and rotate `UniformDecks` shards (`shard_size=512`, refreshed every 50 updates) to avoid per-startup validation overhead.
+- **Nested color-balanced curricula (`jace.collect.decks`).** `nested_card_pools` greedily expands card pools to maximize log-balanced coverage across all 10 two-color pairs, keeping all five colors represented at small pool sizes. `--curriculum-stages` blends transitions smoothly over `--curriculum-blend-updates` updates.
 
 ## Batched counterfactual forks
 
-To break collapsed low-entropy habits (such as attacking with every creature every turn), `jace.loops.fork_batch` and `jace.rl.losses.fork_pairwise_loss` intervene directly with exact engine cloning (`env.clone_env()`):
+To break collapsed low-entropy habits (such as attacking with every creature every turn), `jace.forks.batch` and `jace.rl.losses.fork_pairwise_loss` intervene directly with exact engine cloning (`env.clone_env()`):
 
 ```mermaid
 flowchart LR
@@ -76,4 +76,4 @@ flowchart LR
 ```
 
 - **Full-strength gradient under collapse.** Restricted to `(a0, a1)`, the pairwise cross-entropy gradient `p - target` stays strong even when a collapsed policy puts `p = 0.999` on the worse move.
-- **Horizon auditing.** `audit_horizon_correlation` in [`jace/loops/fork_audit.py`](../../src/jace/loops/fork_audit.py) checks correlation and sign agreement between value-head gaps at candidate horizons and full-game outcomes before enabling truncated rollouts.
+- **Horizon auditing.** `audit_horizon_correlation` in [`jace/forks/audit.py`](../../src/jace/forks/audit.py) checks correlation and sign agreement between value-head gaps at candidate horizons and full-game outcomes before enabling truncated rollouts.

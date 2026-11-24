@@ -96,10 +96,10 @@ what jace does instead.
   In jace, `jace.rl.losses.damped_policy_loss` implements this clipped update
   with dual reverse-KL pulls (`collection_kl` toward the behavior policy and
   `magnet_kl` toward `reference_probs`), paired with `jace.rl.select.top_fraction`
-  advantage filtering and `jace.rl.pool.DampedSchedule` (Table S7 curves).
+  advantage filtering and `jace.rl.schedules.DampedSchedule` (Table S7 curves).
   An earlier separate guess model was replaced by closed-decklist `v11`
   observations on the `ActorCritic` backbone. Batched counterfactual forks
-  (`jace.loops.fork_batch`) follow the short playout + regularized step pattern.
+  (`jace.forks.batch`) follow the short playout + regularized step pattern.
 
 - [The Update-Equivalence Framework for Decision-Time Planning](https://arxiv.org/abs/2304.13138).
   Sokota et al., 2023. Planning at decision time can sample histories from
@@ -252,7 +252,7 @@ what jace does instead.
 
   Earlier jace prototypes used a separate value network. jace now uses the
   shared-trunk `ActorCritic` with 1 policy epoch per rollout by default, and
-  `jace.loops.fork_audit.build_batched_fork_aux_loss` reuses on-policy
+  `jace.forks.audit.build_batched_fork_aux_loss` reuses on-policy
   continuation states from counterfactual forks to supply extra WDL value
   supervision.
 
@@ -683,8 +683,9 @@ what jace does instead.
 
   In jace, games run on `managym` with `manabot`'s `ActorCritic`,
   `ObservationSpace`, and rollout collector behind a narrow import seam
-  (`jace.data.catalog`, `jace.rl.loop`, `jace.eval`, `jace.runs`, and
-  `jace.loops`), while all RL algorithms live in `jace.rl`. Evaluation
+  (`jace.data.catalog`, `jace.rl.loop`, `jace.collect`, `jace.eval`,
+  `jace.forks`, `jace.storage.gameplay`, and `jace.train`), while all RL
+  algorithms live in `jace.rl`. Evaluation
   scores checkpoints against `managym`'s `Heuristic` and random players, and
   `jace.cards` reads each card's engine program through `jace.data.catalog`.
 
@@ -789,5 +790,6 @@ what jace does instead.
 
   Decided against: with any of them, jace would still define a run's
   lineage and state itself, and plain files can be read without a service.
-  `jace.runs` writes Academy-native gameplay runs and `jace.tracking` writes
-  file-locked pretraining runs as folders of plain files.
+  `jace.storage.gameplay` writes Academy-native gameplay runs and
+  `jace.storage.pretrain` writes file-locked pretraining runs as folders of
+  plain files.
