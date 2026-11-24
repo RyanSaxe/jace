@@ -27,7 +27,7 @@ from torch import nn
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from jace.loops.collect_pool import merge_rollout_batches
+from jace.collect.agent import merge_rollout_batches
 from jace.rl import (
     DampedSchedule,
     DecaySchedule,

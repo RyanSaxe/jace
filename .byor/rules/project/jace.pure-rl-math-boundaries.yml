@@ -1,35 +1,41 @@
 id: jace.pure-rl-math-boundaries
 language: Python
 severity: error
-message: Pure RL modules (credit, losses, select) must not import Limited domain packages, eval, runs, or loops.
+message: Pure RL modules (credit, losses, select, schedules, ema, pool, prefetch, diagnostics) must not import Limited domain packages, collect, eval, forks, storage, pretrain, or train.
 files:
   - src/jace/rl/credit.py
+  - src/jace/rl/diagnostics.py
+  - src/jace/rl/ema.py
   - src/jace/rl/losses.py
+  - src/jace/rl/pool.py
+  - src/jace/rl/prefetch.py
+  - src/jace/rl/schedules.py
   - src/jace/rl/select.py
 rule:
   any:
     - kind: import_from_statement
       has:
         field: module_name
-        regex: ^jace\.(cards|data|draft|decks|eval|runs|tracking|loops)(\.|$)
+        regex: ^jace\.(cards|data|draft|decks|collect|eval|forks|storage|pretrain|train)(\.|$)
     - kind: import_statement
       has:
         any:
           - kind: dotted_name
-            regex: ^jace\.(cards|data|draft|decks|eval|runs|tracking|loops)(\.|$)
+            regex: ^jace\.(cards|data|draft|decks|collect|eval|forks|storage|pretrain|train)(\.|$)
           - kind: aliased_import
             has:
               kind: dotted_name
-              regex: ^jace\.(cards|data|draft|decks|eval|runs|tracking|loops)(\.|$)
+              regex: ^jace\.(cards|data|draft|decks|collect|eval|forks|storage|pretrain|train)(\.|$)
 metadata:
   byor:
     rationale: >
-      Keeping jace.rl.credit, losses, and select as pure tensor functions makes
-      every RL algorithm easy to read, teach, swap, and test on synthetic
-      batches with zero engine or dataset dependencies.
+      Keeping jace.rl's non-loop modules as pure PyTorch/NumPy functions and
+      records makes every RL algorithm easy to read, teach, swap, and test on
+      synthetic batches with zero engine or dataset dependencies.
     agent_prompt: >
       Keep this module pure PyTorch/NumPy math. Accept tensors or small local
-      dataclasses as parameters instead of importing domain or loop modules.
+      dataclasses as parameters instead of importing domain, collection, eval,
+      storage, or entry-point modules.
     tags:
       - python
       - jace

@@ -46,7 +46,7 @@ _UNKNOWN_WIN_RATE = 0.5
 _SKILL_POWER = 2.0
 # The lowest skill weight a player can get, so that every player's picks stay in training.
 _SKILL_FLOOR = 0.1
-# Each pick is weighted by the share of matches its event won, and `jace.loops.pretrain_decks` weights each human
+# Each pick is weighted by the share of matches its event won, and `jace.pretrain.decks` weights each human
 # deck by the share of games its event won. Neither weight goes below this floor.
 RESULT_FLOOR = 0.5
 _POSITION_POWER = math.e / 5

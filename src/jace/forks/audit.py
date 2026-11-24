@@ -18,7 +18,7 @@ import numpy as np
 import torch
 from manabot.backends.torch.arrays import on_device
 
-from jace.loops.fork_batch import (
+from jace.forks.batch import (
     BatchedForkCollectorPool,
     BatchedForkConfig,
     BatchedForkResult,
@@ -33,9 +33,9 @@ from jace.loops.fork_batch import (
     _spawn_all_branches,
     _terminal_score,
 )
-from jace.loops.forks import ForkStats
+from jace.forks.collect import ForkStats
 from jace.rl.losses import categorical_value_loss, fork_pairwise_loss, policy_log_probs
-from jace.runs import RunLayout, append_metric
+from jace.storage.gameplay import RunLayout, append_metric
 
 if TYPE_CHECKING:
     import argparse
@@ -46,8 +46,8 @@ if TYPE_CHECKING:
     from manabot.backends.torch.policy import ActorCritic, PolicyInference
     from manabot.env.observation import ObservationSpace
 
+    from jace.collect.agent import DecisionMemoryKind
     from jace.eval.deals import Deal
-    from jace.loops.agent_factory import DecisionMemoryKind
     from jace.rl.loop import PrepareAuxFn
 
 __all__ = (

@@ -30,7 +30,7 @@ from manabot.training.rollout.collection import (
 )
 from manabot.training.state.game_errors import GameAttempt, GameErrorPolicy, GameErrorState, settle
 
-from jace.eval import (
+from jace.collect.decks import (
     HumanDeckCatalog,
     build_curriculum_deck_source,
     build_human_deck_source,

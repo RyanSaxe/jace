@@ -23,9 +23,9 @@ from jace.eval import (
     play_deals_parallel,
     summarize_paired_deals,
 )
-from jace.loops.harness import decide_promotion
-from jace.loops.train_ten_decks import LabConfig, build_agent, run_ten_deck_lab
-from jace.runs import create_run, save_policy_checkpoint
+from jace.storage.gameplay import create_run, save_policy_checkpoint
+from jace.train.harness import decide_promotion
+from jace.train.ten_decks import LabConfig, build_agent, run_ten_deck_lab
 
 if TYPE_CHECKING:
     from pathlib import Path

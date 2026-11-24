@@ -34,7 +34,14 @@ from manabot.training.rollout.collection import (
 )
 from manabot.training.state.game_errors import GameAttempt, GameErrorPolicy, GameErrorState, settle
 
-from jace.eval import (
+from jace.collect.agent import (
+    DecisionMemoryKind,
+    build_agent,
+    merge_rollout_batches,
+    pack_batch_for_ipc,
+    unpack_batch_from_ipc,
+)
+from jace.collect.decks import (
     HumanDeckCatalog,
     build_curriculum_deck_source,
     build_human_deck_source,
@@ -42,13 +49,6 @@ from jace.eval import (
     load_human_deck_catalog,
     needs_curriculum_refresh,
     top_card_pool,
-)
-from jace.loops.agent_factory import (
-    DecisionMemoryKind,
-    build_agent,
-    merge_rollout_batches,
-    pack_batch_for_ipc,
-    unpack_batch_from_ipc,
 )
 
 if TYPE_CHECKING:

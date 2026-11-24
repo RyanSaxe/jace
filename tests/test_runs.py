@@ -17,7 +17,7 @@ from manabot.env.observation import ObservationSpace
 from manabot.infra.config import ModelConfig, ObservationConfig
 from managym.policy import PolicyRegistry, PolicySpec
 
-from jace.runs import (
+from jace.storage.gameplay import (
     RunExistsError,
     academy_commands,
     append_metric,

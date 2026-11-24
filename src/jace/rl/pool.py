@@ -1,9 +1,9 @@
-"""Learning-rate/magnet schedules and historical snapshot opponent pool for self-play RL.
+"""Historical snapshot opponent pool and training configuration records for self-play RL.
 
-Pure PyTorch and NumPy utilities with zero `manabot` or `managym` imports so schedule math
-and opponent checkpoint management can be unit-tested in milliseconds. `DampedSchedule`
-matches the power-law learning-rate and magnet-KL decay curves of damped policy iteration;
-`SnapshotPool` maintains a bounded ring buffer of detached CPU parameter snapshots.
+Pure PyTorch and NumPy utilities with zero `manabot` or `managym` imports so opponent
+checkpoint management and update configuration can be unit-tested in milliseconds.
+`SnapshotPool` maintains a bounded FIFO ring buffer of detached CPU parameter snapshots
+with optional AlphaStar-style even-odds matching.
 """
 
 from collections import deque
@@ -15,99 +15,21 @@ from typing import Literal
 import numpy as np
 import torch
 from torch import Tensor, nn
-from torch.optim import Optimizer
 
 __all__ = (
-    "DampedSchedule",
-    "DecaySchedule",
     "SnapshotEntry",
     "SnapshotPool",
     "StepRecord",
     "TrainConfig",
     "UpdateConfig",
     "UpdateStats",
-    "current_optimizer_lr",
     "load_snapshot",
     "resolve_snapshot_pool",
-    "set_optimizer_lr",
     "should_use_snapshot",
     "update_snapshot_pool",
 )
 
-_MIN_REFERENCE_STEPS = 2
 _EVEN_ODDS_FLOOR = 0.05
-
-
-@dataclass(frozen=True, slots=True)
-class DampedSchedule:
-    """Horizon-mapped power-law schedule for learning rate and magnet KL weight `tau`.
-
-    Maps 1-based update indices linearly onto `[1, reference_steps]` so short and long
-    runs traverse the same decay curve (`lr = clamp(lr_scale / pos**lr_power, lr_min,
-    lr_max)` and `tau = tau_scale / pos**tau_power`). For `total_updates == 1`, `position`
-    returns `1.0`. Raises `ValueError` if bounds or update indices are invalid.
-    """
-
-    total_updates: int
-    reference_steps: int = 10_000
-    lr_scale: float = 0.5
-    lr_power: float = 1.1
-    lr_min: float = 5e-6
-    lr_max: float = 1e-4
-    tau_scale: float = 0.05
-    tau_power: float = 0.3
-
-    def __post_init__(self) -> None:
-        if self.total_updates < 1 or self.reference_steps < _MIN_REFERENCE_STEPS:
-            msg = "total_updates must be >= 1 and reference_steps must be >= 2"
-            raise ValueError(msg)
-        if self.lr_min <= 0.0 or self.lr_min > self.lr_max:
-            msg = "learning rate bounds must satisfy 0 < lr_min <= lr_max"
-            raise ValueError(msg)
-
-    def position(self, update: int) -> float:
-        if update < 1:
-            msg = f"update must be >= 1, got {update}"
-            raise ValueError(msg)
-        if self.total_updates == 1:
-            return 1.0
-        progress = min(1.0, (update - 1) / (self.total_updates - 1))
-        return 1.0 + progress * (self.reference_steps - 1)
-
-    def rates(self, update: int) -> tuple[float, float]:
-        pos = self.position(update)
-        raw_lr = self.lr_scale / (pos**self.lr_power)
-        lr = min(self.lr_max, max(self.lr_min, raw_lr))
-        tau = self.tau_scale / (pos**self.tau_power)
-        return lr, tau
-
-
-@dataclass(frozen=True, slots=True)
-class DecaySchedule:
-    """Inverse-linear horizon decay schedule for PPO with dual reverse-KL anchors.
-
-    Computes `initial / (1 + decay * progress)` across 1-based updates `1..total_updates`
-    where `progress` runs linearly from `0.0` to `1.0` (returning initial rates when
-    `total_updates == 1`). Raises `ValueError` for invalid horizon or negative rates.
-    """
-
-    total_updates: int
-    lr_initial: float = 2.5e-4
-    tau_initial: float = 0.01
-    decay: float = 9.0
-
-    def __post_init__(self) -> None:
-        if self.total_updates < 1 or self.lr_initial <= 0.0 or self.tau_initial < 0.0 or self.decay < 0.0:
-            msg = "total_updates must be >= 1, lr_initial > 0, and tau_initial/decay non-negative"
-            raise ValueError(msg)
-
-    def rates(self, update: int) -> tuple[float, float]:
-        if update < 1:
-            msg = f"update must be >= 1, got {update}"
-            raise ValueError(msg)
-        progress = 0.0 if self.total_updates == 1 else min(1.0, (update - 1) / (self.total_updates - 1))
-        factor = 1.0 + self.decay * progress
-        return self.lr_initial / factor, self.tau_initial / factor
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,15 +216,6 @@ class StepRecord:
     opponent: str = "self"
     grad_cosine: float | None = None
     snapshot_win_rate: float | None = None
-
-
-def set_optimizer_lr(optimizer: Optimizer, lr: float) -> None:
-    for group in optimizer.param_groups:
-        group["lr"] = lr
-
-
-def current_optimizer_lr(optimizer: Optimizer) -> float:
-    return float(optimizer.param_groups[0]["lr"]) if optimizer.param_groups else 0.0
 
 
 def should_use_snapshot(update_idx: int, *, fraction: float, pool_size: int) -> bool:

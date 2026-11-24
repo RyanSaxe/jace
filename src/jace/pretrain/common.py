@@ -1,9 +1,9 @@
 """Shared CLI flags, card-pool loading, and run initialization for pretraining loops.
 
-Pretraining entry points (`pretrain` and `pretrain_decks`) share run-folder
-creation, device selection, set card-pool loading, and saved card-table
-loading. Keeping these helpers here keeps each pretraining script focused on
-its own model and loss.
+Pretraining entry points (`draft` and `decks`) share run-folder creation, set
+card-pool loading, and saved card-table loading. Keeping these helpers here keeps
+each pretraining script focused on its own model and loss, while device selection
+lives in `jace.modules`.
 """
 
 import argparse
@@ -16,7 +16,7 @@ import torch
 from jace.cards import FIRST_PROGRAM_TOKEN, CardEncoder, CardPool, CardTable, frozen_table
 from jace.data import SetCards, SetData, card_table, program_tokens
 from jace.data.catalog import engine_cards, program_vocabulary
-from jace.tracking import (
+from jace.storage.pretrain import (
     CheckpointRef,
     Clock,
     Identity,
@@ -32,8 +32,6 @@ __all__ = (
     "RunArguments",
     "add_card_flags",
     "add_run_flags",
-    "default_device_name",
-    "device_named",
     "load_card_table",
     "set_cards",
     "start_run",
@@ -76,20 +74,6 @@ def add_run_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--jace-commit", default="unknown")
     parser.add_argument("--manabot-commit", default="unknown")
-
-
-def default_device_name() -> str:
-    if torch.cuda.is_available():
-        return "cuda"
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
-
-
-def device_named(name: str) -> torch.device:
-    if name != "auto":
-        return torch.device(name)
-    return torch.device(default_device_name())
 
 
 def start_run(

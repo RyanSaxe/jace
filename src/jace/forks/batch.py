@@ -21,10 +21,10 @@ import torch
 from manabot.backends.torch.bot import evaluate_observation
 from managym.enums import ActionSpaceEnum
 
-from jace.eval.deals import Deal, build_deals, elemental_decks
-from jace.eval.human_decks import build_human_deals, load_human_deck_catalog
-from jace.loops.agent_factory import DecisionMemoryKind, build_agent
-from jace.loops.forks import ForkExample
+from jace.collect.agent import DecisionMemoryKind, build_agent
+from jace.collect.decks import elemental_decks, load_human_deck_catalog
+from jace.eval.deals import Deal, build_deals, build_human_deals
+from jace.forks.collect import ForkExample
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

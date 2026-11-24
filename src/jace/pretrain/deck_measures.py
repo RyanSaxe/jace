@@ -1,6 +1,6 @@
 """How well the deck score and the deck builder fit human decks, as plain functions.
 
-`pretrain_decks` measures its two models with these functions while they
+`jace.pretrain.decks` measures its two models with these functions while they
 train. `score_fit` measures the deck score by the log loss of the games
 each deck won and lost, and by the correlation between each deck's
 predicted and actual win rates.
@@ -21,7 +21,7 @@ from torch import Tensor
 
 from jace.data import HumanDecks
 from jace.decks import BuildRules, Builds, DeckBuilder, Scorer, build_log_probs
-from jace.loops.supervised import score_loss
+from jace.pretrain.supervised import score_loss
 
 __all__ = (
     "GAMES_FOR_A_RATE",

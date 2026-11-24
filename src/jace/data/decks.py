@@ -7,7 +7,7 @@ lowest `build_index`, so each draft gives one example. The wins and losses
 include every game of the event, whichever build the player used in it.
 
 The deck score and the deck builder train on these decks in
-`jace.loops.pretrain_decks`. Nothing in this module trains a model.
+`jace.pretrain.decks`. Nothing in this module trains a model.
 """
 
 from dataclasses import dataclass

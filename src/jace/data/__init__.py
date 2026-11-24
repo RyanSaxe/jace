@@ -9,7 +9,7 @@ a small table made by hand.
 `program_tokens` turns each card's engine program into token ids for
 `CardEncoder`. This package does not import the drafter or the game engine
 directly; `jace.data.catalog` reads the engine's card catalog and vocabulary,
-and a loop in `jace.loops` passes the resulting tensors to a model.
+and an entry point in `jace.pretrain` passes the resulting tensors to a model.
 """
 
 from jace.data.cards import SetCards, card_table
