@@ -8,6 +8,7 @@ atomic checkpoint-resume round-trips on tiny models.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -29,11 +30,13 @@ from jace.collect.decks import (
     top_card_pool,
 )
 from jace.collect.pool import MultiProcessCollector, WorkerPoolConfig
-from jace.eval.deals import build_human_deals
+from jace.eval.deals import build_deals, build_human_deals, elemental_decks
 from jace.modules import default_device_name, device_named
 from jace.rl.diagnostics import GradientAgreementTracker, snapshot_win_rate
+from jace.rl.ema import EmaWeights
 from jace.rl.pool import SnapshotPool
 from jace.storage.gameplay import create_run, load_resume_state, save_policy_checkpoint, save_resume_state
+from jace.train.full_data import FullDataConfig, _evaluate_full_data
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -224,3 +227,57 @@ def test_default_device_prefers_cuda_then_mps_then_cpu(monkeypatch: pytest.Monke
     assert default_device_name() == "cpu"
     assert device_named("auto") == torch.device("cpu")
     assert device_named("cpu") == torch.device("cpu")
+
+
+def test_evaluate_full_data_logs_live_scores_only_when_ema_active(tmp_path: Path) -> None:
+    agent, obs_space = build_agent(hidden_dim=16, attention_layers=1)
+    optimizer = torch.optim.Adam(agent.parameters(), lr=1e-3)
+    deals = build_deals(elemental_decks(), count=1, seed=7)
+    cfg = FullDataConfig(
+        runs_dir=tmp_path,
+        experiment="exp",
+        run_id="dual-eval",
+        decks_path=tmp_path / "unused.pt",
+        eval_workers=1,
+        seed=7,
+    )
+    layout = create_run(runs_dir=tmp_path, experiment="exp", run_id="dual-eval", config={"ok": True})
+
+    plain_payload = _evaluate_full_data(
+        agent,
+        agent,
+        obs_space=obs_space,
+        layout=layout,
+        iteration=0,
+        held_out_deals=deals,
+        forensics_deals=deals,
+        probes=(),
+        cfg=cfg,
+        optimizer=optimizer,
+        snapshot_pool=None,
+        ema_weights=None,
+        record_games=False,
+    )
+    assert "live_held_out_det" not in plain_payload
+
+    ema_payload = _evaluate_full_data(
+        agent,
+        agent,
+        obs_space=obs_space,
+        layout=layout,
+        iteration=1,
+        held_out_deals=deals,
+        forensics_deals=deals,
+        probes=(),
+        cfg=cfg,
+        optimizer=optimizer,
+        snapshot_pool=None,
+        ema_weights=EmaWeights(agent, decay=0.99),
+        record_games=False,
+    )
+    assert "live_held_out_det" in ema_payload
+
+    rows = [json.loads(line) for line in layout.metrics_path.read_text().splitlines()]
+    assert "live_held_out_det_win_rate" not in rows[0]
+    assert "live_held_out_det_win_rate" in rows[1]
+    assert 0.0 <= rows[1]["live_held_out_det_win_rate"] <= 1.0
