@@ -68,6 +68,11 @@ class RunLayout:
             forensics_dir=resolved / "forensics",
         )
 
+    def ensure_dirs(self) -> RunLayout:
+        for directory in (self.checkpoints_dir, self.games_dir, self.forensics_dir):
+            directory.mkdir(parents=True, exist_ok=True)
+        return self
+
     def checkpoint_path(self, iteration: int) -> Path:
         return self.checkpoints_dir / f"iter-{iteration:04d}.safetensors"
 
@@ -167,6 +172,7 @@ def append_train_metric(layout: RunLayout, record: StepRecord) -> None:
 
 def save_forensics(layout: RunLayout, *, iteration: int, report: Mapping[str, object]) -> Path:
     path = layout.forensics_path(iteration)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(dict(report), indent=2, sort_keys=True) + "\n")
     return path
 

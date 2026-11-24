@@ -55,13 +55,14 @@ from an existing `.safetensors` checkpoint.
 ## Running on Google Colab GPUs
 
 `scripts/colab_run.py` is a standalone PEP 723 launcher that provisions a Colab
-GPU VM via `uvx --from google-colab-cli colab`, uploads `decks.pt`, bootstraps
-Rust and `uv` on the runtime, and executes `jace.train.full_data` over one
-foreground SSH session. Keeping SSH attached prevents Colab's idle-client reaper
-from disconnecting long runs. A background thread downloads `metrics.jsonl`,
-`config.json`, and `checkpoints/resume-state.pt` over the Jupyter HTTP API while
-training runs, and cleanup runs one final sync before stopping the VM unless
-`--keep-vm` is set.
+GPU VM via `uvx --from google-colab-cli colab`, uploads `decks.pt` and optional
+resume files (automatically chunking and SHA-256 verifying files larger than 48
+MiB), bootstraps Rust and `uv` over short-lived SSH, and launches
+`jace.train.full_data` detached under `nohup`. A tunnel-free `colab exec` poll
+loop (default every 5 minutes) keeps the Colab kernel active so the 3-hour
+idle-runtime reaper never fires, syncs `metrics.jsonl`, `config.json`, and
+`checkpoints/resume-state.pt` every `--sync-interval-s` seconds, and runs a
+final sync before stopping the VM unless `--keep-vm` is set.
 
 Inspect the local commands and remote bootstrap script before allocating a GPU
 with `--dry-run`:

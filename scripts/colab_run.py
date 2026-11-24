@@ -3,25 +3,28 @@
 # requires-python = ">=3.13"
 # dependencies = []
 # ///
-"""Google Colab GPU training launcher with persistent SSH and checkpoint sync.
+"""Google Colab GPU training launcher with chunked resume, kernel keepalive, and sync.
 
-Provisions a Colab runtime through `uvx --from google-colab-cli colab`, uploads
-cached 17Lands decks and optional resume artifacts, and runs
-`jace.train.full_data` over a single foreground SSH session so Colab's
-idle-client reaper does not terminate long runs. A background thread syncs
-`metrics.jsonl`, `config.json`, and `checkpoints/resume-state.pt` over the
-Jupyter HTTP API while training runs, and cleanup always performs a final sync
-before stopping the VM unless `--keep-vm` is set.
+Provisions a Colab runtime through `uvx --from google-colab-cli colab`, uploads cached
+17Lands decks and optional resume artifacts (automatically chunking and SHA-256 verifying
+files above 48 MiB so large `resume-state.pt` snapshots stay under Jupyter's HTTP limit),
+bootstraps the repository over short-lived SSH, and launches `jace.train.full_data`
+detached under `nohup`. A tunnel-free `colab exec` poll loop keeps the Colab kernel
+active so the 3-hour idle-runtime reaper never fires, syncs `metrics.jsonl`,
+`config.json`, and `checkpoints/resume-state.pt` on each sync cadence, and stops the VM
+in cleanup unless `--keep-vm` is set.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import shlex
 import subprocess
 import sys
-import threading
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -31,10 +34,13 @@ if TYPE_CHECKING:
 
 __all__ = (
     "DEFAULT_EXPERIMENT",
+    "DEFAULT_POLL_INTERVAL_S",
     "DEFAULT_REPO_URL",
     "DEFAULT_SYNC_INTERVAL_S",
+    "DEFAULT_UPLOAD_CHUNK_BYTES",
     "GPU_CHOICES",
     "ColabRunConfig",
+    "CommandResult",
     "CommandRunner",
     "GpuKind",
     "build_remote_script",
@@ -48,20 +54,44 @@ GpuKind = Literal["T4", "L4", "A100", "H100"]
 GPU_CHOICES: tuple[GpuKind, ...] = ("T4", "L4", "A100", "H100")
 DEFAULT_REPO_URL = "https://github.com/RyanSaxe/jace.git"
 DEFAULT_EXPERIMENT = "v2-colab"
+DEFAULT_POLL_INTERVAL_S = 300
 DEFAULT_SYNC_INTERVAL_S = 900
+DEFAULT_UPLOAD_CHUNK_BYTES = 48 * 1024 * 1024
 
 _COLAB_CMD: tuple[str, ...] = ("uvx", "--from", "google-colab-cli", "colab")
 _REMOTE_DECKS_PATH = "/content/decks.pt"
 _REMOTE_REPO_DIR = "/content/jace"
 _REMOTE_RUNS_DIR = "/content/runs"
+_REMOTE_PID_FILE = "/content/train.pid"
+_REMOTE_EXIT_FILE = "/content/train.exit"
+_REMOTE_LOG_FILE = "/content/train.log"
 _RESUME_FILENAME = "resume-state.pt"
 _CHECKPOINT_SUFFIXES: tuple[str, ...] = (".safetensors", ".policy.json")
 _GPU_MAP: dict[str, GpuKind] = {"T4": "T4", "L4": "L4", "A100": "A100", "H100": "H100"}
 _LOGGER = logging.getLogger(__name__)
 
+_EXEC_TIMEOUT_S = 90.0
+_REMOTE_EXEC_TIMEOUT_S = 45
+_TRANSFER_TIMEOUT_S = 180.0
+_SETUP_TIMEOUT_S = 900.0
+_STOP_TIMEOUT_S = 60.0
+
+
+@dataclass(frozen=True, slots=True)
+class CommandResult:
+    returncode: int
+    stdout: str = ""
+
 
 class CommandRunner(Protocol):
-    def __call__(self, args: Sequence[str], *, check: bool = True) -> int: ...
+    def __call__(
+        self,
+        args: Sequence[str],
+        *,
+        check: bool = True,
+        input_text: str | None = None,
+        timeout: float | None = None,
+    ) -> CommandResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +106,9 @@ class ColabRunConfig:
     branch: str = "main"
     resume_from: Path | None = None
     experiment: str = DEFAULT_EXPERIMENT
+    poll_interval_s: int = DEFAULT_POLL_INTERVAL_S
     sync_interval_s: int = DEFAULT_SYNC_INTERVAL_S
+    upload_chunk_bytes: int = DEFAULT_UPLOAD_CHUNK_BYTES
     keep_vm: bool = False
     dry_run: bool = False
     extra_args: tuple[str, ...] = ()
@@ -86,17 +118,34 @@ def _remote_run_dir(cfg: ColabRunConfig) -> str:
     return f"{_REMOTE_RUNS_DIR}/{cfg.experiment}/{cfg.run_id}"
 
 
-def _run_subprocess(args: Sequence[str], *, check: bool = True) -> int:
-    completed = subprocess.run(tuple(args), check=check)
-    return completed.returncode
+def _run_subprocess(
+    args: Sequence[str],
+    *,
+    check: bool = True,
+    input_text: str | None = None,
+    timeout: float | None = None,
+) -> CommandResult:
+    capture = input_text is not None
+    completed = subprocess.run(
+        tuple(args),
+        check=check,
+        input=input_text,
+        text=capture,
+        capture_output=capture,
+        timeout=timeout,
+    )
+    return CommandResult(returncode=completed.returncode, stdout=completed.stdout or "")
 
 
 def _validate_inputs(cfg: ColabRunConfig) -> None:
     if not cfg.decks_path.is_file():
         msg = f"decks file not found: {cfg.decks_path}"
         raise FileNotFoundError(msg)
-    if cfg.sync_interval_s < 0:
-        msg = f"sync_interval_s must be >= 0, got {cfg.sync_interval_s}"
+    if cfg.poll_interval_s < 0 or cfg.sync_interval_s < 0:
+        msg = f"intervals must be >= 0, got poll={cfg.poll_interval_s}, sync={cfg.sync_interval_s}"
+        raise ValueError(msg)
+    if cfg.upload_chunk_bytes <= 0:
+        msg = f"upload_chunk_bytes must be > 0, got {cfg.upload_chunk_bytes}"
         raise ValueError(msg)
     if cfg.resume_from is not None:
         resume_state = cfg.resume_from / "checkpoints" / _RESUME_FILENAME
@@ -157,6 +206,7 @@ def build_remote_script(cfg: ColabRunConfig) -> str:
         f"  git clone --branch {shlex.quote(cfg.branch)} --single-branch "
         f"{shlex.quote(cfg.repo_url)} {shlex.quote(_REMOTE_REPO_DIR)}"
     )
+    inner_cmd = f"{shlex.join(train_args)}; rc=$?; echo $rc > {_REMOTE_EXIT_FILE}; exit $rc"
     lines = [
         "set -euo pipefail",
         'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"',
@@ -169,65 +219,152 @@ def build_remote_script(cfg: ColabRunConfig) -> str:
         f"if [ ! -d {shlex.quote(_REMOTE_REPO_DIR)}/.git ]; then\n{clone_cmd}\nfi",
         f"cd {shlex.quote(_REMOTE_REPO_DIR)}",
         "uv sync --frozen",
-        f"exec {shlex.join(train_args)}",
+        f"rm -f {_REMOTE_EXIT_FILE}",
+        f"nohup bash -lc {shlex.quote(inner_cmd)} >{_REMOTE_LOG_FILE} 2>&1 </dev/null &",
+        f"PID=$!; echo $PID > {_REMOTE_PID_FILE}; sleep 2; kill -0 $PID; echo LAUNCHED pid=$PID",
     ]
     return "\n".join(lines) + "\n"
 
 
-def _sync_once(
+def _remote_poll_code(remote_run_dir: str) -> str:
+    metrics_path = f"{remote_run_dir}/metrics.jsonl"
+    return (
+        "import os, pathlib, subprocess\n"
+        f"pid_file, exit_file = pathlib.Path({_REMOTE_PID_FILE!r}), pathlib.Path({_REMOTE_EXIT_FILE!r})\n"
+        "pid = int(pid_file.read_text().strip()) if pid_file.exists() else -1\n"
+        "alive = False\n"
+        "if pid > 0:\n"
+        "    try:\n"
+        "        os.kill(pid, 0)\n"
+        '        stat = subprocess.check_output(["ps", "-p", str(pid), "-o", "stat="]).decode().strip()\n'
+        '        alive = bool(stat) and "Z" not in stat\n'
+        "    except Exception:\n"
+        "        alive = False\n"
+        "exit_code = exit_file.read_text().strip() if exit_file.exists() else ''\n"
+        'gpu = subprocess.check_output(["nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu",'
+        ' "--format=csv,noheader"]).decode().strip()\n'
+        f"mp = pathlib.Path({metrics_path!r})\n"
+        'last = mp.read_text().splitlines()[-1][:140] if mp.exists() and mp.stat().st_size else ""\n'
+        'print(f"ALIVE={alive} EXIT={exit_code} PID={pid} GPU=[{gpu}] LAST={last}")\n'
+        f"lp = pathlib.Path({_REMOTE_LOG_FILE!r})\n"
+        'if not alive and lp.exists(): print("LOG_TAIL:\\n" + lp.read_text(errors="ignore")[-1500:])\n'
+    )
+
+
+def _upload_file(
     cfg: ColabRunConfig,
     *,
-    remote_run_dir: str,
+    local_path: Path,
+    remote_path: str,
     runner: CommandRunner,
-    sync_lock: threading.Lock,
 ) -> None:
-    with sync_lock:
-        (cfg.backup_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
-        for remote_path, local_path in _sync_targets(cfg.backup_dir, remote_run_dir=remote_run_dir):
-            cmd = (*_COLAB_CMD, "download", "-s", cfg.session, remote_path, str(local_path))
-            try:
-                code = runner(cmd, check=False)
-            except (subprocess.CalledProcessError, OSError) as exc:
-                _LOGGER.warning("sync failed for %s: %s", remote_path, exc)
-                continue
-            if code != 0:
-                _LOGGER.debug("sync skipped %s (exit %d)", remote_path, code)
+    if local_path.stat().st_size <= cfg.upload_chunk_bytes:
+        runner(
+            (*_COLAB_CMD, "upload", "-s", cfg.session, str(local_path), remote_path),
+            check=True,
+            timeout=_TRANSFER_TIMEOUT_S,
+        )
+        return
+
+    payload = local_path.read_bytes()
+    expected_sha = hashlib.sha256(payload).hexdigest()
+    remote_parts_dir = f"{remote_path}.parts"
+    runner((*_COLAB_CMD, "ssh", "-s", cfg.session, "--", "mkdir", "-p", remote_parts_dir), check=True, timeout=60.0)
+    with tempfile.TemporaryDirectory(prefix="jace-colab-chunk-") as tmp_dir:
+        tmp_root = Path(tmp_dir)
+        chunk_size = cfg.upload_chunk_bytes
+        for idx, offset in enumerate(range(0, len(payload), chunk_size)):
+            part_path = tmp_root / f"part-{idx:04d}"
+            part_path.write_bytes(payload[offset : offset + chunk_size])
+            runner(
+                (*_COLAB_CMD, "upload", "-s", cfg.session, str(part_path), f"{remote_parts_dir}/{part_path.name}"),
+                check=True,
+                timeout=_TRANSFER_TIMEOUT_S,
+            )
+            part_path.unlink()
+
+    reassemble = (
+        f"set -euo pipefail; cat {shlex.quote(remote_parts_dir)}/part-* > {shlex.quote(remote_path)}; "
+        f"rm -rf {shlex.quote(remote_parts_dir)}; "
+        f"actual=$(sha256sum {shlex.quote(remote_path)} | awk '{{print $1}}'); "
+        f'test "$actual" = {shlex.quote(expected_sha)}'
+    )
+    runner(
+        (*_COLAB_CMD, "ssh", "-s", cfg.session, "--", "bash", "-lc", reassemble),
+        check=True,
+        timeout=_TRANSFER_TIMEOUT_S,
+    )
 
 
-def _start_sync_thread(
-    cfg: ColabRunConfig,
-    *,
-    remote_run_dir: str,
-    runner: CommandRunner,
-    stop_event: threading.Event,
-    sync_lock: threading.Lock,
-) -> threading.Thread | None:
-    if cfg.sync_interval_s <= 0:
-        return None
-
-    def _loop() -> None:
-        while not stop_event.wait(timeout=cfg.sync_interval_s):
-            _sync_once(cfg, remote_run_dir=remote_run_dir, runner=runner, sync_lock=sync_lock)
-
-    thread = threading.Thread(target=_loop, name=f"colab-sync-{cfg.session}", daemon=True)
-    thread.start()
-    return thread
+def _sync_once(cfg: ColabRunConfig, *, remote_run_dir: str, runner: CommandRunner) -> None:
+    (cfg.backup_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+    for remote_path, local_path in _sync_targets(cfg.backup_dir, remote_run_dir=remote_run_dir):
+        cmd = (*_COLAB_CMD, "download", "-s", cfg.session, remote_path, str(local_path))
+        try:
+            result = runner(cmd, check=False, timeout=_TRANSFER_TIMEOUT_S)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            _LOGGER.warning("sync failed for %s: %s", remote_path, exc)
+            continue
+        if result.returncode != 0:
+            _LOGGER.debug("sync skipped %s (exit %d)", remote_path, result.returncode)
 
 
 def _upload_resume_files(cfg: ColabRunConfig, *, remote_run_dir: str, runner: CommandRunner) -> None:
     if cfg.resume_from is None:
         return
     # Jupyter's Contents API requires parent folders to exist before PUT uploads.
-    runner(_prepare_resume_dirs_command(cfg.session, remote_run_dir=remote_run_dir), check=True)
+    runner(_prepare_resume_dirs_command(cfg.session, remote_run_dir=remote_run_dir), check=True, timeout=60.0)
     for local_path, remote_path in _resume_uploads(cfg.resume_from, remote_run_dir=remote_run_dir):
-        runner((*_COLAB_CMD, "upload", "-s", cfg.session, str(local_path), remote_path), check=True)
+        _upload_file(cfg, local_path=local_path, remote_path=remote_path, runner=runner)
+
+
+def _parse_remote_exit_code(stdout: str) -> int:
+    for token in stdout.split():
+        if token.startswith("EXIT="):
+            raw = token.removeprefix("EXIT=")
+            return int(raw) if raw.isdigit() else 1
+    return 1
+
+
+def _poll_once(
+    exec_cmd: tuple[str, ...],
+    *,
+    poll_code: str,
+    ticks: int,
+    runner: CommandRunner,
+) -> str:
+    try:
+        stdout = runner(exec_cmd, check=False, input_text=poll_code, timeout=_EXEC_TIMEOUT_S).stdout
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        _LOGGER.warning("poll keepalive failed on tick %d: %s", ticks, exc)
+        return ""
+    if stdout:
+        sys.stdout.write(stdout if stdout.endswith("\n") else f"{stdout}\n")
+        sys.stdout.flush()
+    return stdout
+
+
+def _watch_remote_training(cfg: ColabRunConfig, *, remote_run_dir: str, runner: CommandRunner) -> int:
+    poll_code = _remote_poll_code(remote_run_dir)
+    exec_cmd = (*_COLAB_CMD, "exec", "-s", cfg.session, "--timeout", str(_REMOTE_EXEC_TIMEOUT_S))
+    sync_every = max(1, cfg.sync_interval_s // max(1, cfg.poll_interval_s)) if cfg.sync_interval_s > 0 else 0
+    ticks = 0
+    while True:
+        if cfg.poll_interval_s > 0:
+            time.sleep(cfg.poll_interval_s)
+        ticks += 1
+        stdout = _poll_once(exec_cmd, poll_code=poll_code, ticks=ticks, runner=runner)
+        if sync_every > 0 and ticks % sync_every == 0:
+            _sync_once(cfg, remote_run_dir=remote_run_dir, runner=runner)
+        if "ALIVE=False" in stdout:
+            return _parse_remote_exit_code(stdout)
 
 
 def _stop_session(session: str, *, runner: CommandRunner) -> None:
-    stop_code = runner((*_COLAB_CMD, "stop", "-s", session), check=False)
-    if stop_code != 0:
-        _LOGGER.warning("colab stop -s %s exited with %d", session, stop_code)
-    runner((*_COLAB_CMD, "usage"), check=False)
+    stop_result = runner((*_COLAB_CMD, "stop", "-s", session), check=False, timeout=_STOP_TIMEOUT_S)
+    if stop_result.returncode != 0:
+        _LOGGER.warning("colab stop -s %s exited with %d", session, stop_result.returncode)
+    runner((*_COLAB_CMD, "usage"), check=False, timeout=_STOP_TIMEOUT_S)
 
 
 def _planned_commands(cfg: ColabRunConfig, *, remote_run_dir: str, remote_script: str) -> list[tuple[str, ...]]:
@@ -242,6 +379,7 @@ def _planned_commands(cfg: ColabRunConfig, *, remote_run_dir: str, remote_script
             for local_path, remote_path in _resume_uploads(cfg.resume_from, remote_run_dir=remote_run_dir)
         )
     commands.append((*_COLAB_CMD, "ssh", "-s", cfg.session, "--", "bash", "-lc", remote_script))
+    commands.append((*_COLAB_CMD, "exec", "-s", cfg.session, "--timeout", str(_REMOTE_EXEC_TIMEOUT_S)))
     commands.extend(
         (*_COLAB_CMD, "download", "-s", cfg.session, remote_path, str(local_path))
         for remote_path, local_path in _sync_targets(cfg.backup_dir, remote_run_dir=remote_run_dir)
@@ -276,31 +414,18 @@ def run_colab_training(cfg: ColabRunConfig, *, runner: CommandRunner | None = No
     remote_run_dir = _remote_run_dir(cfg)
     remote_script = build_remote_script(cfg)
     (cfg.backup_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
-    active_runner(_provision_command(cfg), check=True)
+    active_runner(_provision_command(cfg), check=True, timeout=_TRANSFER_TIMEOUT_S)
 
-    stop_event = threading.Event()
-    sync_lock = threading.Lock()
-    sync_thread: threading.Thread | None = None
     try:
-        active_runner(
-            (*_COLAB_CMD, "upload", "-s", cfg.session, str(cfg.decks_path), _REMOTE_DECKS_PATH),
-            check=True,
-        )
+        _upload_file(cfg, local_path=cfg.decks_path, remote_path=_REMOTE_DECKS_PATH, runner=active_runner)
         _upload_resume_files(cfg, remote_run_dir=remote_run_dir, runner=active_runner)
-        sync_thread = _start_sync_thread(
-            cfg,
-            remote_run_dir=remote_run_dir,
-            runner=active_runner,
-            stop_event=stop_event,
-            sync_lock=sync_lock,
-        )
         ssh_cmd = (*_COLAB_CMD, "ssh", "-s", cfg.session, "--", "bash", "-lc", remote_script)
-        return active_runner(ssh_cmd, check=True)
+        active_runner(ssh_cmd, check=True, timeout=_SETUP_TIMEOUT_S)
+        try:
+            return _watch_remote_training(cfg, remote_run_dir=remote_run_dir, runner=active_runner)
+        finally:
+            _sync_once(cfg, remote_run_dir=remote_run_dir, runner=active_runner)
     finally:
-        stop_event.set()
-        if sync_thread is not None:
-            sync_thread.join(timeout=30.0)
-        _sync_once(cfg, remote_run_dir=remote_run_dir, runner=active_runner, sync_lock=sync_lock)
         if not cfg.keep_vm:
             _stop_session(cfg.session, runner=active_runner)
 
@@ -314,7 +439,7 @@ def _parse_gpu(raw: str) -> GpuKind:
 
 def _parse_args(argv: Sequence[str] | None) -> ColabRunConfig:
     parser = argparse.ArgumentParser(
-        description="Run jace.train.full_data on a Google Colab GPU with persistent SSH and local sync.",
+        description="Run jace.train.full_data on a Google Colab GPU with chunked resume, keepalive, and local sync.",
         epilog="Additional arguments (optionally after '--') are forwarded to jace.train.full_data.",
     )
     parser.add_argument("--session", required=True, help="Colab session name")
@@ -329,6 +454,12 @@ def _parse_args(argv: Sequence[str] | None) -> ColabRunConfig:
     )
     parser.add_argument("--experiment", default=DEFAULT_EXPERIMENT, help="experiment folder under /content/runs")
     parser.add_argument("--run-id", required=True, help="run identifier under /content/runs/<experiment>")
+    parser.add_argument(
+        "--poll-interval-s",
+        type=int,
+        default=DEFAULT_POLL_INTERVAL_S,
+        help="seconds between colab exec keepalive/liveness polls",
+    )
     parser.add_argument(
         "--sync-interval-s",
         type=int,
@@ -350,6 +481,7 @@ def _parse_args(argv: Sequence[str] | None) -> ColabRunConfig:
         branch=ns.branch,
         resume_from=ns.resume_from,
         experiment=ns.experiment,
+        poll_interval_s=ns.poll_interval_s,
         sync_interval_s=ns.sync_interval_s,
         keep_vm=ns.keep_vm,
         dry_run=ns.dry_run,
