@@ -25,10 +25,12 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["scripts"]
 
 [tool.ruff]
 line-length = 120
 target-version = "py313"
+src = ["src", "scripts"]
 # BYOR vendors and manages these check scripts; they follow BYOR's own config.
 # The repository's own check scripts sit beside them and are linted.
 extend-exclude = [
@@ -88,6 +90,10 @@ ban-relative-imports = "all"
     # This check runs git with fixed arguments, never with outside input.
     "S603",
 ]
+"scripts/colab_run.py" = [
+    # Runs `uvx --from google-colab-cli colab` with argv tuples, never through a local shell.
+    "S603",
+]
 "tests/**/*.py" = [
     # Pytest's assertion introspection is the test framework contract.
     "S101",
@@ -99,6 +105,9 @@ ban-relative-imports = "all"
 quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
+
+[tool.ty.environment]
+extra-paths = ["scripts"]
 
 [tool.ty.src]
 # BYOR vendors and manages these check scripts; they follow BYOR's own config.
