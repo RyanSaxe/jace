@@ -1,11 +1,12 @@
 id: jace.leaf-packages-stay-leaf
 language: Python
 severity: error
-message: Leaf packages (cards, data, modules, storage.pretrain) must not import draft, decks, rl, collect, eval, forks, storage.gameplay, pretrain, or train.
+message: Leaf packages (cards, data, modules, storage.__init__, storage.pretrain) must not import draft, decks, rl, collect, eval, forks, storage.gameplay, pretrain, or train.
 files:
   - src/jace/cards/**
   - src/jace/data/**
   - src/jace/modules.py
+  - src/jace/storage/__init__.py
   - src/jace/storage/pretrain.py
 rule:
   any:

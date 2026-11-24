@@ -3,7 +3,7 @@
 Covers paired variance reduction on mirrored `1-1` draw-luck splits, adaptive sequential
 stopping and extension across the 200 -> 400 -> 1,000 mirrored game stages, promotion
 and land-drop regression gating, multi-process CPU deal evaluation, and warm-start
-checkpoint loading in `train_ten_decks`. All tests run strictly on CPU in seconds.
+checkpoint loading in `jace.train.ten_decks`. All tests run strictly on CPU in seconds.
 """
 
 from __future__ import annotations

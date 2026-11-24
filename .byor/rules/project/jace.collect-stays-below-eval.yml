@@ -1,0 +1,35 @@
+id: jace.collect-stays-below-eval
+language: Python
+severity: error
+message: jace.collect must not import jace.eval, jace.forks, jace.pretrain, or jace.train.
+files:
+  - src/jace/collect/**
+rule:
+  any:
+    - kind: import_from_statement
+      has:
+        field: module_name
+        regex: ^jace\.(eval|forks|pretrain|train)(\.|$)
+    - kind: import_statement
+      has:
+        any:
+          - kind: dotted_name
+            regex: ^jace\.(eval|forks|pretrain|train)(\.|$)
+          - kind: aliased_import
+            has:
+              kind: dotted_name
+              regex: ^jace\.(eval|forks|pretrain|train)(\.|$)
+metadata:
+  byor:
+    rationale: >
+      jace.eval and jace.forks build on jace.collect for agents and deck
+      loading. Keeping jace.collect strictly below eval, forks, pretrain, and
+      train enforces an acyclic gameplay layer without circular imports.
+    agent_prompt: >
+      Do not import jace.eval, jace.forks, jace.pretrain, or jace.train from
+      jace.collect. Pass evaluation hooks, deals, or fork helpers in as
+      arguments from the calling layer instead.
+    tags:
+      - python
+      - jace
+      - boundaries

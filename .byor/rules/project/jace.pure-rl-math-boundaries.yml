@@ -1,31 +1,27 @@
 id: jace.pure-rl-math-boundaries
 language: Python
 severity: error
-message: Pure RL modules (credit, losses, select, schedules, ema, pool, prefetch, diagnostics) must not import Limited domain packages, collect, eval, forks, storage, pretrain, or train.
+message: Pure RL modules (src/jace/rl/* except __init__.py and loop.py) must not import jace.rl.loop, Limited domain packages, collect, eval, forks, storage, pretrain, or train.
 files:
-  - src/jace/rl/credit.py
-  - src/jace/rl/diagnostics.py
-  - src/jace/rl/ema.py
-  - src/jace/rl/losses.py
-  - src/jace/rl/pool.py
-  - src/jace/rl/prefetch.py
-  - src/jace/rl/schedules.py
-  - src/jace/rl/select.py
+  - src/jace/rl/**/*.py
+ignores:
+  - src/jace/rl/__init__.py
+  - src/jace/rl/loop.py
 rule:
   any:
     - kind: import_from_statement
       has:
         field: module_name
-        regex: ^jace\.(cards|data|draft|decks|collect|eval|forks|storage|pretrain|train)(\.|$)
+        regex: ^jace\.(cards|data|draft|decks|collect|eval|forks|storage|pretrain|train|rl\.loop)(\.|$)
     - kind: import_statement
       has:
         any:
           - kind: dotted_name
-            regex: ^jace\.(cards|data|draft|decks|collect|eval|forks|storage|pretrain|train)(\.|$)
+            regex: ^jace\.(cards|data|draft|decks|collect|eval|forks|storage|pretrain|train|rl\.loop)(\.|$)
           - kind: aliased_import
             has:
               kind: dotted_name
-              regex: ^jace\.(cards|data|draft|decks|collect|eval|forks|storage|pretrain|train)(\.|$)
+              regex: ^jace\.(cards|data|draft|decks|collect|eval|forks|storage|pretrain|train|rl\.loop)(\.|$)
 metadata:
   byor:
     rationale: >

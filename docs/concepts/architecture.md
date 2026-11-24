@@ -1,6 +1,6 @@
 # Architecture
 
-jace organizes Limited Magic learning into twelve packages plus standalone operational scripts in `scripts/`, governed by an acyclic dependency graph.
+jace organizes Limited Magic learning into small, focused packages plus standalone operational scripts in `scripts/`, governed by an acyclic dependency graph.
 
 ## End-to-end data and model flow
 
@@ -24,7 +24,7 @@ flowchart LR
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../assets/modules-dark.svg">
-  <img alt="Package layers of jace. Imports flow downward only, and blue boxes mark packages that cross the narrow seam to managym and manabot." src="../assets/modules-light.svg">
+  <img alt="Package layers of jace. Imports flow strictly down the DAG (and right-to-left within a row); blue boxes mark the seam to managym and manabot." src="../assets/modules-light.svg">
 </picture>
 
 | Package / path | Responsibility |
@@ -45,14 +45,15 @@ flowchart LR
 
 ## Enforced import boundaries
 
-Seven `ast-grep` rules in `.byor/rules/project/` enforce the module graph on every commit and CI run:
+`ast-grep` rules in `.byor/rules/project/` enforce the module graph on every commit and CI run:
 
 | Rule | Contract |
 | --- | --- |
 | `jace.no-manabot-learner-recipes` | All RL updates, schedules, and loops live in `jace.rl` |
 | `jace.manabot-import-boundaries` | Only `jace.data.catalog`, `jace.rl.loop`, `jace.collect`, `jace.eval`, `jace.forks`, `jace.storage.gameplay`, and `jace.train` touch the engine |
-| `jace.pure-rl-math-boundaries` | Every `jace.rl` module except `loop.py` stays pure PyTorch/NumPy math |
-| `jace.leaf-packages-stay-leaf` | `jace.cards`, `jace.data`, `jace.modules`, and `jace.storage.pretrain` never import higher layers |
+| `jace.pure-rl-math-boundaries` | Every `jace.rl` module except `__init__.py` and `loop.py` stays pure PyTorch/NumPy math and never imports `jace.rl.loop` |
+| `jace.collect-stays-below-eval` | `jace.collect` never imports `jace.eval`, `jace.forks`, `jace.pretrain`, or `jace.train` |
+| `jace.leaf-packages-stay-leaf` | `jace.cards`, `jace.data`, `jace.modules`, `jace.storage.__init__`, and `jace.storage.pretrain` never import higher layers |
 | `jace.only-entry-points-import-draft` | Outside `jace.draft`, only `jace.pretrain` and `jace.train` import `jace.draft` |
 | `jace.nothing-imports-pretrain` | Nothing outside `jace.pretrain` imports `jace.pretrain` |
 | `jace.nothing-imports-train` | Nothing outside `jace.train` imports `jace.train` |

@@ -173,17 +173,24 @@ def build_remote_script(cfg: ColabRunConfig) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _sync_once(cfg: ColabRunConfig, *, remote_run_dir: str, runner: CommandRunner) -> None:
-    (cfg.backup_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
-    for remote_path, local_path in _sync_targets(cfg.backup_dir, remote_run_dir=remote_run_dir):
-        cmd = (*_COLAB_CMD, "download", "-s", cfg.session, remote_path, str(local_path))
-        try:
-            code = runner(cmd, check=False)
-        except (subprocess.CalledProcessError, OSError) as exc:
-            _LOGGER.warning("sync failed for %s: %s", remote_path, exc)
-            continue
-        if code != 0:
-            _LOGGER.debug("sync skipped %s (exit %d)", remote_path, code)
+def _sync_once(
+    cfg: ColabRunConfig,
+    *,
+    remote_run_dir: str,
+    runner: CommandRunner,
+    sync_lock: threading.Lock,
+) -> None:
+    with sync_lock:
+        (cfg.backup_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+        for remote_path, local_path in _sync_targets(cfg.backup_dir, remote_run_dir=remote_run_dir):
+            cmd = (*_COLAB_CMD, "download", "-s", cfg.session, remote_path, str(local_path))
+            try:
+                code = runner(cmd, check=False)
+            except (subprocess.CalledProcessError, OSError) as exc:
+                _LOGGER.warning("sync failed for %s: %s", remote_path, exc)
+                continue
+            if code != 0:
+                _LOGGER.debug("sync skipped %s (exit %d)", remote_path, code)
 
 
 def _start_sync_thread(
@@ -192,13 +199,14 @@ def _start_sync_thread(
     remote_run_dir: str,
     runner: CommandRunner,
     stop_event: threading.Event,
+    sync_lock: threading.Lock,
 ) -> threading.Thread | None:
     if cfg.sync_interval_s <= 0:
         return None
 
     def _loop() -> None:
         while not stop_event.wait(timeout=cfg.sync_interval_s):
-            _sync_once(cfg, remote_run_dir=remote_run_dir, runner=runner)
+            _sync_once(cfg, remote_run_dir=remote_run_dir, runner=runner, sync_lock=sync_lock)
 
     thread = threading.Thread(target=_loop, name=f"colab-sync-{cfg.session}", daemon=True)
     thread.start()
@@ -270,6 +278,7 @@ def run_colab_training(cfg: ColabRunConfig, *, runner: CommandRunner | None = No
     active_runner(_provision_command(cfg), check=True)
 
     stop_event = threading.Event()
+    sync_lock = threading.Lock()
     sync_thread: threading.Thread | None = None
     try:
         active_runner(
@@ -278,7 +287,11 @@ def run_colab_training(cfg: ColabRunConfig, *, runner: CommandRunner | None = No
         )
         _upload_resume_files(cfg, remote_run_dir=remote_run_dir, runner=active_runner)
         sync_thread = _start_sync_thread(
-            cfg, remote_run_dir=remote_run_dir, runner=active_runner, stop_event=stop_event
+            cfg,
+            remote_run_dir=remote_run_dir,
+            runner=active_runner,
+            stop_event=stop_event,
+            sync_lock=sync_lock,
         )
         ssh_cmd = (*_COLAB_CMD, "ssh", "-s", cfg.session, "--", "bash", "-lc", remote_script)
         return active_runner(ssh_cmd, check=True)
@@ -286,7 +299,7 @@ def run_colab_training(cfg: ColabRunConfig, *, runner: CommandRunner | None = No
         stop_event.set()
         if sync_thread is not None:
             sync_thread.join(timeout=30.0)
-        _sync_once(cfg, remote_run_dir=remote_run_dir, runner=active_runner)
+        _sync_once(cfg, remote_run_dir=remote_run_dir, runner=active_runner, sync_lock=sync_lock)
         if not cfg.keep_vm:
             _stop_session(cfg.session, runner=active_runner)
 

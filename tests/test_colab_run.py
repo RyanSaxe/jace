@@ -11,6 +11,8 @@ sessions rather than mocked subprocesses.
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -190,3 +192,40 @@ def test_cli_dry_run_forwards_after_double_dash_and_executes_zero_commands(
     assert "exec uv run python -m jace.train.full_data" in output
     assert "--updates 25 --eval-every 5" in output
     assert " -- --updates" not in output
+
+
+def test_periodic_and_final_sync_serialize_downloads(tmp_path: Path) -> None:
+    decks = _make_decks(tmp_path)
+    sync_entered = threading.Event()
+    counter_lock = threading.Lock()
+    active_downloads = 0
+    max_concurrent_downloads = 0
+    download_calls = 0
+
+    def _runner(args: Sequence[str], *, check: bool = True) -> int:
+        nonlocal active_downloads, max_concurrent_downloads, download_calls
+        _ = check
+        subcommand = args[4] if len(args) > 4 else ""
+        if subcommand == "download":
+            with counter_lock:
+                active_downloads += 1
+                download_calls += 1
+                max_concurrent_downloads = max(max_concurrent_downloads, active_downloads)
+            sync_entered.set()
+            time.sleep(0.05)
+            with counter_lock:
+                active_downloads -= 1
+        elif subcommand == "ssh":
+            assert sync_entered.wait(timeout=5.0)
+        return 0
+
+    cfg = ColabRunConfig(
+        session="sync-lock",
+        decks_path=decks,
+        backup_dir=tmp_path / "backup-lock",
+        run_id="r-lock",
+        sync_interval_s=1,
+    )
+    assert run_colab_training(cfg, runner=_runner) == 0
+    assert download_calls >= 6
+    assert max_concurrent_downloads == 1
