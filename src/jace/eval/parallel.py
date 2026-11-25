@@ -1,13 +1,13 @@
 """Parallel mirrored-deal evaluation and adaptive sequential judge for Jace v2.
 
-Evaluates two Magic policies across mirrored paired deals (identical shuffles, swapped
-seats) in parallel across spawned CPU worker processes (`torch.set_num_threads(1)` per
-worker) so 200 mirrored games run in ~35 seconds and 400 in ~70 seconds. Because paired
-deals cancel out pure mana-screw and mana-flood splits (`1-1` deals contribute zero
-paired variance), `summarize_paired_deals` computes paired standard errors and 95%
-confidence intervals that detect +3 to +5 percentage point Limited Magic gains. Also
-provides `evaluate_agent_parallel` for scoring an in-memory `ActorCritic` without a
-pre-saved checkpoint and `paired_score_metrics` for flat metric logging.
+Evaluates single policies or probability-averaging checkpoint ensembles across mirrored
+paired deals (identical shuffles, swapped seats) in parallel across spawned CPU worker
+processes (`torch.set_num_threads(1)` per worker) so 200 mirrored games run in ~35 seconds
+and 400 in ~70 seconds. Because paired deals cancel out pure mana-screw and mana-flood
+splits (`1-1` deals contribute zero paired variance), `summarize_paired_deals` computes
+paired standard errors and 95% confidence intervals that detect +3 to +5 percentage point
+Limited Magic gains. Also provides `evaluate_agent_parallel`, `evaluate_ensemble_parallel`,
+and `paired_score_metrics` for flat metric logging.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from manabot.backends.torch.checkpoint import load_checkpoint, save_checkpoint
 
 from jace.eval.deals import (
     Deal,
+    EnsemblePolicyPlayer,
     PlayerFn,
     PolicyPlayer,
     build_deals,
@@ -49,13 +50,14 @@ __all__ = (
     "PlayerSpec",
     "evaluate_adaptive",
     "evaluate_agent_parallel",
+    "evaluate_ensemble_parallel",
     "paired_score_metrics",
     "play_adaptive_parallel",
     "play_deals_parallel",
     "summarize_paired_deals",
 )
 
-type PlayerSpec = Path | Literal["heuristic", "random"]
+type PlayerSpec = Path | tuple[Path, ...] | Literal["heuristic", "random"]
 
 _Z_95 = 1.959963984540054
 _GAMES_PER_DEAL = 2
@@ -179,11 +181,19 @@ def _open_spec_player(
     *,
     seed: int,
     deterministic: bool,
-) -> tuple[PlayerFn, PolicyPlayer | None]:
+) -> tuple[PlayerFn, PolicyPlayer | EnsemblePolicyPlayer | None]:
     if spec == "heuristic":
         return heuristic_player(), None
     if spec == "random":
         return random_player(seed=seed), None
+    if isinstance(spec, tuple):
+        members = [
+            PolicyPlayer(policy, policy.observation_space, seed=seed + idx, deterministic=deterministic)
+            for idx, path in enumerate(spec)
+            for policy in (load_checkpoint(str(path))[0].eval(),)
+        ]
+        ensemble = EnsemblePolicyPlayer(members, seed=seed, deterministic=deterministic)
+        return ensemble, ensemble
     policy = load_checkpoint(str(spec))[0].eval()
     player = PolicyPlayer(policy, policy.observation_space, seed=seed, deterministic=deterministic)
     return player, player
@@ -403,6 +413,38 @@ def evaluate_agent_parallel(
         return summarize_paired_deals(
             play_deals_parallel(
                 ckpt_path,
+                opponent,
+                deals=deals,
+                num_workers=num_workers,
+                seed=seed,
+                deterministic=deterministic,
+            )
+        )
+
+
+def evaluate_ensemble_parallel(
+    agents: Sequence[ActorCritic],
+    *,
+    obs_space: ObservationSpace,
+    opponent: PlayerSpec = "heuristic",
+    deals: Sequence[Deal],
+    num_workers: int = 8,
+    seed: int = 0,
+    deterministic: bool = True,
+) -> PairedMatchScore:
+    if not agents:
+        msg = "evaluate_ensemble_parallel requires at least one agent"
+        raise ValueError(msg)
+    with tempfile.TemporaryDirectory(prefix="jace-ensemble-eval-") as tmp_dir:
+        tmp_root = Path(tmp_dir)
+        paths: list[Path] = []
+        for idx, agent in enumerate(agents):
+            ckpt_path = tmp_root / f"member-{idx}.safetensors"
+            save_checkpoint(copy.deepcopy(agent).to("cpu").eval(), obs_space, ckpt_path, player_configs=None)
+            paths.append(ckpt_path)
+        return summarize_paired_deals(
+            play_deals_parallel(
+                tuple(paths),
                 opponent,
                 deals=deals,
                 num_workers=num_workers,

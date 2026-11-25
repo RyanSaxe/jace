@@ -2,14 +2,16 @@
 
 Every deal is played twice with seats swapped (leg 0: player A on the play with deck A;
 leg 1: player B on the play with deck A) so deal RNG and play/draw advantage cancel out.
-When `games_path` is provided, every completed game is written through `managym`'s
-native `ScalarCapture` so it opens directly in `uv run managym academy replay`.
+Provides single-policy (`PolicyPlayer`) and probability-averaging (`EnsemblePolicyPlayer`)
+inference players. When `games_path` is provided, every completed game is written through
+`managym`'s native `ScalarCapture` so it opens directly in `uv run managym academy replay`.
 """
 
 import logging
 import math
 import random
 from collections.abc import Callable, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Self
@@ -25,6 +27,7 @@ from jace.collect.decks import HumanDeckCatalog, elemental_decks, sample_human_d
 
 __all__ = (
     "Deal",
+    "EnsemblePolicyPlayer",
     "MatchScore",
     "PlayerFn",
     "PolicyPlayer",
@@ -157,6 +160,64 @@ class PolicyPlayer:
         return action
 
 
+class EnsemblePolicyPlayer:
+    """Probability-averaging inference ensemble over two or more `PolicyPlayer`s.
+
+    Enters every member's cached inference scope together, averages their legal-action
+    probability vectors and value estimates at each decision, and selects either the
+    argmax or a sampled action from the averaged distribution.
+    """
+
+    def __init__(
+        self,
+        players: Sequence[PolicyPlayer],
+        *,
+        seed: int = 0,
+        deterministic: bool = False,
+    ) -> None:
+        if not players:
+            msg = "EnsemblePolicyPlayer requires at least one PolicyPlayer"
+            raise ValueError(msg)
+        self._players = tuple(players)
+        self._rng = random.Random(seed)
+        self._deterministic = deterministic
+        self._stack: ExitStack | None = None
+
+    def __enter__(self) -> Self:
+        stack = ExitStack()
+        for player in self._players:
+            stack.enter_context(player)
+        self._stack = stack
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        if self._stack is not None:
+            self._stack.close()
+            self._stack = None
+
+    @property
+    def needs_decision_memory(self) -> bool:
+        return any(player.needs_decision_memory for player in self._players)
+
+    def evaluate(self, obs: managym.Observation) -> tuple[int, tuple[float, ...], float]:
+        if self._stack is None:
+            msg = "EnsemblePolicyPlayer must be entered as a context manager before evaluation"
+            raise RuntimeError(msg)
+        outputs = [player.evaluate(obs) for player in self._players]
+        count = len(outputs)
+        avg_probs = tuple(sum(probs) / count for probs in zip(*(item[1] for item in outputs), strict=True))
+        avg_value = sum(item[2] for item in outputs) / count
+        if self._deterministic:
+            action = max(range(len(avg_probs)), key=avg_probs.__getitem__)
+        else:
+            action = self._rng.choices(range(len(avg_probs)), weights=avg_probs, k=1)[0]
+        return action, avg_probs, avg_value
+
+    def __call__(self, obs: managym.Observation) -> int:
+        action, _, _ = self.evaluate(obs)
+        return action
+
+
 def heuristic_player() -> PlayerFn:
     native = managym.Heuristic()
 
@@ -273,8 +334,8 @@ def _play_leg(
 ) -> tuple[int | None, int, int]:
     setup = deal.game_setup(swapped=False)
     use_memory = bool(
-        (isinstance(seat0, PolicyPlayer) and seat0.needs_decision_memory)
-        or (isinstance(seat1, PolicyPlayer) and seat1.needs_decision_memory)
+        (isinstance(seat0, (PolicyPlayer, EnsemblePolicyPlayer)) and seat0.needs_decision_memory)
+        or (isinstance(seat1, (PolicyPlayer, EnsemblePolicyPlayer)) and seat1.needs_decision_memory)
     )
     env = managym.Env(seed=deal.seed, skip_trivial=True, decision_memory=use_memory)
     capture = (

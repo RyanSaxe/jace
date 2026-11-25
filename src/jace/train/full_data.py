@@ -41,6 +41,7 @@ from jace.eval import (
     capture_probes,
     diff_checkpoints,
     evaluate_agent_parallel,
+    evaluate_ensemble_parallel,
     paired_score_metrics,
     play_deals_parallel,
     run_forensics,
@@ -216,12 +217,22 @@ def _evaluate_full_data(
         "academy": academy_commands(layout, iteration=iteration),
     }
     live_metrics: dict[str, object] = {}
+    ensemble_metrics: dict[str, object] = {}
     if ema_weights is not None:
         live_det = evaluate_agent_parallel(
             agent, obs_space=obs_space, deals=held_out_deals, num_workers=cfg.eval_workers, seed=eval_seed
         )
+        ensemble_det = evaluate_ensemble_parallel(
+            (agent, eval_agent),
+            obs_space=obs_space,
+            deals=held_out_deals,
+            num_workers=cfg.eval_workers,
+            seed=eval_seed,
+        )
         payload["live_held_out_det"] = asdict(live_det)
+        payload["ensemble_held_out_det"] = asdict(ensemble_det)
         live_metrics = paired_score_metrics(live_det, prefix="live_held_out_det")
+        ensemble_metrics = paired_score_metrics(ensemble_det, prefix="ensemble_held_out_det")
     save_forensics(layout, iteration=iteration, report=payload)
     append_metric(
         layout,
@@ -230,6 +241,7 @@ def _evaluate_full_data(
             "update": iteration,
             **paired_score_metrics(paired_det, prefix="held_out_det"),
             **live_metrics,
+            **ensemble_metrics,
             "win_rate_vs_heuristic": round(report.win_rate, 4),
             "attack_rate": round(report.attack_rate, 4),
             "heuristic_attack_rate": round(report.heuristic_attack_rate, 4),

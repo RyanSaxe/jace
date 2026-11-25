@@ -16,11 +16,13 @@ from manabot.infra.config import ModelConfig, ObservationConfig
 from managym.recording import read_records
 
 from jace.eval import (
+    EnsemblePolicyPlayer,
     PolicyPlayer,
     build_deals,
     capture_probes,
     diff_checkpoints,
     elemental_decks,
+    evaluate_ensemble_parallel,
     heuristic_player,
     play_match,
     random_player,
@@ -117,3 +119,36 @@ def test_play_match_isolates_lowercase_observation_capacity_errors_and_reraises_
 
     with pytest.raises(ValueError, match="unexpected bad action index"):
         play_match(_unrelated_value_error, heuristic_player(), deals=deals, max_actions=50)
+
+
+def test_ensemble_policy_player_averages_members_and_runs_in_parallel() -> None:
+    agent_a, obs_space = _tiny_agent()
+    agent_b, _ = _tiny_agent()
+    deals = build_deals(elemental_decks()[:2], count=1, seed=41, decklists="closed")
+    members = (
+        PolicyPlayer(agent_a, obs_space, deterministic=True),
+        PolicyPlayer(agent_b, obs_space, deterministic=True),
+    )
+    with (
+        PolicyPlayer(agent_a, obs_space, deterministic=True) as player_a,
+        PolicyPlayer(agent_b, obs_space, deterministic=True) as player_b,
+        EnsemblePolicyPlayer(members, deterministic=True) as ensemble,
+    ):
+        env = managym.Env(seed=deals[0].seed, skip_trivial=True)
+        obs, _ = env.reset(deals[0].game_setup(swapped=False))
+        _, probs_a, val_a = player_a.evaluate(obs)
+        _, probs_b, val_b = player_b.evaluate(obs)
+        _, probs_ens, val_ens = ensemble.evaluate(obs)
+        assert probs_ens == pytest.approx([0.5 * (a + b) for a, b in zip(probs_a, probs_b, strict=True)])
+        assert val_ens == pytest.approx(0.5 * (val_a + val_b))
+
+    score = evaluate_ensemble_parallel(
+        (agent_a, agent_b),
+        obs_space=obs_space,
+        opponent="random",
+        deals=deals,
+        num_workers=1,
+        seed=5,
+    )
+    assert score.games == 2
+    assert 0.0 <= score.win_rate <= 1.0

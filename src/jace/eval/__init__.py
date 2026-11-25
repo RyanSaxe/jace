@@ -1,15 +1,16 @@
 """Evaluation, behavioral decision forensics, and checkpoint diffs for Jace v2.
 
-Provides mirrored paired-deal scoring with optional native Academy game recording
-(`deals`), multi-worker parallel and adaptive sequential evaluation (`parallel`),
-40-game Magic-principles behavioral auditing against `managym.Heuristic` (`forensics`),
-and fixed held-out probe-state policy diffs across checkpoints (`diffs`). Every
-evaluation runs directly over `managym` observations without importing any training
-loop or upstream recipe.
+Provides mirrored paired-deal scoring with optional native Academy game recording and
+probability-averaging policy ensembles (`deals`), multi-worker parallel and adaptive
+sequential evaluation (`parallel`), 40-game Magic-principles behavioral auditing against
+`managym.Heuristic` (`forensics`), and fixed held-out probe-state policy diffs across
+checkpoints (`diffs`). Every evaluation runs directly over `managym` observations without
+importing any training loop or upstream recipe.
 """
 
 from jace.eval.deals import (
     Deal,
+    EnsemblePolicyPlayer,
     MatchScore,
     PlayerFn,
     PolicyPlayer,
@@ -31,6 +32,7 @@ from jace.eval.parallel import (
     PlayerSpec,
     evaluate_adaptive,
     evaluate_agent_parallel,
+    evaluate_ensemble_parallel,
     paired_score_metrics,
     play_adaptive_parallel,
     play_deals_parallel,
@@ -43,6 +45,7 @@ __all__ = (
     "Deal",
     "DecisionShift",
     "DiffSummary",
+    "EnsemblePolicyPlayer",
     "ForensicsReport",
     "MatchScore",
     "PairedDealResult",
@@ -58,6 +61,7 @@ __all__ = (
     "elemental_decks",
     "evaluate_adaptive",
     "evaluate_agent_parallel",
+    "evaluate_ensemble_parallel",
     "heuristic_player",
     "paired_score_metrics",
     "play_adaptive_parallel",
