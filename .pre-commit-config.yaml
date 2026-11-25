@@ -51,11 +51,15 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  # Python: ty checks the whole project, with the dependencies in uv.lock.
-  - repo: https://github.com/astral-sh/ty-pre-commit
-    rev: v0.0.109
+  # Python: ty checks the whole project with the studio extra installed.
+  - repo: local
     hooks:
       - id: ty
+        name: ty
+        entry: uv run --locked --extra studio ty check
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
 
   # Python: keep uv.lock in sync with pyproject.toml.
   - repo: local

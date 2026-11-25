@@ -12,6 +12,15 @@ dependencies = [
     "torch>=2.15.0",
 ]
 
+[project.optional-dependencies]
+studio = [
+    "duckdb>=2.0.1",
+    "fastapi>=0.165.0",
+    "httpx>=0.28.1",
+    "pyarrow>=26.0.1",
+    "uvicorn>=0.54.0",
+]
+
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.14", "ty>=0.0.1a20"]
 
