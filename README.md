@@ -1,78 +1,72 @@
 # jace
 
-jace learns to draft, build decks, and play Limited Magic: The Gathering by
-self-play on the `managym` Rust rules engine.
+jace is a self-play reinforcement learning system for Magic: The Gathering on
+the `managym` Rust rules engine. A shared program-reading card encoder
+generalizes across unseen cards and formats, with Limited (draft, deck building,
+and play) as the flagship end-to-end benchmark.
 
 > [!NOTE]
-> Work in progress. Development is currently focused on Phase A (gameplay
-> self-play); Phase B will connect drafting and deck building into the
-> end-to-end loop.
+> Work in progress. Development currently focuses on Phase A (format-agnostic
+> gameplay self-play); Phase B connects drafting and deck building into the full
+> Limited loop.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/approach-dark.svg">
-  <img alt="Jace unified architecture: a shared program card encoder feeds Draft, Deck Build, and Play, closing the loop through Self-Play RL and Evaluation." src="assets/approach-light.svg">
+  <img alt="Jace architecture: shared program card encoder feeding Draft, Deck Build, Play, Self-Play RL, and Evaluation." src="assets/approach-light.svg">
 </picture>
 
-## The problem and approach
+## Approach
 
-Limited Magic combines three coupled decisions under imperfect information:
-drafting a card pool from unseen boosters, assembling a legal 40-card deck, and
-playing games with hidden hands, libraries, and decklists across hundreds of
-distinct cards.
+Magic couples hidden information, vast card pools, and multi-stage decisions. In
+Limited, an agent drafts from unseen boosters, builds a 40-card deck, and plays
+with hidden hands, libraries, and decklists.
 
-- **One shared program card encoder.** Every model reads cards from their
-  `managym` engine program tokens alone, with no per-card IDs, no fixed card
-  output heads, and no usage statistics, so unseen cards generalize directly
-  from their mechanics.
-- **Draft, build, and play in one loop.** A causal transformer drafts in 8-seat
-  pods, a 3-stage masked set transformer builds and scores legal decks, and an
-  actor-critic policy plays closed-decklist games with a 3-class Win/Draw/Loss
-  critic.
-- **Stabilized self-play and paired evaluation.** Self-play combines
-  undiscounted WDL GAE, top-fraction advantage filtering, a damped dual-KL
-  policy loss, even-odds historical snapshots, color-balanced card-pool
-  curricula, and batched counterfactual forks. Evaluation measures checkpoints
-  with mirrored paired deals, adaptive sequential stopping, behavioral
-  forensics, and probe-state diffs.
+- **Shared program card encoder.** Models read `managym` engine program tokens
+  alone, with no per-card IDs, fixed card heads, or usage stats, so unseen cards
+  generalize across sets and formats from their mechanics.
+- **Format-agnostic gameplay and Limited stages.** A closed-decklist
+  actor-critic with a 3-class Win/Draw/Loss (WDL) critic plays any legal deck.
+  For Limited, a causal transformer drafts in 8-seat pods and a 3-stage masked
+  set transformer builds and scores legal 40-card decks on top of the same card
+  representation.
+- **Stabilized self-play and evaluation.** Training pairs undiscounted WDL GAE,
+  top-fraction advantage filtering, a damped dual-KL loss, even-odds snapshots,
+  color-balanced curricula, and counterfactual forks. Evaluation uses mirrored
+  paired deals, adaptive stopping, forensics, and probe diffs.
 
 ## Quick start
 
-jace requires Python 3.13, [uv](https://docs.astral.sh/uv/), and a Rust
-toolchain to compile `managym`.
+Requires Python 3.13, [uv](https://docs.astral.sh/uv/), and Rust (to compile
+`managym`).
 
 ```sh
 git clone https://github.com/RyanSaxe/jace.git
 cd jace
 uv sync
-uv run pytest -q                                  # unit tests
-uv run python -m jace.train.ten_decks --help      # 10-deck lab (no external data)
-uv run python -m jace.train.full_data --help      # full 17Lands self-play
-uv run python -m jace.pretrain.draft --help       # drafter & card encoder pretraining
-uv run python -m jace.pretrain.decks --help       # deck builder & deck score pretraining
-uv run scripts/colab_run.py --help                # Google Colab GPU launcher
+uv run pytest -q                              # unit tests
+uv run python -m jace.train.ten_decks --help  # 10-deck lab (no external data)
+uv run python -m jace.train.full_data --help  # full 17Lands self-play
+uv run python -m jace.pretrain.draft --help   # drafter & card encoder pretraining
+uv run python -m jace.pretrain.decks --help   # deck builder & score pretraining
+uv run scripts/colab_run.py --help            # Google Colab GPU launcher
 ```
 
-See [Install](docs/getting-started/install.md) for setup and 17Lands dataset
-instructions.
+See [Install](docs/getting-started/install.md) for setup and 17Lands data.
 
 ## Documentation
 
-| Page                                                    | Topic                                                       |
-| ------------------------------------------------------- | ----------------------------------------------------------- |
-| [Install](docs/getting-started/install.md)              | Requirements, tests, quick lab run, and 17Lands setup       |
-| [Architecture](docs/concepts/architecture.md)           | System flow, package layers, boundaries, and entry points   |
-| [Gameplay RL](docs/concepts/gameplay-rl.md)             | Policy backbone, self-play update loop, curricula, and forks |
-| [Limited models](docs/concepts/limited-models.md)       | Program card encoder, drafter, deck builder, and deck score |
-| [Evaluation](docs/concepts/evaluation.md)               | Mirrored deals, adaptive judging, forensics, and probe diffs |
-| [Running experiments](docs/guides/running-experiments.md) | Training, pretraining, screening, replays, and custom loops |
-| [Data](docs/reference/data.md)                          | 17Lands and MTGJSON loaders, caching, and deterministic splits |
-| [Run records](docs/reference/run-records.md)            | Gameplay run folders, atomic resume, and locked pretraining runs |
-| [Sources](docs/reference/sources.md)                    | Papers, repositories, and datasets behind the design        |
-| [Contributing](docs/contributing/README.md)             | Development setup, static checks, boundaries, and testing   |
-
-## Licence
-
-A licence has not been chosen yet.
+| Page                                                      | Topic                                             |
+| --------------------------------------------------------- | ------------------------------------------------- |
+| [Install](docs/getting-started/install.md)                | Setup, tests, smoke run, 17Lands data             |
+| [Architecture](docs/concepts/architecture.md)             | Solution architecture, data flow, and boundaries  |
+| [Gameplay RL](docs/concepts/gameplay-rl.md)               | Policy backbone, self-play loop, curricula, forks |
+| [Limited models](docs/concepts/limited-models.md)         | Card encoder, drafter, deck builder, deck score   |
+| [Evaluation](docs/concepts/evaluation.md)                 | Mirrored deals, adaptive judge, forensics, diffs  |
+| [Running experiments](docs/guides/running-experiments.md) | Training, Colab, screening, replays, custom loops |
+| [Data](docs/reference/data.md)                            | 17Lands/MTGJSON loaders, caching, CRC-32 splits   |
+| [Run records](docs/reference/run-records.md)              | Gameplay folders, resume, locked pretraining runs |
+| [Sources](docs/reference/sources.md)                      | Papers, repos, and datasets behind the design     |
+| [Contributing](docs/contributing/README.md)               | Setup, checks, package layout, CLIs, and testing  |
 
 ## Notice
 

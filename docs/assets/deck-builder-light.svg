@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 258" role="img" aria-label="Three-stage deck builder and deck score pipeline. Drafted Pool (pool and deck counts) feeds stage 1 Land Total Head (sinusoidal share over min_lands to max_lands), stage 2 Spells and Nonbasics (Plackett-Luce Gumbel-max in rounds of 6), and stage 3 Basic Land Split (multinomial over remaining land slots), yielding batch-sampled Legal 40-Card Decks that DeckScore deduplicates and ranks best first.">
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#1f2328;text-anchor:middle;font-size:15px}
+.t{font-weight:600}.s{font-size:12.5px;fill:#59636e}.l{text-anchor:start}.r{text-anchor:end}.m{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13.5px;font-weight:600}
+.line{fill:none;stroke:#1f2328;stroke-width:1.5}.head{fill:#1f2328}
+.bline{fill:none;stroke:#3a5bd9;stroke-width:1.5}.bhead{fill:#3a5bd9}
+.dline{fill:none;stroke:#59636e;stroke-width:1.5;stroke-dasharray:5 3}.dhead{fill:#59636e}
+.box{fill:#ffffff;stroke:#b8bec6}.round{fill:#eef2fd;stroke:#3a5bd9}
+</style>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+<marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="bhead"/></marker>
+<marker id="d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dhead"/></marker>
+</defs>
+<rect class="box" x="24" y="20" width="230" height="82" rx="10"/>
+<text x="139" y="55" class="t">Drafted Pool</text>
+<text x="139" y="77" class="s">pool &amp; deck counts</text>
+<path class="line" d="M254 61 H291" marker-end="url(#a)"/>
+<rect class="round" x="295" y="20" width="230" height="82" rx="10"/>
+<text x="410" y="48" class="t">1. Land Total Head</text>
+<text x="410" y="69" class="s">sinusoidal share over</text>
+<text x="410" y="87" class="s">min_lands..max_lands</text>
+<path class="line" d="M525 61 H562" marker-end="url(#a)"/>
+<rect class="round" x="566" y="20" width="230" height="82" rx="10"/>
+<text x="681" y="48" class="t">2. Spells &amp; Nonbasics</text>
+<text x="681" y="69" class="s">Plackett-Luce Gumbel-max</text>
+<text x="681" y="87" class="s">in rounds of 6</text>
+<path class="line" d="M681 102 V128 H139 V152" marker-end="url(#a)"/>
+<rect class="round" x="24" y="156" width="230" height="82" rx="10"/>
+<text x="139" y="184" class="t">3. Basic Land Split</text>
+<text x="139" y="205" class="s">multinomial over</text>
+<text x="139" y="223" class="s">remaining land slots</text>
+<path class="line" d="M254 197 H291" marker-end="url(#a)"/>
+<rect class="box" x="295" y="156" width="230" height="82" rx="10"/>
+<text x="410" y="191" class="t">Legal 40-Card Decks</text>
+<text x="410" y="213" class="s">batch sampled</text>
+<path class="line" d="M525 197 H562" marker-end="url(#a)"/>
+<rect class="round" x="566" y="156" width="230" height="82" rx="10"/>
+<text x="681" y="184" class="m">DeckScore</text>
+<text x="681" y="205" class="s">deduplicate &amp; rank</text>
+<text x="681" y="223" class="s">best first</text>
+</svg>
