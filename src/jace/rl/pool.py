@@ -1,9 +1,9 @@
 """Historical snapshot opponent pool and training configuration records for self-play RL.
 
 Pure PyTorch and NumPy utilities with zero `manabot` or `managym` imports so opponent
-checkpoint management and update configuration can be unit-tested in milliseconds.
-`SnapshotPool` maintains a bounded FIFO ring buffer of detached CPU parameter snapshots
-with optional AlphaStar-style even-odds matching.
+checkpoint management, precision configuration, and update settings can be unit-tested
+in milliseconds. `SnapshotPool` maintains a bounded FIFO ring buffer of detached CPU
+parameter snapshots with optional AlphaStar-style even-odds matching.
 """
 
 from collections import deque
@@ -17,6 +17,7 @@ import torch
 from torch import Tensor, nn
 
 __all__ = (
+    "PrecisionKind",
     "SnapshotEntry",
     "SnapshotPool",
     "StepRecord",
@@ -29,6 +30,7 @@ __all__ = (
     "update_snapshot_pool",
 )
 
+type PrecisionKind = Literal["float32", "tf32", "bf16"]
 _EVEN_ODDS_FLOOR = 0.05
 
 
@@ -167,6 +169,7 @@ class UpdateConfig:
     filter_scope: Literal["actor", "actor_critic"] = "actor"
     reference: Literal["uniform", "action_type_uniform"] = "action_type_uniform"
     device: str = "cpu"
+    precision: PrecisionKind = "float32"
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +194,7 @@ class TrainConfig:
     steps_per_env: int = 64
     seed: int = 1
     collect_device: str = "cpu"
+    precision: PrecisionKind = "float32"
     native_workers: Literal[1, 2, 4] = 1
     async_collect: bool = False
     update: UpdateConfig = UpdateConfig()

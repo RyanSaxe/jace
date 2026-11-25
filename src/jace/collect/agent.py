@@ -3,9 +3,9 @@
 Centralizes `ActorCritic` + `ObservationSpace` creation across self-play loops,
 multi-process rollout workers, and batched counterfactual fork workers so every
 process constructs identical v11 observation capacities (including optional
-decision-memory buffers). Also packs `RecordedObservations.memory` prefixes into
-compact `MemoryArchive` payloads for multiprocessing IPC and merges worker batches
-without dropping decision history.
+decision-memory buffers, `stream_norm`, and `focus_film`). Also packs
+`RecordedObservations.memory` prefixes into compact `MemoryArchive` payloads for
+multiprocessing IPC.
 """
 
 from __future__ import annotations
@@ -13,12 +13,10 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
-import numpy as np
 from manabot.backends.torch.policy import ActorCritic
 from manabot.env.memory_store import MemoryArchive, archive_memory, restore_memory
 from manabot.env.observation import ObservationSpace
 from manabot.infra.config import ModelConfig, ObservationConfig
-from manabot.training.rollout.collection import PackedActions, RecordedObservations, RolloutBatch
 
 from jace.rl import (
     CreditFn,
@@ -34,14 +32,13 @@ from jace.rl import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from manabot.training.rollout.collection import RolloutBatch
 
 __all__ = (
     "DECISION_MEMORY_CAPACITIES",
     "DecisionMemoryKind",
     "build_agent",
     "build_damped_rl_components",
-    "merge_rollout_batches",
     "pack_batch_for_ipc",
     "unpack_batch_from_ipc",
 )
@@ -56,6 +53,8 @@ def build_agent(
     hidden_dim: int = 64,
     attention_layers: int = 2,
     decision_memory: DecisionMemoryKind = "none",
+    stream_norm: bool = False,
+    focus_film: bool = False,
     bucketed_shapes: bool = True,
     live_tokens: bool = False,
 ) -> tuple[ActorCritic, ObservationSpace]:
@@ -86,6 +85,8 @@ def build_agent(
         attention_layers=attention_layers,
         num_attention_heads=4,
         policy_film=True,
+        focus_film=focus_film,
+        stream_norm=stream_norm,
         value_kind="categorical_wdl",
         value_aggregation="masked_mean",
         decision_memory=decision_memory,
@@ -107,61 +108,6 @@ def unpack_batch_from_ipc(batch: RolloutBatch, archive: MemoryArchive | None) ->
         return batch
     restored = restore_memory(archive)
     return replace(batch, recorded=replace(batch.recorded, memory=restored, memory_capacities=archive.capacities))
-
-
-def _merge_recorded(batches: Sequence[RolloutBatch]) -> RecordedObservations:
-    first = batches[0].recorded
-    merged_rows = {key: np.concatenate([batch.recorded.rows[key] for batch in batches], axis=0) for key in first.rows}
-    offsets: list[np.ndarray] = []
-    row_base = 0
-    for batch in batches:
-        offsets.append(batch.recorded.index + row_base)
-        first_array = next(iter(batch.recorded.rows.values()))
-        row_base += int(first_array.shape[0])
-    merged_needs: np.ndarray | None = None
-    if all(batch.recorded.needs is not None for batch in batches):
-        merged_needs = np.concatenate([b.recorded.needs for b in batches if b.recorded.needs is not None])
-    merged_memory = tuple(prefix for batch in batches for prefix in batch.recorded.memory)
-    return RecordedObservations(
-        rows=merged_rows,
-        index=np.concatenate(offsets, axis=0),
-        needs=merged_needs,
-        memory=merged_memory,
-        memory_capacities=first.memory_capacities,
-    )
-
-
-def merge_rollout_batches(batches: Sequence[RolloutBatch]) -> RolloutBatch:
-    """Concatenate complete-game `RolloutBatch` payloads from parallel workers.
-
-    Joins every worker's time-major rollout arrays (`actions`, `logprobs`, `rewards`,
-    `dones`, `values`, and optional `outcome_probabilities`) along axis 0, shifts
-    `RecordedObservations.index` by each worker's recorded row count, preserves
-    decision-memory prefixes and capacities, and concatenates `PackedActions`.
-    Raises `ValueError` when `batches` is empty.
-    """
-    if not batches:
-        msg = "batches must contain at least one RolloutBatch"
-        raise ValueError(msg)
-    if len(batches) == 1:
-        return batches[0]
-    outcomes = (
-        np.concatenate([b.outcome_probabilities for b in batches if b.outcome_probabilities is not None], axis=0)
-        if all(b.outcome_probabilities is not None for b in batches)
-        else None
-    )
-    return RolloutBatch(
-        recorded=_merge_recorded(batches),
-        actions=np.concatenate([b.actions for b in batches], axis=0),
-        logprobs=np.concatenate([b.logprobs for b in batches], axis=0),
-        rewards=np.concatenate([b.rewards for b in batches], axis=0),
-        dones=np.concatenate([b.dones for b in batches], axis=0),
-        values=np.concatenate([b.values for b in batches], axis=0),
-        next_obs=batches[-1].next_obs,
-        next_done=batches[-1].next_done,
-        action_data=PackedActions.concatenate([b.action_data for b in batches]),
-        outcome_probabilities=outcomes,
-    )
 
 
 def build_damped_rl_components(

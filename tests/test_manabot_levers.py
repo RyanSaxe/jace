@@ -27,7 +27,6 @@ from torch import nn
 from jace.collect.agent import (
     DECISION_MEMORY_CAPACITIES,
     build_agent,
-    merge_rollout_batches,
     pack_batch_for_ipc,
     unpack_batch_from_ipc,
 )
@@ -46,7 +45,7 @@ from jace.rl import (
     update_step,
 )
 from jace.storage.gameplay import create_run, load_resume_state, save_policy_checkpoint, save_resume_state
-from jace.train.full_data import _parse_args
+from jace.train.full_data import _parse_args, resolve_live_tokens, resolve_precision
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -303,7 +302,7 @@ def test_ema_resume_roundtrip_preserves_live_and_shadow_weights(tmp_path: Path) 
 def test_decision_memory_gru_ipc_merge_update_step_and_eval() -> None:
     agent, obs_space = build_agent(hidden_dim=32, attention_layers=1, decision_memory="gru")
     assert agent.decision_memory is not None
-    assert obs_space.encoder.config.max_decision_records == DECISION_MEMORY_CAPACITIES[0]
+    assert obs_space.config.max_decision_records == DECISION_MEMORY_CAPACITIES[0]
 
     source = _tiny_deck_source()
     batches: list[RolloutBatch] = []
@@ -328,7 +327,7 @@ def test_decision_memory_gru_ipc_merge_update_step_and_eval() -> None:
         assert archive is not None
         batches.append(unpack_batch_from_ipc(packed, archive))
 
-    merged = merge_rollout_batches(batches)
+    merged = RolloutBatch.concatenate(batches)
     assert merged.recorded.memory_capacities == DECISION_MEMORY_CAPACITIES
     assert len(merged.recorded.memory) == sum(len(b.recorded.memory) for b in batches)
 
@@ -381,3 +380,73 @@ def test_train_full_data_cli_parses_manabot_lever_flags() -> None:
     assert cfg.magnet_kl == pytest.approx(0.10)
     assert cfg.ema == pytest.approx(0.999)
     assert cfg.decision_memory == "gru"
+
+
+def test_manabot_026_speedup_flags_and_live_tokens_stream_norm_update() -> None:
+    assert resolve_precision("auto", device="cuda") == "bf16"
+    assert resolve_precision("auto", device="cuda:0") == "bf16"
+    assert resolve_precision("auto", device="mps") == "float32"
+    assert resolve_precision("auto", device="cpu") == "float32"
+    assert resolve_precision("tf32", device="cuda") == "tf32"
+    assert resolve_live_tokens(live_tokens=None, device="cuda") is True
+    assert resolve_live_tokens(live_tokens=None, device="mps") is False
+    assert resolve_live_tokens(live_tokens=False, device="cuda") is False
+
+    cfg = _parse_args(
+        [
+            "--run-id",
+            "r82-speedups",
+            "--stream-norm",
+            "--focus-film",
+            "--live-tokens",
+            "--precision",
+            "bf16",
+        ]
+    )
+    assert cfg.stream_norm is True
+    assert cfg.focus_film is True
+    assert cfg.live_tokens is True
+    assert cfg.precision == "bf16"
+
+    agent, obs_space = build_agent(
+        hidden_dim=32,
+        attention_layers=1,
+        stream_norm=True,
+        focus_film=True,
+        live_tokens=True,
+    )
+    assert agent.config.stream_norm is True
+    assert agent.config.focus_film is True
+
+    source = _tiny_deck_source()
+    collector = open_collector(
+        obs_space,
+        Match(source.match_config()),
+        Reward(RewardConfig()),
+        num_envs=2,
+        seed=9,
+        opponent_mode="self",
+        numerics=CollectionSession(device="cpu", seed=9),
+        learning_seats="both",
+        batch_closure="complete-games",
+        deck_source=source,
+    )
+    try:
+        batch = _collect_rollout(collector, agent.eval(), 4)
+    finally:
+        close_collector(collector)
+
+    stats = update_step(
+        agent,
+        torch.optim.Adam(agent.parameters(), lr=1e-4),
+        batch=batch,
+        credit=gae_wdl(gamma=1.0, lam_policy=0.5, lam_value=0.8),
+        select=top_fraction(0.5, minimum=0.0),
+        loss=damped_policy_loss(),
+        config=UpdateConfig(epochs=1, minibatch_size=64, device="cpu", precision="float32"),
+        rng=np.random.default_rng(13),
+    )
+    assert stats.rows > 0
+    assert np.isfinite(stats.policy_loss)
+    assert np.isfinite(stats.value_loss)
+    assert np.isfinite(stats.grad_norm)

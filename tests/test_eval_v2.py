@@ -8,6 +8,8 @@ bundled two-color Limited decks. Verifies mirrored deal scoring with native
 
 from pathlib import Path
 
+import managym
+import pytest
 from manabot.backends.torch.policy import ActorCritic
 from manabot.env.observation import ObservationSpace
 from manabot.infra.config import ModelConfig, ObservationConfig
@@ -96,3 +98,22 @@ def test_forensics_and_probe_diffs_run_on_real_games(tmp_path: Path) -> None:
     with PolicyPlayer(agent_a, obs_space, seed=1) as player:
         score = play_match(player, random_player(seed=2), deals=deals, max_actions=200)
         assert score.games == 2
+
+
+def test_play_match_isolates_lowercase_observation_capacity_errors_and_reraises_other_value_errors() -> None:
+    deals = build_deals(elemental_decks()[:2], count=1, seed=31, decklists="closed")
+
+    def _lowercase_capacity(_obs: managym.Observation) -> int:
+        msg = "observation capacity exceeded: continuation relations"
+        raise ValueError(msg)
+
+    def _unrelated_value_error(_obs: managym.Observation) -> int:
+        msg = "unexpected bad action index"
+        raise ValueError(msg)
+
+    score = play_match(_lowercase_capacity, heuristic_player(), deals=deals, max_actions=50)
+    assert score.games == 2
+    assert score.draws == 2
+
+    with pytest.raises(ValueError, match="unexpected bad action index"):
+        play_match(_unrelated_value_error, heuristic_player(), deals=deals, max_actions=50)

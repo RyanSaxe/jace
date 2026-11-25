@@ -34,7 +34,7 @@ from jace.rl.losses import (
     ppo_loss,
     reverse_kl,
 )
-from jace.rl.pool import SnapshotEntry, SnapshotPool, load_snapshot
+from jace.rl.pool import PrecisionKind, SnapshotEntry, SnapshotPool, load_snapshot
 from jace.rl.schedules import DampedSchedule, DecaySchedule
 from jace.rl.select import SelectFn, all_rows, bucketed_minibatch_order, top_fraction, training_row_indexes
 
@@ -51,6 +51,7 @@ __all__ = (
     "LossFn",
     "LossScheduleFn",
     "PolicyBatch",
+    "PrecisionKind",
     "SelectFn",
     "SnapshotEntry",
     "SnapshotPool",

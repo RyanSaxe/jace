@@ -200,7 +200,7 @@ def diff_checkpoints(
     `top_k` largest total-variation shifts.
     """
     shifts: list[DecisionShift] = []
-    use_memory = obs_space.encoder.config.max_decision_records > 0
+    use_memory = obs_space.config.max_decision_records > 0
     with (
         PolicyPlayer(before, obs_space, deterministic=True) as player_before,
         PolicyPlayer(after, obs_space, deterministic=True) as player_after,

@@ -43,7 +43,7 @@ _LOGGER = logging.getLogger(__name__)
 
 def _eval_engine_errors() -> tuple[type[BaseException], ...]:
     panics = tuple(cls for cls in BaseException.__subclasses__() if cls.__name__ == "PanicException")
-    return (*panics, ValueError, RuntimeError)
+    return (*panics, managym.ObservationCapacity, ValueError, RuntimeError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +139,7 @@ class PolicyPlayer:
 
     @property
     def needs_decision_memory(self) -> bool:
-        return self._obs_space.encoder.config.max_decision_records > 0
+        return self._obs_space.config.max_decision_records > 0
 
     def evaluate(self, obs: managym.Observation) -> tuple[int, tuple[float, ...], float]:
         if self._scope is None:
@@ -304,7 +304,11 @@ def _play_leg(
             turns = max(turns, int(obs.turn.turn_number))
         winner = env.winner_index() if terminal else None
     except _eval_engine_errors() as exc:
-        if isinstance(exc, ValueError) and "Observation capacity exceeded" not in str(exc):
+        if (
+            isinstance(exc, ValueError)
+            and not isinstance(exc, managym.ObservationCapacity)
+            and "observation capacity exceeded" not in str(exc).lower()
+        ):
             raise
         _LOGGER.warning("eval leg seed=%d aborted (%s): %s", deal.seed, type(exc).__name__, exc)
         winner = None

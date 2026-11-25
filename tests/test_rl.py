@@ -27,7 +27,6 @@ from torch import nn
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from jace.collect.agent import merge_rollout_batches
 from jace.rl import (
     DampedSchedule,
     DecaySchedule,
@@ -367,7 +366,7 @@ def test_merge_rollout_batches_preserves_rows_and_packed_actions() -> None:
         finally:
             close_collector(collector)
 
-    merged = merge_rollout_batches(batches)
+    merged = RolloutBatch.concatenate(batches)
     expected_rows = sum(int(batch.actions.size) for batch in batches)
     assert int(merged.actions.size) == expected_rows
     assert int(merged.dones.sum()) == sum(int(batch.dones.sum()) for batch in batches)

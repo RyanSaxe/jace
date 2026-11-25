@@ -11,7 +11,6 @@ from jace.collect.agent import (
     DecisionMemoryKind,
     build_agent,
     build_damped_rl_components,
-    merge_rollout_batches,
     pack_batch_for_ipc,
     unpack_batch_from_ipc,
 )
@@ -50,7 +49,6 @@ __all__ = (
     "curriculum_blend_spec",
     "elemental_decks",
     "load_human_deck_catalog",
-    "merge_rollout_batches",
     "needs_curriculum_refresh",
     "nested_card_pools",
     "pack_batch_for_ipc",

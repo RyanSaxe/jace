@@ -209,13 +209,9 @@ def build_remote_script(cfg: ColabRunConfig) -> str:
     inner_cmd = f"{shlex.join(train_args)}; rc=$?; echo $rc > {_REMOTE_EXIT_FILE}; exit $rc"
     lines = [
         "set -euo pipefail",
-        'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"',
+        'export PATH="$HOME/.local/bin:$PATH"',
         'export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"',
         "if ! command -v uv >/dev/null 2>&1; then curl -LsSf https://astral.sh/uv/install.sh | sh; fi",
-        (
-            "if ! command -v cargo >/dev/null 2>&1; then "
-            "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal; fi"
-        ),
         f"if [ ! -d {shlex.quote(_REMOTE_REPO_DIR)}/.git ]; then\n{clone_cmd}\nfi",
         f"cd {shlex.quote(_REMOTE_REPO_DIR)}",
         "uv sync --frozen",
