@@ -49,9 +49,9 @@ __all__ = (
     "run_colab_training",
 )
 
-GpuKind = Literal["T4", "L4", "A100", "H100"]
+GpuKind = Literal["T4", "L4", "G4", "A100", "H100"]
 
-GPU_CHOICES: tuple[GpuKind, ...] = ("T4", "L4", "A100", "H100")
+GPU_CHOICES: tuple[GpuKind, ...] = ("T4", "L4", "G4", "A100", "H100")
 DEFAULT_REPO_URL = "https://github.com/RyanSaxe/jace.git"
 DEFAULT_EXPERIMENT = "v2-colab"
 DEFAULT_POLL_INTERVAL_S = 300
@@ -67,11 +67,12 @@ _REMOTE_EXIT_FILE = "/content/train.exit"
 _REMOTE_LOG_FILE = "/content/train.log"
 _RESUME_FILENAME = "resume-state.pt"
 _CHECKPOINT_SUFFIXES: tuple[str, ...] = (".safetensors", ".policy.json")
-_GPU_MAP: dict[str, GpuKind] = {"T4": "T4", "L4": "L4", "A100": "A100", "H100": "H100"}
+_GPU_MAP: dict[str, GpuKind] = {"T4": "T4", "L4": "L4", "G4": "G4", "A100": "A100", "H100": "H100"}
 _LOGGER = logging.getLogger(__name__)
 
 _EXEC_TIMEOUT_S = 90.0
 _REMOTE_EXEC_TIMEOUT_S = 45
+_PROVISION_TIMEOUT_S = 420.0
 _TRANSFER_TIMEOUT_S = 180.0
 _SETUP_TIMEOUT_S = 900.0
 _STOP_TIMEOUT_S = 60.0
@@ -410,7 +411,7 @@ def run_colab_training(cfg: ColabRunConfig, *, runner: CommandRunner | None = No
     remote_run_dir = _remote_run_dir(cfg)
     remote_script = build_remote_script(cfg)
     (cfg.backup_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
-    active_runner(_provision_command(cfg), check=True, timeout=_TRANSFER_TIMEOUT_S)
+    active_runner(_provision_command(cfg), check=True, timeout=_PROVISION_TIMEOUT_S)
 
     try:
         _upload_file(cfg, local_path=cfg.decks_path, remote_path=_REMOTE_DECKS_PATH, runner=active_runner)
