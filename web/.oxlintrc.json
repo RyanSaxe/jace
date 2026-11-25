@@ -1,0 +1,56 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "import", "react", "jsx-a11y"],
+  "ignorePatterns": ["dist/**", "node_modules/**"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "error"
+  },
+  "rules": {
+    "complexity": ["error", 10],
+    "max-depth": ["error", 4],
+    "max-nested-callbacks": ["error", 3],
+    "max-params": ["error", 3],
+    "curly": ["error", "multi-line"],
+    "import/no-cycle": "error",
+    "eqeqeq": ["error", "always"],
+    "no-var": "error",
+    "prefer-const": "error",
+    "no-param-reassign": "error",
+    "no-nested-ternary": "error",
+    "no-else-return": "error",
+    "no-lonely-if": "error",
+    "unicorn/no-negated-condition": "error",
+    "typescript/consistent-type-assertions": ["error", { "assertionStyle": "never" }],
+    "typescript/no-explicit-any": "error",
+    "typescript/no-non-null-assertion": "error",
+    "typescript/switch-exhaustiveness-check": "error",
+    "typescript/no-misused-promises": "error",
+    "typescript/explicit-function-return-type": "error",
+    // React 19 automatic react-jsx transform does not require `React` in scope.
+    "react/react-in-jsx-scope": "off",
+    // Vite CSS entrypoints and Vitest setup files rely on side-effect imports.
+    "import/no-unassigned-import": "off",
+    "no-restricted-imports": [
+      "error",
+      {
+        "paths": [
+          {
+            "name": "react",
+            "importNames": ["useEffect", "useLayoutEffect"],
+            "message": "Derive state during render, handle side effects in event handlers, or encapsulate external-system sync in a custom hook under hooks/."
+          }
+        ]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": ["**/hooks/**"],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    }
+  ]
+}

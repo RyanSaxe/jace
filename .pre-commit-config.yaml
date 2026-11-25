@@ -70,3 +70,20 @@ repos:
         language: system
         files: ^(pyproject\.toml|uv\.lock)$
         pass_filenames: false
+
+  # Web: format, strict type-aware lint, and lockfile check for web/.
+  - repo: local
+    hooks:
+      - id: oxfmt
+        name: oxfmt
+        entry: npm --prefix web run format
+        language: system
+        files: ^web/.*\.(ts|tsx|js|jsx|css|json)$
+        pass_filenames: false
+
+      - id: oxlint
+        name: oxlint
+        entry: npm --prefix web run lint
+        language: system
+        files: ^web/.*\.(ts|tsx|js|jsx)$
+        pass_filenames: false
