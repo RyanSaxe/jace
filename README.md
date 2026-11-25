@@ -1,12 +1,14 @@
 # jace
 
-jace learns to draft, build decks, and play Limited Magic: The Gathering by
-self-play on the `managym` Rust rules engine.
+jace is a self-play reinforcement learning system for Magic: The Gathering on
+the `managym` Rust rules engine. A shared program-reading card encoder
+generalizes across unseen cards and formats, with Limited (draft, deck building,
+and play) as the flagship end-to-end benchmark.
 
 > [!NOTE]
-> Work in progress. Development currently focuses on Phase A (gameplay
-> self-play); Phase B connects drafting and deck building into the end-to-end
-> loop.
+> Work in progress. Development currently focuses on Phase A (format-agnostic
+> gameplay self-play); Phase B connects drafting and deck building into the full
+> Limited loop.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/approach-dark.svg">
@@ -15,16 +17,18 @@ self-play on the `managym` Rust rules engine.
 
 ## Approach
 
-Limited Magic couples three imperfect-information decisions across hundreds of
-cards: drafting from unseen boosters, building a 40-card deck, and playing with
-hidden hands, libraries, and decklists.
+Magic couples hidden information, vast card pools, and multi-stage decisions. In
+Limited, an agent drafts from unseen boosters, builds a 40-card deck, and plays
+with hidden hands, libraries, and decklists.
 
 - **Shared program card encoder.** Models read `managym` engine program tokens
   alone, with no per-card IDs, fixed card heads, or usage stats, so unseen cards
-  generalize from their mechanics.
-- **Draft, build, and play.** A causal transformer drafts in 8-seat pods, a
-  3-stage masked set transformer builds and scores legal decks, and a
-  closed-decklist actor-critic plays with a 3-class Win/Draw/Loss (WDL) critic.
+  generalize across sets and formats from their mechanics.
+- **Format-agnostic gameplay and Limited stages.** A closed-decklist
+  actor-critic with a 3-class Win/Draw/Loss (WDL) critic plays any legal deck.
+  For Limited, a causal transformer drafts in 8-seat pods and a 3-stage masked
+  set transformer builds and scores legal 40-card decks on top of the same card
+  representation.
 - **Stabilized self-play and evaluation.** Training pairs undiscounted WDL GAE,
   top-fraction advantage filtering, a damped dual-KL loss, even-odds snapshots,
   color-balanced curricula, and counterfactual forks. Evaluation uses mirrored
@@ -54,7 +58,7 @@ See [Install](docs/getting-started/install.md) for setup and 17Lands data.
 | Page                                                      | Topic                                             |
 | --------------------------------------------------------- | ------------------------------------------------- |
 | [Install](docs/getting-started/install.md)                | Setup, tests, smoke run, 17Lands data             |
-| [Architecture](docs/concepts/architecture.md)             | Data flow, package layers, boundaries, CLIs       |
+| [Architecture](docs/concepts/architecture.md)             | Solution architecture, data flow, and boundaries  |
 | [Gameplay RL](docs/concepts/gameplay-rl.md)               | Policy backbone, self-play loop, curricula, forks |
 | [Limited models](docs/concepts/limited-models.md)         | Card encoder, drafter, deck builder, deck score   |
 | [Evaluation](docs/concepts/evaluation.md)                 | Mirrored deals, adaptive judge, forensics, diffs  |
@@ -62,11 +66,7 @@ See [Install](docs/getting-started/install.md) for setup and 17Lands data.
 | [Data](docs/reference/data.md)                            | 17Lands/MTGJSON loaders, caching, CRC-32 splits   |
 | [Run records](docs/reference/run-records.md)              | Gameplay folders, resume, locked pretraining runs |
 | [Sources](docs/reference/sources.md)                      | Papers, repos, and datasets behind the design     |
-| [Contributing](docs/contributing/README.md)               | Setup, static checks, boundaries, testing         |
-
-## Licence
-
-A licence has not been chosen yet.
+| [Contributing](docs/contributing/README.md)               | Setup, checks, package layout, CLIs, and testing  |
 
 ## Notice
 
