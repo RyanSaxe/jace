@@ -5,6 +5,7 @@ import {
   type GamesSearchArgs,
   fetchCardCatalog,
   fetchCardMetadata,
+  fetchGameFacets,
   fetchGameOverview,
   fetchGameStep,
   fetchGames,
@@ -17,6 +18,7 @@ import type {
   CardMetadata,
   ForkEdit,
   ForkResponse,
+  GameFacets,
   GameOverview,
   GameStepResponse,
   GameSummary,
@@ -28,6 +30,16 @@ import type {
 } from "@/lib/types";
 
 const THEME_STORAGE_KEY = "jace-studio-theme";
+
+const EMPTY_FACETS: GameFacets = {
+  runs: [],
+  colors: [],
+  sets: [],
+  results: [],
+  cards: [],
+  total_playable: 0,
+  total_unplayable: 0,
+};
 
 export function loadSavedTheme(): ThemeMode {
   try {
@@ -135,7 +147,7 @@ export function useExtraRunDetails(
     };
   }, [missingKey]);
 
-  return { ...existing, ...extra };
+  return { ...extra, ...existing };
 }
 
 export function useRunDetail(runId: string | null): RunDetail | null {
@@ -163,6 +175,22 @@ export function useRunDetail(runId: string | null): RunDetail | null {
   return loaded.detail;
 }
 
+export function useCardCatalog(runId?: string): string[] {
+  const [cards, setCards] = useState<string[]>([]);
+  useEffect(() => {
+    let active = true;
+    void fetchCardCatalog(runId)
+      .then((list) => {
+        if (active) setCards(list);
+      })
+      .catch(() => undefined);
+    return (): void => {
+      active = false;
+    };
+  }, [runId]);
+  return cards;
+}
+
 export function useDebouncedValue(value: string, delayMs: number): string {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -175,11 +203,23 @@ export function useDebouncedValue(value: string, delayMs: number): string {
 export function useGamesSearch(args: GamesSearchArgs): {
   games: GameSummary[];
   total: number;
-  cards: string[];
+  facets: GameFacets;
   loading: boolean;
   error: string | null;
 } {
-  const { runId, setCode, card, result, colors, search, sort, limit, offset } = args;
+  const {
+    runId,
+    setCode,
+    card,
+    result,
+    colors,
+    minSurprise,
+    minSwing,
+    search,
+    sort,
+    limit,
+    offset,
+  } = args;
   const debouncedSearch = useDebouncedValue(search ?? "", 180);
   const effectiveSearch = debouncedSearch === "" ? undefined : debouncedSearch;
   const queryKey = JSON.stringify({
@@ -188,6 +228,8 @@ export function useGamesSearch(args: GamesSearchArgs): {
     card,
     result,
     colors,
+    minSurprise,
+    minSwing,
     effectiveSearch,
     sort,
     limit,
@@ -199,7 +241,7 @@ export function useGamesSearch(args: GamesSearchArgs): {
     total: number;
     error: string | null;
   }>({ key: "", games: [], total: 0, error: null });
-  const [cards, setCards] = useState<string[]>([]);
+  const [facets, setFacets] = useState<GameFacets>(EMPTY_FACETS);
 
   useEffect(() => {
     let active = true;
@@ -209,6 +251,8 @@ export function useGamesSearch(args: GamesSearchArgs): {
       card,
       result,
       colors,
+      minSurprise,
+      minSwing,
       search: effectiveSearch,
       sort,
       limit,
@@ -226,13 +270,26 @@ export function useGamesSearch(args: GamesSearchArgs): {
     return (): void => {
       active = false;
     };
-  }, [queryKey, runId, setCode, card, result, colors, effectiveSearch, sort, limit, offset]);
+  }, [
+    queryKey,
+    runId,
+    setCode,
+    card,
+    result,
+    colors,
+    minSurprise,
+    minSwing,
+    effectiveSearch,
+    sort,
+    limit,
+    offset,
+  ]);
 
   useEffect(() => {
     let active = true;
-    void fetchCardCatalog(runId)
-      .then((list) => {
-        if (active) setCards(list);
+    void fetchGameFacets(runId)
+      .then((nextFacets) => {
+        if (active) setFacets(nextFacets);
       })
       .catch(() => undefined);
     return (): void => {
@@ -243,7 +300,7 @@ export function useGamesSearch(args: GamesSearchArgs): {
   return {
     games: state.games,
     total: state.total,
-    cards,
+    facets,
     loading: state.key !== queryKey,
     error: state.error,
   };
@@ -334,43 +391,76 @@ export function useGameStepData(args: StepFetchTarget): {
   };
 }
 
-export function useForkEvaluation(
-  target: StepFetchTarget,
-  edits: ForkEdit[],
-  enabled: boolean,
-): { result: ForkResponse | null; busy: boolean; error: string | null } {
+export function useForkEvaluation(args: {
+  target: StepFetchTarget;
+  edits: ForkEdit[];
+  branchActions: number[];
+  enabled: boolean;
+}): { result: ForkResponse | null; busy: boolean; error: string | null } {
+  const { target, edits, branchActions, enabled } = args;
   const { runId, iteration, gameIdx, step, pov, ckptA, ckptB } = target;
+  const scopeKey = `${runId}:${iteration}:${gameIdx}:${step}:${pov}`;
   const editsJson = JSON.stringify(edits);
+  const branchJson = JSON.stringify(branchActions);
+  const hasMutations = edits.length > 0 || branchActions.length > 0;
   const activeKey =
-    enabled && edits.length > 0
-      ? `${runId}:${iteration}:${gameIdx}:${step}:${pov}:${ckptA ?? ""}:${ckptB ?? ""}:${editsJson}`
+    enabled && hasMutations
+      ? `${scopeKey}:${ckptA ?? ""}:${ckptB ?? ""}:${editsJson}:${branchJson}`
       : "";
   const [state, setState] = useState<{
     key: string;
+    scopeKey: string;
     result: ForkResponse | null;
     error: string | null;
-  }>({ key: "", result: null, error: null });
+  }>({ key: "", scopeKey: "", result: null, error: null });
 
   useEffect(() => {
     if (!activeKey) return undefined;
     let active = true;
-    void postFork({ runId, iteration, gameIdx, step, pov, ckptA, ckptB, edits })
+    void postFork({
+      runId,
+      iteration,
+      gameIdx,
+      step,
+      pov,
+      ckptA,
+      ckptB,
+      edits,
+      branchActions,
+    })
       .then((res) => {
-        if (active) setState({ key: activeKey, result: res, error: null });
+        if (active) setState({ key: activeKey, scopeKey, result: res, error: null });
       })
       .catch((err: unknown) => {
         if (!active) return;
         const message = err instanceof Error ? err.message : "Fork evaluation failed";
-        setState((prev) => ({ key: activeKey, result: prev.result, error: message }));
+        setState((prev) => ({
+          key: activeKey,
+          scopeKey,
+          result: prev.scopeKey === scopeKey ? prev.result : null,
+          error: message,
+        }));
       });
     return (): void => {
       active = false;
     };
-  }, [activeKey, runId, iteration, gameIdx, step, pov, ckptA, ckptB, edits]);
+  }, [
+    activeKey,
+    scopeKey,
+    runId,
+    iteration,
+    gameIdx,
+    step,
+    pov,
+    ckptA,
+    ckptB,
+    edits,
+    branchActions,
+  ]);
 
   if (!activeKey) return { result: null, busy: false, error: null };
   return {
-    result: state.key === activeKey ? state.result : state.result,
+    result: state.scopeKey === scopeKey ? state.result : null,
     busy: state.key !== activeKey,
     error: state.key === activeKey ? state.error : null,
   };

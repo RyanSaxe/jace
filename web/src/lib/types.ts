@@ -3,7 +3,6 @@
 export type ThemeMode = "light" | "dark";
 export type NavTab = "runs" | "games" | "tabletop" | "watchlist";
 export type PovMode = "hero" | "omniscient";
-export type EvalHead = "live" | "ema" | "ensemble";
 
 export interface CheckpointInfo {
   iteration: number;
@@ -34,17 +33,7 @@ export interface RunSummary {
 
 export interface MetricPoint {
   update: number;
-  live_held_out_det_win_rate?: number;
-  held_out_det_win_rate?: number;
-  ensemble_held_out_det_win_rate?: number;
-  win_rate_vs_heuristic?: number;
-  missed_land_drop_rate?: number;
-  wrong_side_target_rate?: number;
-  diff_mean_tv?: number;
-  value_loss?: number;
-  entropy?: number;
-  tps?: number;
-  clip_fraction?: number;
+  [key: string]: unknown;
 }
 
 export interface RunDetail {
@@ -73,6 +62,23 @@ export interface GameSummary {
   opp_colors: string;
   cards_seen: string[];
   key_cards: string[];
+  playable?: boolean;
+  max_pred_win?: number;
+  min_pred_win?: number;
+  surprise_score?: number;
+  max_swing?: number;
+  turning_point_step?: number;
+  eval_source?: string;
+}
+
+export interface GameFacets {
+  runs: string[];
+  colors: string[];
+  sets: string[];
+  results: string[];
+  cards: string[];
+  total_playable: number;
+  total_unplayable: number;
 }
 
 export interface TimelinePoint {
@@ -96,6 +102,8 @@ export interface GameOverview {
   total_steps: number;
   max_playable_step?: number;
   peak_step: number;
+  turning_point_step?: number;
+  eval_source?: string;
   replay_warning?: string | null;
   players: Array<{ name: string; deck_size: number }>;
   timeline: TimelinePoint[];
@@ -233,6 +241,7 @@ export interface GameStepResponse {
   board: BoardState;
   evaluation: EvaluationPair;
   replay_warning?: string | null;
+  nearest_priority_step?: number | null;
 }
 
 export interface ForkEdit {
@@ -240,6 +249,15 @@ export interface ForkEdit {
   seat: 0 | 1;
   value?: number;
   card?: string;
+  after_branch?: number;
+}
+
+export interface BranchStepEvent {
+  branch_index: number;
+  turn: number;
+  actor_side: "hero" | "opp";
+  action_index: number;
+  label: string;
 }
 
 export interface ForkResponse {
@@ -247,6 +265,9 @@ export interface ForkResponse {
   base_evaluation: EvaluationPair;
   fork_evaluation: EvaluationPair;
   warnings: string[];
+  branch_events?: BranchStepEvent[];
+  branch_done?: boolean;
+  nearest_priority_step?: number | null;
 }
 
 export interface WatchlistItem {
@@ -280,9 +301,12 @@ export interface GameTarget {
 
 export interface GamesFilterState {
   runId: string;
+  setCode: string;
   result: string;
   colors: string;
   card: string;
+  minSurprise: number | null;
+  minSwing: number | null;
   search: string;
   sort: string;
   page: number;

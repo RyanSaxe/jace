@@ -4,6 +4,7 @@ import type {
   CardMetadata,
   ForkEdit,
   ForkResponse,
+  GameFacets,
   GameOverview,
   GameStepResponse,
   GameSummary,
@@ -43,6 +44,10 @@ function isRunDetail(data: unknown): data is RunDetail {
 
 function isGamesEnvelope(data: unknown): data is { total: number; games: GameSummary[] } {
   return isRecord(data) && typeof data.total === "number" && Array.isArray(data.games);
+}
+
+function isGameFacets(data: unknown): data is GameFacets {
+  return isRecord(data) && Array.isArray(data.runs) && Array.isArray(data.cards);
 }
 
 function isGameOverview(data: unknown): data is GameOverview {
@@ -93,6 +98,8 @@ export interface GamesSearchArgs {
   card?: string;
   result?: string;
   colors?: string;
+  minSurprise?: number;
+  minSwing?: number;
   search?: string;
   sort?: string;
   limit?: number;
@@ -115,9 +122,20 @@ export async function fetchGames(
   for (const [key, val] of pairs) {
     if (val) params.set(key, val);
   }
+  if (args.minSurprise !== undefined && args.minSurprise > 0) {
+    params.set("min_surprise", String(args.minSurprise));
+  }
+  if (args.minSwing !== undefined && args.minSwing > 0) {
+    params.set("min_swing", String(args.minSwing));
+  }
   params.set("limit", String(args.limit ?? 100));
   if (args.offset && args.offset > 0) params.set("offset", String(args.offset));
   return fetchJson(`/api/games?${params.toString()}`, isGamesEnvelope);
+}
+
+export async function fetchGameFacets(runId?: string): Promise<GameFacets> {
+  const qs = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+  return fetchJson(`/api/games/facets${qs}`, isGameFacets);
 }
 
 export async function fetchCardCatalog(runId?: string): Promise<string[]> {
@@ -169,6 +187,7 @@ export async function postFork(args: {
   ckptA?: string;
   ckptB?: string;
   edits: ForkEdit[];
+  branchActions?: number[];
 }): Promise<ForkResponse> {
   return fetchJson("/api/fork", isForkResponse, {
     method: "POST",
@@ -182,6 +201,7 @@ export async function postFork(args: {
       ckpt_a: args.ckptA ?? null,
       ckpt_b: args.ckptB ?? null,
       edits: args.edits,
+      branch_actions: args.branchActions ?? [],
     }),
   });
 }

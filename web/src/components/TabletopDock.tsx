@@ -1,14 +1,23 @@
-/** Right Swiss-grid inspector dock for Tabletop: checkpoint diff, What-If Fork controls, legal actions, WDL & Watchlist. */
+/** Right inspector dock for Tabletop: live checkpoint diff, any-step Fork/Branch lab, legal actions & Watchlist. */
 
-import { Bookmark, EyeOff, X } from "lucide-react";
+import {
+  Bookmark,
+  EyeOff,
+  FastForward,
+  GitBranch,
+  RotateCcw,
+  Search,
+  Undo2,
+  X,
+} from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { Button } from "@/components/ui/Primitives";
 import { cardImageUrl } from "@/lib/api";
-import type { BoardState, EvaluationPair, ForkEdit } from "@/lib/types";
+import type { BoardState, BranchStepEvent, EvaluationPair, ForkEdit } from "@/lib/types";
 
 const BASIC_LANDS = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"]);
 
-function deckForkCandidates(args: {
+function deckCardPoolForFork(args: {
   board: BoardState;
   seatSide: "hero" | "opp";
   zone: "add_battlefield" | "add_hand_card";
@@ -17,14 +26,15 @@ function deckForkCandidates(args: {
   const { board, seatSide, zone, filterText } = args;
   const player = seatSide === "hero" ? board.hero : board.opp;
   const nonPerms = new Set(board.non_permanent_names ?? []);
-  const rawPool = [...player.library_summary.map((row) => row.name), ...player.graveyard];
   const needle = filterText.trim().toLowerCase();
-  const unique = [...new Set(rawPool)].filter((name) => {
-    if (BASIC_LANDS.has(name) || name === "Unknown") return false;
-    if (zone === "add_battlefield" && nonPerms.has(name)) return false;
-    return needle === "" || name.toLowerCase().includes(needle);
-  });
-  return unique.slice(0, 8);
+  const deckRaw = [...player.library_summary.map((row) => row.name), ...player.graveyard];
+  return [...new Set(deckRaw)]
+    .filter((name) => {
+      if (BASIC_LANDS.has(name) || name === "Unknown") return false;
+      if (zone === "add_battlefield" && nonPerms.has(name)) return false;
+      return needle === "" || name.toLowerCase().includes(needle);
+    })
+    .slice(0, 12);
 }
 
 function describeForkEdit(edit: ForkEdit, heroSeat: number): string {
@@ -41,37 +51,6 @@ function resolveTargetSeat(targetSide: "hero" | "opp", heroSeat: number): 0 | 1 
   return targetSide === "hero" ? heroNum : oppNum;
 }
 
-function ForkEditChips(props: {
-  edits: ForkEdit[];
-  heroSeat: number;
-  onRemoveEdit: (idx: number) => void;
-}): ReactNode {
-  if (props.edits.length === 0) return null;
-  return (
-    <div className="flex flex-wrap gap-1">
-      {props.edits.map((edit, idx) => {
-        const label = describeForkEdit(edit, props.heroSeat);
-        return (
-          <span
-            key={`${edit.op}-${edit.seat}-${edit.card ?? edit.value ?? "x"}-${String(idx)}`}
-            className="inline-flex items-center gap-1 rounded bg-[var(--surface-2)] border border-[var(--border)] px-1.5 py-0.5 text-[10px] font-medium"
-          >
-            <span className="max-w-[140px] truncate">{label}</span>
-            <button
-              type="button"
-              aria-label={`Undo ${label}`}
-              onClick={(): void => props.onRemoveEdit(idx)}
-              className="text-[var(--text-3)] hover:text-[var(--loss)] cursor-pointer"
-            >
-              <X className="w-3 h-3" />
-            </button>
-          </span>
-        );
-      })}
-    </div>
-  );
-}
-
 const SIDE_OPTIONS: ReadonlyArray<{ value: "hero" | "opp"; label: string }> = [
   { value: "hero", label: "Hero" },
   { value: "opp", label: "Opp" },
@@ -82,9 +61,11 @@ const ZONE_OPTIONS: ReadonlyArray<{ value: "add_battlefield" | "add_hand_card"; 
   { value: "add_hand_card", label: "+ Hand" },
 ];
 
-function ForkCardPicker(props: {
+function ForkBoardEditor(props: {
   board: BoardState;
   heroSeat: number;
+  nearestPriorityStep: number | null;
+  onJumpToStep: (step: number) => void;
   onAddEdit: (edit: ForkEdit) => void;
 }): ReactNode {
   const [targetZone, setTargetZone] = useState<"add_battlefield" | "add_hand_card">(
@@ -92,8 +73,30 @@ function ForkCardPicker(props: {
   );
   const [targetSide, setTargetSide] = useState<"hero" | "opp">("hero");
   const [cardFilter, setCardFilter] = useState("");
+  const isPriority = props.board.action_space_kind === "PRIORITY";
+
+  if (!isPriority) {
+    return (
+      <div className="rounded-md border border-[var(--border)] bg-[var(--bg)] p-2 flex flex-col gap-1.5 text-[10.5px] text-[var(--text-2)]">
+        <span>
+          Life &amp; card injections apply on <strong>Priority</strong> steps (current:{" "}
+          <span className="tabular">{props.board.action_space_kind}</span>). Action branching works
+          right here—click any legal action below.
+        </span>
+        {props.nearestPriorityStep === null ? null : (
+          <Button
+            size="sm"
+            onClick={(): void => props.onJumpToStep(props.nearestPriorityStep ?? 0)}
+          >
+            Jump to Priority step #{props.nearestPriorityStep}
+          </Button>
+        )}
+      </div>
+    );
+  }
+
   const seatNum = resolveTargetSeat(targetSide, props.heroSeat);
-  const candidates = deckForkCandidates({
+  const deckCards = deckCardPoolForFork({
     board: props.board,
     seatSide: targetSide,
     zone: targetZone,
@@ -102,7 +105,7 @@ function ForkCardPicker(props: {
   const oppHidden = targetSide === "opp" && props.board.opp.library_hidden;
 
   return (
-    <>
+    <div className="flex flex-col gap-1.5">
       <div className="flex items-center justify-between gap-1">
         <div className="inline-flex rounded border border-[var(--border)] bg-[var(--bg)] p-0.5 text-[9.5px] font-semibold">
           {SIDE_OPTIONS.map((opt) => (
@@ -138,28 +141,27 @@ function ForkCardPicker(props: {
         </div>
       </div>
 
-      <input
-        type="search"
-        value={cardFilter}
-        onChange={(e): void => setCardFilter(e.target.value)}
-        placeholder={
-          targetZone === "add_battlefield"
-            ? "Filter permanents in deck/GY…"
-            : "Filter cards in deck/GY…"
-        }
-        aria-label="Filter fork cards"
-        className="h-6 rounded border border-[var(--border)] bg-[var(--bg)] px-2 text-[10.5px]"
-      />
+      <div className="relative">
+        <Search className="w-3 h-3 absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-3)]" />
+        <input
+          type="search"
+          value={cardFilter}
+          onChange={(e): void => setCardFilter(e.target.value)}
+          placeholder="Search player's deck cards…"
+          aria-label="Filter fork cards"
+          className="w-full h-6 rounded border border-[var(--border)] bg-[var(--bg)] pl-6 pr-2 text-[10.5px]"
+        />
+      </div>
 
-      {candidates.length === 0 ? (
+      {deckCards.length === 0 ? (
         <div className="text-[10px] text-[var(--text-3)] italic">
           {oppHidden
-            ? "Switch to Omniscient POV to pull cards from Opponent's library."
-            : "No matching cards available in library or graveyard."}
+            ? "Switch to Omniscient to inspect and inject cards from Opponent's library."
+            : "No matching cards in this player's library or graveyard."}
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-1">
-          {candidates.map((cardName) => (
+          {deckCards.map((cardName) => (
             <button
               key={cardName}
               type="button"
@@ -179,66 +181,119 @@ function ForkCardPicker(props: {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function formatForkSummary(editCount: number, branchCount: number): string {
+  const parts: string[] = [];
+  if (editCount > 0) parts.push(`${editCount} edit${editCount === 1 ? "" : "s"}`);
+  if (branchCount > 0) parts.push(`+${branchCount} branched`);
+  return parts.length > 0 ? parts.join(" · ") : "0 edits";
+}
+
+function ForkShiftSummary(props: {
+  editCount: number;
+  branchCount: number;
+  evaluation: EvaluationPair;
+  baseEvaluation: EvaluationPair;
+  showCompareDelta: boolean;
+}): ReactNode {
+  const baseA = Math.round(props.baseEvaluation.primary.wdl.win * 100);
+  const curA = Math.round(props.evaluation.primary.wdl.win * 100);
+  const deltaA = curA - baseA;
+  const baseB = Math.round(props.baseEvaluation.compare.wdl.win * 100);
+  const curB = Math.round(props.evaluation.compare.wdl.win * 100);
+  const deltaB = curB - baseB;
+  return (
+    <div className="rounded-md border border-[var(--fork)]/30 bg-[var(--surface)] px-2.5 py-1.5 flex flex-col gap-0.5">
+      <div className="flex items-center justify-between gap-2 text-[11px]">
+        <span className="text-[var(--text-2)] truncate">
+          {formatForkSummary(props.editCount, props.branchCount)}
+        </span>
+        <span className="tabular font-bold text-[var(--fork)] shrink-0">
+          A: {baseA}% → {curA}% ({deltaA >= 0 ? `+${deltaA}` : deltaA}%)
+        </span>
+      </div>
+      {props.showCompareDelta ? (
+        <div className="flex items-center justify-end text-[10px] tabular text-[var(--text-2)]">
+          B: {baseB}% → {curB}% ({deltaB >= 0 ? `+${deltaB}` : deltaB}%)
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ForkChipsList(props: {
+  heroSeat: number;
+  edits: ForkEdit[];
+  branchEvents: BranchStepEvent[];
+  onRemoveEdit: (idx: number) => void;
+}): ReactNode {
+  return (
+    <>
+      {props.branchEvents.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {props.branchEvents.map((ev) => (
+            <span
+              key={ev.branch_index}
+              className="inline-flex items-center gap-1 rounded bg-[var(--surface)] border border-[var(--fork)]/35 px-1.5 py-0.5 text-[10px]"
+            >
+              <span className="tabular text-[var(--fork)] font-bold">+{ev.branch_index + 1}</span>
+              <span className="max-w-[150px] truncate">{ev.label}</span>
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {props.edits.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {props.edits.map((edit, idx) => {
+            const label = describeForkEdit(edit, props.heroSeat);
+            return (
+              <span
+                key={`${edit.op}-${edit.seat}-${edit.card ?? edit.value ?? "x"}-${String(idx)}`}
+                className="inline-flex items-center gap-1 rounded bg-[var(--surface)] border border-[var(--border)] px-1.5 py-0.5 text-[10px] font-medium"
+              >
+                <span className="max-w-[140px] truncate">{label}</span>
+                <button
+                  type="button"
+                  aria-label={`Undo ${label}`}
+                  onClick={(): void => props.onRemoveEdit(idx)}
+                  className="text-[var(--text-3)] hover:text-[var(--loss)] cursor-pointer"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            );
+          })}
+        </div>
+      ) : null}
     </>
   );
 }
 
-function ForkControlsSection(props: {
+function canStepModelTop(args: {
+  branchDone: boolean;
   board: BoardState;
-  forkBusy: boolean;
-  edits: ForkEdit[];
-  baseWinPct: number;
-  winPct: number;
-  warnings: string[];
-  error: string | null;
-  onAddEdit: (edit: ForkEdit) => void;
-  onRemoveEdit: (idx: number) => void;
-}): ReactNode {
-  const isPriority = props.board.action_space_kind === "PRIORITY";
-  const heroSeat = props.board.hero_seat ?? 0;
-  const deltaWin = props.winPct - props.baseWinPct;
-  const deltaText = deltaWin >= 0 ? `+${deltaWin}` : String(deltaWin);
-
+  evaluation: EvaluationPair;
+}): boolean {
   return (
-    <div className="p-3 border-b border-[var(--border)] flex flex-col gap-2">
-      <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider">
-        <span className="text-[var(--text-3)]">Counterfactual What-If</span>
-        <span className="tabular text-[var(--fork)]">
-          {props.forkBusy ? "Evaluating…" : "Live Fork"}
-        </span>
-      </div>
+    !args.branchDone &&
+    !args.board.actions_hidden &&
+    args.board.legal_actions.length > 0 &&
+    args.evaluation.primary.probs.length > 0
+  );
+}
 
-      {isPriority ? (
-        <>
-          <div className="rounded-md border border-[var(--fork)]/30 bg-[var(--fork-soft)] px-2.5 py-1.5 flex items-center justify-between">
-            <span className="text-[10.5px] text-[var(--text-2)]">
-              {props.edits.length} edit{props.edits.length === 1 ? "" : "s"}
-            </span>
-            <span className="tabular text-xs font-bold text-[var(--fork)]">
-              Hero {props.baseWinPct}% → {props.winPct}% ({deltaText}%)
-            </span>
-          </div>
-          <ForkEditChips
-            edits={props.edits}
-            heroSeat={heroSeat}
-            onRemoveEdit={props.onRemoveEdit}
-          />
-          <ForkCardPicker board={props.board} heroSeat={heroSeat} onAddEdit={props.onAddEdit} />
-        </>
-      ) : (
-        <div className="rounded-md border border-[var(--warn)]/40 bg-[var(--warn-soft)] px-2.5 py-2 text-[10.5px] text-[var(--warn)] leading-snug">
-          Fork edits apply only on <strong>PRIORITY</strong> steps (current:{" "}
-          <span className="tabular">{props.board.action_space_kind}</span>). Step to a Priority step
-          to test what-if scenarios.
-        </div>
-      )}
-
+function ForkAlerts(props: { error: string | null; warnings: string[] }): ReactNode {
+  return (
+    <>
       {props.error ? (
         <div className="rounded bg-[var(--loss-soft)] text-[var(--loss)] px-2 py-1 text-[10px]">
           {props.error}
         </div>
       ) : null}
-
       {props.warnings.map((warn) => (
         <div
           key={warn}
@@ -247,14 +302,193 @@ function ForkControlsSection(props: {
           {warn}
         </div>
       ))}
+    </>
+  );
+}
+
+function ForkControlsSection(props: {
+  board: BoardState;
+  evaluation: EvaluationPair;
+  baseEvaluation: EvaluationPair;
+  showCompareDelta: boolean;
+  forkBusy: boolean;
+  edits: ForkEdit[];
+  branchEvents: BranchStepEvent[];
+  branchDone: boolean;
+  nearestPriorityStep: number | null;
+  warnings: string[];
+  error: string | null;
+  onAddEdit: (edit: ForkEdit) => void;
+  onRemoveEdit: (idx: number) => void;
+  onStepModelTopMove: () => void;
+  onPopBranchAction: () => void;
+  onResetFork: () => void;
+  onJumpToStep: (step: number) => void;
+}): ReactNode {
+  const [boardEditorOpen, setBoardEditorOpen] = useState(true);
+  const heroSeat = props.board.hero_seat ?? 0;
+  const hasMutations = props.edits.length > 0 || props.branchEvents.length > 0;
+  const canStepTop = canStepModelTop({
+    branchDone: props.branchDone,
+    board: props.board,
+    evaluation: props.evaluation,
+  });
+
+  return (
+    <div className="p-3 border-b border-[var(--border)] flex flex-col gap-2 bg-[var(--fork-soft)]/35">
+      <div className="flex items-center justify-between gap-2 text-[10px] font-bold uppercase tracking-wider">
+        <span className="inline-flex items-center gap-1 text-[var(--fork)]">
+          <GitBranch className="w-3 h-3" />
+          What-If &amp; Branch
+        </span>
+        <div className="flex items-center gap-1.5">
+          {props.forkBusy ? <span className="tabular text-[var(--fork)]">Evaluating…</span> : null}
+          {hasMutations ? (
+            <button
+              type="button"
+              onClick={props.onResetFork}
+              className="inline-flex items-center gap-0.5 text-[10px] font-semibold normal-case text-[var(--text-2)] hover:text-[var(--loss)] cursor-pointer"
+            >
+              <RotateCcw className="w-2.5 h-2.5" />
+              Reset
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <ForkShiftSummary
+        editCount={props.edits.length}
+        branchCount={props.branchEvents.length}
+        evaluation={props.evaluation}
+        baseEvaluation={props.baseEvaluation}
+        showCompareDelta={props.showCompareDelta}
+      />
+
+      <div className="flex items-center gap-1.5">
+        <Button
+          size="sm"
+          variant="primary"
+          className="flex-1"
+          disabled={!canStepTop || props.forkBusy}
+          onClick={props.onStepModelTopMove}
+        >
+          <FastForward className="w-3 h-3" />
+          Play Model Top Move
+        </Button>
+        {props.branchEvents.length > 0 ? (
+          <Button size="sm" onClick={props.onPopBranchAction} title="Undo last branched action">
+            <Undo2 className="w-3 h-3" />
+            Undo
+          </Button>
+        ) : null}
+      </div>
+
+      <ForkChipsList
+        heroSeat={heroSeat}
+        edits={props.edits}
+        branchEvents={props.branchEvents}
+        onRemoveEdit={props.onRemoveEdit}
+      />
+
+      <button
+        type="button"
+        onClick={(): void => setBoardEditorOpen((v) => !v)}
+        className="text-left text-[10px] font-semibold uppercase tracking-wider text-[var(--text-3)] hover:text-[var(--text)] cursor-pointer"
+      >
+        {boardEditorOpen ? "▾ Add Cards / Edit Board" : "▸ Add Cards / Edit Board"}
+      </button>
+
+      {boardEditorOpen ? (
+        <ForkBoardEditor
+          board={props.board}
+          heroSeat={heroSeat}
+          nearestPriorityStep={props.nearestPriorityStep}
+          onJumpToStep={props.onJumpToStep}
+          onAddEdit={props.onAddEdit}
+        />
+      ) : null}
+
+      <ForkAlerts error={props.error} warnings={props.warnings} />
     </div>
+  );
+}
+
+function ActionDeltaTag(props: { delta: number }): ReactNode {
+  if (props.delta === 0) return null;
+  const cls =
+    props.delta > 0
+      ? "text-[var(--win)] font-bold text-[10px]"
+      : "text-[var(--loss)] font-bold text-[10px]";
+  return <span className={cls}>({props.delta > 0 ? `+${props.delta}` : props.delta}%)</span>;
+}
+
+function LegalActionRowButton(props: {
+  rankIdx: number;
+  act: BoardState["legal_actions"][number];
+  pA: number;
+  delta: number;
+  isChosen: boolean;
+  forkMode: boolean;
+  forkBusy: boolean;
+  onBranchAction: (actionIdx: number) => void;
+  onHoverFocus: (ids: number[]) => void;
+}): ReactNode {
+  const { act, rankIdx, pA, delta, isChosen, forkMode, forkBusy } = props;
+  const actionAria = forkMode
+    ? `Branch action ${rankIdx + 1}: ${act.label}`
+    : `Action ${rankIdx + 1}: ${act.label}`;
+  return (
+    <button
+      type="button"
+      aria-label={actionAria}
+      disabled={forkMode && forkBusy}
+      title={forkMode ? `Branch: play "${act.label}"` : act.label}
+      onMouseEnter={(): void => props.onHoverFocus(act.focus_ids)}
+      onMouseLeave={(): void => props.onHoverFocus([])}
+      onClick={(): void => {
+        if (forkMode && !forkBusy) props.onBranchAction(act.index);
+      }}
+      className={`w-full text-left rounded-md px-2 py-1.5 border transition-colors disabled:opacity-50 ${
+        forkMode ? "cursor-pointer hover:border-[var(--fork)]" : "cursor-default"
+      } ${
+        rankIdx === 0
+          ? "bg-[var(--win-soft)] border-[var(--win)]/25"
+          : "border-transparent hover:bg-[var(--surface-2)] hover:border-[var(--border)]"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-2 text-[11px] mb-1">
+        <span className="font-semibold leading-snug break-words line-clamp-2 min-w-0">
+          {rankIdx + 1}. {act.label}
+        </span>
+        <span className="tabular shrink-0 flex items-center gap-1 pt-0.5">
+          {isChosen ? (
+            <span title="Action taken in recorded game" className="text-[var(--accent)]">
+              ★
+            </span>
+          ) : null}
+          <strong>{pA}%</strong>
+          <ActionDeltaTag delta={delta} />
+        </span>
+      </div>
+      <div className="h-[5px] rounded bg-[var(--surface-2)] overflow-hidden">
+        <div
+          className="h-full rounded transition-all"
+          style={{
+            width: `${Math.max(2, pA)}%`,
+            background: rankIdx === 0 ? "var(--win-fill)" : "var(--accent)",
+          }}
+        />
+      </div>
+    </button>
   );
 }
 
 function LegalActionsSection(props: {
   board: BoardState;
   evaluation: EvaluationPair;
-  compact: boolean;
+  forkMode: boolean;
+  forkBusy: boolean;
+  onBranchAction: (actionIdx: number) => void;
   onHoverFocus: (ids: number[]) => void;
 }): ReactNode {
   const [showAll, setShowAll] = useState(false);
@@ -269,11 +503,8 @@ function LegalActionsSection(props: {
         <div className="rounded-md border border-dashed border-[var(--border-strong)] bg-[var(--surface-2)] p-2.5 text-[11px] text-[var(--text-2)] flex items-start gap-2">
           <EyeOff className="w-4 h-4 shrink-0 mt-0.5 text-[var(--text-3)]" />
           <span>
-            {props.board.action_space_kind === "PRIORITY"
-              ? "Opponent has priority."
-              : `Opponent is deciding (${props.board.action_space_kind}).`}{" "}
-            Legal actions are hidden in <strong>Hero POV</strong> to avoid leaking Opponent&apos;s
-            hand. Switch to <strong>Omniscient</strong> to inspect Opponent&apos;s policy.
+            Opponent actions are hidden in <strong>Hero POV</strong>. Switch to{" "}
+            <strong>Omniscient</strong> to inspect or branch Opponent&apos;s play.
           </span>
         </div>
       </div>
@@ -290,7 +521,7 @@ function LegalActionsSection(props: {
       pB: Math.round((probsB[idx] ?? 0) * 100),
     }))
     .toSorted((a, b) => b.pA - a.pA);
-  const maxShow = props.compact ? 4 : 5;
+  const maxShow = props.forkMode ? 5 : 6;
   const visible = showAll ? ranked : ranked.slice(0, maxShow);
   const whoLabel = props.board.actor_is_hero === false ? "OPP" : "HERO";
 
@@ -298,63 +529,25 @@ function LegalActionsSection(props: {
     <div className="p-3 border-b border-[var(--border)]">
       <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[var(--text-3)] mb-2">
         <span>
-          {whoLabel} · {props.board.action_space_kind} ({showAll ? "ALL" : `TOP ${visible.length}`}{" "}
-          OF {actions.length})
+          {whoLabel} · {props.board.action_space_kind} ({actions.length})
         </span>
-        <span>Δ vs B</span>
+        <span>{props.forkMode ? "Click to play" : "Δ vs B"}</span>
       </div>
       <div className="flex flex-col gap-1.5">
-        {visible.map((row, idx) => {
-          const delta = row.pA - row.pB;
-          const isChosen = props.board.chosen_action === row.act.index;
-          return (
-            <div
-              key={row.act.index}
-              title={row.act.label}
-              onMouseEnter={(): void => props.onHoverFocus(row.act.focus_ids)}
-              onMouseLeave={(): void => props.onHoverFocus([])}
-              className={`rounded-md px-2 py-1.5 border cursor-pointer transition-colors ${
-                idx === 0
-                  ? "bg-[var(--win-soft)] border-[var(--win)]/25"
-                  : "border-transparent hover:bg-[var(--surface-2)] hover:border-[var(--border)]"
-              }`}
-            >
-              <div className="flex items-start justify-between gap-2 text-[11px] mb-1">
-                <span className="font-semibold leading-snug break-words line-clamp-2 min-w-0">
-                  {idx + 1}. {row.act.label}
-                </span>
-                <span className="tabular shrink-0 flex items-center gap-1 pt-0.5">
-                  {isChosen ? (
-                    <span title="Action taken in recorded game" className="text-[var(--accent)]">
-                      ★
-                    </span>
-                  ) : null}
-                  <strong>{row.pA}%</strong>
-                  {delta === 0 ? null : (
-                    <span
-                      className={
-                        delta > 0
-                          ? "text-[var(--win)] font-bold text-[10px]"
-                          : "text-[var(--loss)] font-bold text-[10px]"
-                      }
-                    >
-                      ({delta > 0 ? `+${delta}` : delta}%)
-                    </span>
-                  )}
-                </span>
-              </div>
-              <div className="h-[5px] rounded bg-[var(--surface-2)] overflow-hidden">
-                <div
-                  className="h-full rounded transition-all"
-                  style={{
-                    width: `${Math.max(2, row.pA)}%`,
-                    background: idx === 0 ? "var(--win-fill)" : "var(--accent)",
-                  }}
-                />
-              </div>
-            </div>
-          );
-        })}
+        {visible.map((row, idx) => (
+          <LegalActionRowButton
+            key={row.act.index}
+            rankIdx={idx}
+            act={row.act}
+            pA={row.pA}
+            delta={row.pA - row.pB}
+            isChosen={props.board.chosen_action === row.act.index}
+            forkMode={props.forkMode}
+            forkBusy={props.forkBusy}
+            onBranchAction={props.onBranchAction}
+            onHoverFocus={props.onHoverFocus}
+          />
+        ))}
       </div>
       {actions.length > maxShow ? (
         <button
@@ -362,7 +555,7 @@ function LegalActionsSection(props: {
           onClick={(): void => setShowAll((prev) => !prev)}
           className="mt-2 w-full rounded-md border border-dashed border-[var(--border-strong)] py-1 text-[10.5px] font-medium text-[var(--text-2)] hover:text-[var(--text)] hover:border-[var(--accent)] cursor-pointer"
         >
-          {showAll ? `Show top ${maxShow} actions ▴` : `Show all ${actions.length} legal actions ▾`}
+          {showAll ? `Show top ${maxShow} ▴` : `Show all ${actions.length} actions ▾`}
         </button>
       ) : null}
     </div>
@@ -384,7 +577,7 @@ function WdlAndWatchlistFooter(props: {
   return (
     <div className="p-3 flex flex-col gap-2">
       <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[var(--text-3)]">
-        <span>Hero Value Estimate (WDL)</span>
+        <span>Hero Win Estimate</span>
         <span className="tabular">{props.checkpointName}</span>
       </div>
       <div className="h-[18px] rounded-[5px] overflow-hidden flex text-[10px] font-bold text-white tabular">
@@ -392,19 +585,22 @@ function WdlAndWatchlistFooter(props: {
           className="bg-[var(--win-fill)] flex items-center justify-center"
           style={{ width: `${props.winPct}%` }}
         >
-          {props.winPct >= 16 ? `${props.winPct}%` : ""}
+          {props.winPct >= 22 ? `${props.winPct}% Win` : ""}
         </div>
-        <div className="bg-zinc-600" style={{ width: `${props.drawPct}%` }} />
+        {props.drawPct > 0 ? (
+          <div className="bg-zinc-600" style={{ width: `${props.drawPct}%` }} />
+        ) : null}
         <div
           className="bg-[var(--loss-fill)] flex items-center justify-center"
           style={{ width: `${props.lossPct}%` }}
         >
-          {props.lossPct >= 14 ? `${props.lossPct}%` : ""}
+          {props.lossPct >= 22 ? `${props.lossPct}% Loss` : ""}
         </div>
       </div>
       <div className="flex items-center justify-between tabular text-[10.5px] text-[var(--text-2)]">
         <span>
-          Hero {props.winPct}% Win · {props.drawPct}% Draw · {props.lossPct}% Loss
+          Hero {props.winPct}% Win
+          {props.drawPct > 0 ? ` · ${props.drawPct}% Draw` : ""} · {props.lossPct}% Loss
         </span>
         {props.showDelta ? (
           <span
@@ -418,25 +614,27 @@ function WdlAndWatchlistFooter(props: {
           </span>
         ) : null}
       </div>
-      <input
-        type="text"
-        value={pinNote}
-        onChange={(e): void => setPinNote(e.target.value)}
-        placeholder="Optional Watchlist note (e.g. missed lethal block?)"
-        aria-label="Watchlist note"
-        className="h-7 rounded-md border border-[var(--border)] bg-[var(--bg)] px-2 text-[11px]"
-      />
-      <Button
-        variant={props.pinned ? "primary" : "default"}
-        className="w-full"
-        onClick={(): void => {
-          props.onPinPosition(pinNote);
-          setPinNote("");
-        }}
-      >
-        <Bookmark className="w-3.5 h-3.5" />
-        {props.pinned ? "Pinned to Watchlist" : "Pin position to Watchlist"}
-      </Button>
+      <div className="flex items-center gap-1.5">
+        <input
+          type="text"
+          value={pinNote}
+          onChange={(e): void => setPinNote(e.target.value)}
+          placeholder="Watchlist note…"
+          aria-label="Watchlist note"
+          className="flex-1 min-w-0 h-7 rounded-md border border-[var(--border)] bg-[var(--bg)] px-2 text-[11px]"
+        />
+        <Button
+          variant={props.pinned ? "primary" : "default"}
+          size="md"
+          onClick={(): void => {
+            props.onPinPosition(pinNote);
+            setPinNote("");
+          }}
+        >
+          <Bookmark className="w-3.5 h-3.5" />
+          {props.pinned ? "Pinned" : "Pin"}
+        </Button>
+      </div>
     </div>
   );
 }
@@ -453,10 +651,18 @@ export function TabletopDock(props: {
   forkMode: boolean;
   forkBusy: boolean;
   forkEdits: ForkEdit[];
+  branchEvents: BranchStepEvent[];
+  branchDone: boolean;
+  nearestPriorityStep: number | null;
   forkWarnings: string[];
   forkError: string | null;
   onAddForkEdit: (edit: ForkEdit) => void;
   onRemoveForkEdit: (idx: number) => void;
+  onBranchAction: (actionIdx: number) => void;
+  onStepModelTopMove: () => void;
+  onPopBranchAction: () => void;
+  onResetFork: () => void;
+  onJumpToStep: (step: number) => void;
   onHoverActionFocus: (ids: number[]) => void;
   onPinPosition: (note: string) => void;
   pinned: boolean;
@@ -465,24 +671,23 @@ export function TabletopDock(props: {
   const winPct = Math.round(wdl.win * 100);
   const drawPct = Math.round(wdl.draw * 100);
   const lossPct = Math.max(0, 100 - winPct - drawPct);
-  const baseWinPct = Math.round(props.baseEvaluation.primary.wdl.win * 100);
   const compareWinPct = Math.round(props.evaluation.compare.wdl.win * 100);
   const wdlDelta = winPct - compareWinPct;
+  const showCompare = props.ckptB !== "same";
 
   return (
     <aside
       aria-label="Policy and counterfactual inspector"
-      className="w-full lg:w-[328px] shrink-0 border-t lg:border-t-0 lg:border-l border-[var(--border)] bg-[var(--surface)] flex flex-col min-h-0 lg:overflow-y-auto"
+      className="w-full lg:w-[330px] shrink-0 border-t lg:border-t-0 lg:border-l border-[var(--border)] bg-[var(--surface)] flex flex-col min-h-0 lg:overflow-y-auto"
     >
       <div className="p-3 border-b border-[var(--border)]">
         <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[var(--text-3)] mb-1.5">
-          <span>Checkpoint Diff</span>
+          <span>Checkpoint</span>
           {props.board.actions_hidden ? (
             <span className="normal-case font-medium text-[var(--text-3)]">Hidden in Hero POV</span>
           ) : (
             <span className="tabular" title="Total Variation and KL(A || B) in nats">
-              TV {props.evaluation.diff.tv.toFixed(2)} · KL(A‖B){" "}
-              {props.evaluation.diff.kl.toFixed(2)}
+              TV {props.evaluation.diff.tv.toFixed(2)} · KL {props.evaluation.diff.kl.toFixed(2)}
             </span>
           )}
         </div>
@@ -529,21 +734,31 @@ export function TabletopDock(props: {
       {props.forkMode ? (
         <ForkControlsSection
           board={props.board}
+          evaluation={props.evaluation}
+          baseEvaluation={props.baseEvaluation}
+          showCompareDelta={showCompare}
           forkBusy={props.forkBusy}
           edits={props.forkEdits}
-          baseWinPct={baseWinPct}
-          winPct={winPct}
+          branchEvents={props.branchEvents}
+          branchDone={props.branchDone}
+          nearestPriorityStep={props.nearestPriorityStep}
           warnings={props.forkWarnings}
           error={props.forkError}
           onAddEdit={props.onAddForkEdit}
           onRemoveEdit={props.onRemoveForkEdit}
+          onStepModelTopMove={props.onStepModelTopMove}
+          onPopBranchAction={props.onPopBranchAction}
+          onResetFork={props.onResetFork}
+          onJumpToStep={props.onJumpToStep}
         />
       ) : null}
 
       <LegalActionsSection
         board={props.board}
         evaluation={props.evaluation}
-        compact={props.forkMode}
+        forkMode={props.forkMode}
+        forkBusy={props.forkBusy}
+        onBranchAction={props.onBranchAction}
         onHoverFocus={props.onHoverActionFocus}
       />
 
@@ -553,7 +768,7 @@ export function TabletopDock(props: {
         drawPct={drawPct}
         lossPct={lossPct}
         wdlDelta={wdlDelta}
-        showDelta={props.ckptB !== "same" && wdlDelta !== 0}
+        showDelta={showCompare && wdlDelta !== 0}
         pinned={props.pinned}
         onPinPosition={props.onPinPosition}
       />

@@ -107,3 +107,11 @@ body,
   background: radial-gradient(circle at 50% 45%, #5b3a24 0%, #2a1a12 65%, #160d09 100%);
   border: 2px solid #8a643c;
 }
+
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

@@ -1,6 +1,6 @@
-/** Tabletop MTG zone composites: grouped lands, combat/damage permanents, hand fan, flank tiles, sheet, stack, zoom & timeline. */
+/** Tabletop MTG zone composites: centered lands & creatures, peek-up Arena hands, overlay stack, zoom & timeline. */
 
-import { ChevronLeft, ChevronRight, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, History, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCardMeta } from "@/hooks/useStudioData";
 import { cardImageUrl } from "@/lib/api";
@@ -9,6 +9,7 @@ import type {
   PermanentState,
   PlayerState,
   PovMode,
+  RecentEvent,
   StackItem,
   TimelinePoint,
 } from "@/lib/types";
@@ -48,10 +49,12 @@ export function LandPilesRow(props: {
   onHover: (info: HoverCardInfo | null) => void;
 }): ReactNode {
   const seen = new Map<string, number>();
-  const dense = Boolean(props.compact) || props.piles.length >= 5;
-  const sizeClass = dense ? "w-[40px] h-[54px]" : "w-[48px] h-[64px]";
+  const dense = Boolean(props.compact) || props.piles.length >= 6;
+  const sizeClass = dense ? "w-[42px] h-[58px]" : "w-[50px] h-[68px]";
   return (
-    <div className={`flex items-center flex-nowrap ${dense ? "gap-1.5" : "gap-2.5"}`}>
+    <div
+      className={`flex items-center justify-center flex-nowrap ${dense ? "gap-1.5" : "gap-2.5"}`}
+    >
       {props.piles.map((pile) => {
         const baseKey = `${pile.name}-${pile.tapped ? "t" : "u"}-${pile.id ?? "basic"}`;
         const occ = (seen.get(baseKey) ?? 0) + 1;
@@ -95,15 +98,13 @@ export function LandPilesRow(props: {
   );
 }
 
-function cardWidthForCount(count: number, compact: boolean, narrow: boolean): number {
+function cardWidthForCount(count: number, compact: boolean): number {
   if (compact) return 48;
-  const shift = narrow ? 1 : 0;
-  const eff = count + shift;
-  if (eff >= 9) return 52;
-  if (eff >= 7) return 60;
-  if (eff >= 5) return 68;
-  if (eff >= 3) return 76;
-  return 86;
+  if (count >= 9) return 56;
+  if (count >= 7) return 64;
+  if (count >= 5) return 74;
+  if (count >= 3) return 82;
+  return 90;
 }
 
 function ringClassForPerm(
@@ -128,8 +129,8 @@ function topLeftBadge(perm: PermanentState): { label: string; cls: string } | nu
   return null;
 }
 
-function PermTopBadges(props: { perm: PermanentState }): ReactNode {
-  const { perm } = props;
+function PermCardBadges(props: { perm: PermanentState; pt: string | undefined }): ReactNode {
+  const { perm, pt } = props;
   const topLeft = topLeftBadge(perm);
   return (
     <>
@@ -145,15 +146,6 @@ function PermTopBadges(props: { perm: PermanentState }): ReactNode {
           +{perm.plus1_counters}/+{perm.plus1_counters}
         </span>
       ) : null}
-    </>
-  );
-}
-
-function PermCardBadges(props: { perm: PermanentState; pt: string | undefined }): ReactNode {
-  const { perm, pt } = props;
-  return (
-    <>
-      <PermTopBadges perm={perm} />
       {perm.damage > 0 ? (
         <span className="tabular absolute bottom-0.5 left-0.5 rounded bg-[var(--loss-fill)] px-1 text-[8px] font-bold text-white shadow">
           -{perm.damage}
@@ -162,11 +154,6 @@ function PermCardBadges(props: { perm: PermanentState; pt: string | undefined })
       {perm.damage === 0 && perm.sick ? (
         <span className="absolute bottom-0.5 left-1 rounded bg-amber-700/90 px-1 text-[7.5px] font-bold text-white">
           SICK
-        </span>
-      ) : null}
-      {perm.is_token && !pt ? (
-        <span className="absolute bottom-0.5 inset-x-0.5 rounded bg-black/88 px-1 text-center text-[8.5px] font-bold text-white truncate">
-          {perm.name}
         </span>
       ) : null}
       {pt ? (
@@ -185,22 +172,17 @@ function PermCardBadges(props: { perm: PermanentState; pt: string | undefined })
 export function PermanentsRow(props: {
   permanents: PermanentState[];
   compact?: boolean;
-  narrow?: boolean;
   highlightIds: ReadonlySet<number>;
   highlightTone: "target" | "source";
   permNames?: ReadonlyMap<number, string>;
   onHover: (info: HoverCardInfo | null) => void;
   onPinCard?: (info: HoverCardInfo) => void;
 }): ReactNode {
-  const width = cardWidthForCount(
-    props.permanents.length,
-    Boolean(props.compact),
-    Boolean(props.narrow),
-  );
+  const width = cardWidthForCount(props.permanents.length, Boolean(props.compact));
   const height = Math.round(width * 1.38);
 
   return (
-    <div className="flex items-center gap-1.5 flex-nowrap min-w-0 overflow-x-auto py-1">
+    <div className="flex items-center justify-center gap-2 flex-nowrap min-w-0 overflow-x-auto no-scrollbar py-1">
       {props.permanents.map((perm) => {
         const pt = perm.is_creature ? `${perm.power}/${perm.toughness}` : undefined;
         const ringClass = ringClassForPerm(
@@ -233,8 +215,8 @@ export function PermanentsRow(props: {
             onMouseEnter={(): void => props.onHover(info)}
             onMouseLeave={(): void => props.onHover(null)}
             onClick={(): void => props.onPinCard?.(info)}
-            className={`relative p-0 shrink-0 rounded-[6px] overflow-hidden border-[1.5px] bg-[#18181b] shadow-[var(--shadow-sm)] cursor-pointer transition-all ${ringClass} ${
-              perm.tapped ? "card-tapped mx-0.5" : "hover:-translate-y-1 hover:z-20"
+            className={`relative p-0 shrink-0 rounded-[7px] overflow-hidden border-[1.5px] bg-[#18181b] shadow-[var(--shadow-sm)] cursor-pointer transition-all ${ringClass} ${
+              perm.tapped ? "card-tapped mx-1" : "hover:-translate-y-1.5 hover:z-20"
             }`}
           >
             <img
@@ -250,13 +232,15 @@ export function PermanentsRow(props: {
   );
 }
 
-function handOverlapPx(count: number): number {
-  if (count >= 9) return -16;
-  if (count >= 6) return -11;
-  return -5;
+function handOverlapPx(count: number, compact: boolean): number {
+  if (compact) return count >= 7 ? -16 : -10;
+  if (count >= 8) return -26;
+  if (count >= 6) return -18;
+  return -10;
 }
 
 export function HandFanView(props: {
+  side: "hero" | "opp";
   cards: string[];
   hiddenCount: number;
   hidden: boolean;
@@ -265,29 +249,43 @@ export function HandFanView(props: {
 }): ReactNode {
   const count = props.hidden ? props.hiddenCount : props.cards.length;
   if (count === 0) {
-    return <div className="text-[11px] italic text-[var(--text-3)]">Hand empty (0)</div>;
+    return (
+      <div className="h-[28px] flex items-center justify-center text-[10.5px] italic text-[var(--text-3)]">
+        No cards in hand
+      </div>
+    );
   }
-  const overlap = handOverlapPx(count);
 
   if (props.hidden) {
+    const overlap = handOverlapPx(count, true);
     const slots = Array.from({ length: count }, (_, slot) => `hidden-${slot + 1}`);
     return (
-      <div className="flex items-center justify-end h-[52px]">
+      <div className="flex items-start justify-center h-[36px] overflow-visible">
         {slots.map((slotKey, idx) => (
           <div
             key={slotKey}
             style={idx > 0 ? { marginLeft: overlap } : undefined}
             title="Hidden in Hero POV — switch to Omniscient to reveal"
-            className="card-back w-[38px] h-[52px] rounded shrink-0 shadow-[var(--shadow-sm)]"
+            className="card-back w-[44px] h-[60px] -translate-y-[24px] rounded-[5px] shrink-0 shadow-[var(--shadow-sm)]"
           />
         ))}
       </div>
     );
   }
 
+  const isHero = props.side === "hero";
+  const overlap = handOverlapPx(count, !isHero);
   const keyed = keyByOccurrence(props.cards);
+  const cardClasses = isHero
+    ? "w-[82px] h-[114px] translate-y-[34px] hover:-translate-y-4 hover:scale-110"
+    : "w-[70px] h-[98px] -translate-y-[32px] hover:translate-y-3 hover:scale-110";
+
   return (
-    <div className="flex items-center justify-end h-[52px]">
+    <div
+      className={`flex justify-center overflow-visible ${
+        isHero ? "items-end h-[74px]" : "items-start h-[58px]"
+      }`}
+    >
       {keyed.map((entry) => (
         <button
           key={entry.key}
@@ -297,12 +295,12 @@ export function HandFanView(props: {
           onMouseEnter={(): void => props.onHover({ name: entry.name })}
           onMouseLeave={(): void => props.onHover(null)}
           onClick={(): void => props.onPinCard?.({ name: entry.name })}
-          className="relative p-0 w-[38px] h-[52px] rounded overflow-hidden border border-black/40 bg-[#1c1917] shrink-0 shadow-[var(--shadow-sm)] cursor-pointer transition-transform hover:-translate-y-2.5 hover:scale-115 hover:z-30"
+          className={`relative p-0 ${cardClasses} rounded-[7px] overflow-hidden border border-black/45 bg-[#1c1917] shrink-0 shadow-[var(--shadow-md)] cursor-pointer transition-all duration-150 hover:z-40`}
         >
           <img
             src={cardImageUrl(entry.name)}
             alt={entry.name}
-            className="w-full h-full object-cover block"
+            className="w-full h-full object-cover object-top block"
           />
         </button>
       ))}
@@ -337,26 +335,26 @@ export function ZoneFlankView(props: {
   ];
 
   return (
-    <div className="flex flex-col justify-center gap-1.5 w-[74px] shrink-0">
+    <div className="flex flex-col justify-center gap-1.5 w-[70px] shrink-0">
       {tiles.map((tile) => (
         <button
           key={tile.zone}
           type="button"
           onClick={(): void => props.onOpenDrawer({ side: props.side, zone: tile.zone })}
-          className="flex items-center justify-between gap-1 rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-1.5 py-1 text-left cursor-pointer hover:border-[var(--accent)] hover:bg-[var(--accent-soft)] transition-colors"
-          style={{ opacity: tile.count === 0 ? 0.6 : 1 }}
+          className="flex items-center justify-between gap-1 rounded-[7px] border border-[var(--border)] bg-[var(--surface)]/90 px-1.5 py-1 text-left cursor-pointer hover:border-[var(--accent)] hover:bg-[var(--accent-soft)] transition-colors"
+          style={{ opacity: tile.count === 0 ? 0.55 : 1 }}
         >
           <div>
-            <div className="text-[9px] font-semibold uppercase tracking-wide text-[var(--text-3)]">
+            <div className="text-[8.5px] font-semibold uppercase tracking-wide text-[var(--text-3)]">
               {tile.label}
             </div>
-            <div className="tabular text-[13px] font-bold leading-tight">{tile.count}</div>
+            <div className="tabular text-[12.5px] font-bold leading-tight">{tile.count}</div>
           </div>
           {tile.thumb ? (
             <img
               src={cardImageUrl(tile.thumb)}
               alt={tile.thumb}
-              className="w-[20px] h-[28px] rounded-[2px] object-cover border border-[var(--border-strong)] shrink-0"
+              className="w-[18px] h-[25px] rounded-[2px] object-cover border border-[var(--border-strong)] shrink-0"
             />
           ) : null}
         </button>
@@ -383,7 +381,7 @@ function ZoneDrawerBody(props: {
         <div className="rounded-md border border-dashed border-[var(--border-strong)] bg-[var(--surface-2)] p-3 text-[11px] text-[var(--text-2)] leading-relaxed">
           <strong>Hidden in Hero POV.</strong> Opponent has{" "}
           <strong className="tabular">{props.player.zone_counts.library}</strong> cards remaining in
-          library. Switch to <strong>Omniscient</strong> in the top bar to inspect deck composition.
+          library. Switch to <strong>Omniscient</strong> to inspect deck composition.
         </div>
       );
     }
@@ -432,7 +430,7 @@ function ZoneDrawerBody(props: {
       <div className="min-w-0">
         <div className="text-[11.5px] font-medium truncate">{entry.name}</div>
         <div className="text-[10px] text-[var(--text-3)]">
-          {entry.order === 0 ? "Top of zone (newest)" : `Order #${entry.order + 1}`}
+          {entry.order === 0 ? "Top of zone" : `#${entry.order + 1}`}
         </div>
       </div>
     </div>
@@ -478,7 +476,7 @@ export function ZoneDrawerSheet(props: {
   );
 }
 
-export function StackColumn(props: {
+export function StackOverlay(props: {
   stack: StackItem[];
   open: boolean;
   onClose: () => void;
@@ -487,8 +485,8 @@ export function StackColumn(props: {
 }): ReactNode {
   if (props.stack.length === 0 || !props.open) return null;
   return (
-    <div className="w-[228px] shrink-0 flex flex-col justify-center min-h-0">
-      <div className="rounded-[9px] border border-[var(--border-strong)] bg-[var(--surface)] shadow-[var(--shadow-md)] p-2 flex flex-col gap-1.5 max-h-full overflow-y-auto">
+    <div className="absolute top-3 right-[84px] z-30 w-[236px] max-w-[calc(100%-96px)] max-h-[68%] flex flex-col">
+      <div className="rounded-[9px] border border-[var(--border-strong)] bg-[var(--surface)]/95 backdrop-blur-sm shadow-[var(--shadow-lg)] p-2 flex flex-col gap-1.5 overflow-y-auto">
         <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[var(--text-2)]">
           <span>Stack ({props.stack.length})</span>
           <div className="flex items-center gap-1.5">
@@ -581,7 +579,7 @@ function CardZoomBody(props: {
   onDismiss?: () => void;
 }): ReactNode {
   return (
-    <div className="min-w-0 flex-1 flex flex-col gap-1 max-h-[248px] overflow-y-auto">
+    <div className="min-w-0 flex-1 flex flex-col gap-1 max-h-[360px] overflow-y-auto pr-0.5">
       <div className="flex items-start justify-between gap-1">
         <div className="text-xs font-bold leading-tight">{props.name}</div>
         {props.showClose ? (
@@ -626,7 +624,7 @@ function resolveCardCopy(meta: ReturnType<typeof useCardMeta>): {
     typeLine: meta.type_line,
     bodyText: meta.oracle_text || meta.type_line || "No oracle text.",
     manaCost: meta.mana_cost,
-    setCode: meta.set_code,
+    setCode: meta.set_code || undefined,
   };
 }
 
@@ -644,12 +642,12 @@ export function CardZoomPreview(props: {
     <div
       className={`${
         props.pinned ? "pointer-events-auto" : "pointer-events-none"
-      } absolute left-3 bottom-3 z-50 w-[336px] max-w-[calc(100%-24px)] rounded-[10px] border border-[var(--border-strong)] bg-[var(--surface)] shadow-[var(--shadow-lg)] p-2.5 flex gap-2.5 items-start`}
+      } absolute left-3 top-11 z-50 w-[360px] max-w-[calc(100%-24px)] rounded-[10px] border border-[var(--border-strong)] bg-[var(--surface)] shadow-[var(--shadow-lg)] p-2.5 flex gap-2.5 items-start`}
     >
       <img
         src={cardImageUrl(props.info.name)}
         alt={props.info.name}
-        className="w-[122px] h-[170px] rounded-[6px] object-cover border border-[var(--border)] shrink-0"
+        className="w-[118px] h-[165px] rounded-[6px] object-cover border border-[var(--border)] shrink-0"
       />
       <CardZoomBody
         name={props.info.name}
@@ -663,42 +661,172 @@ export function CardZoomPreview(props: {
   );
 }
 
-export function TurnTimelineBar(props: {
+function TimelineCurveSvg(props: {
   timeline: TimelinePoint[];
-  currentStep: number;
-  totalSteps: number;
-  maxPlayableStep: number;
   currentTurn: number;
   onSelectStep: (step: number) => void;
 }): ReactNode {
   const pts = props.timeline;
+  if (pts.length < 2) return null;
   const w = 860;
-  const h = 42;
-  const padX = 24;
-  const stepX = pts.length > 1 ? (w - padX * 2) / (pts.length - 1) : 0;
+  const h = 38;
+  const padX = 22;
+  const stepX = (w - padX * 2) / (pts.length - 1);
   const coords = pts.map((p, i) => ({
     turn: p.turn,
     step: p.step,
     x: padX + i * stepX,
-    y: h - 14 - p.eval_win * 24,
+    y: h - 13 - Math.max(0, Math.min(1, p.eval_win)) * 21,
   }));
   const poly = coords.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
   const firstX = coords[0]?.x ?? padX;
   const lastX = coords[coords.length - 1]?.x ?? padX;
-  const area = `${firstX},${h - 14} ${poly} ${lastX},${h - 14}`;
+  const area = `${firstX},${h - 13} ${poly} ${lastX},${h - 13}`;
   const labelStride = Math.max(1, Math.ceil(coords.length / 18));
-  const upperStep = Math.max(0, Math.min(Math.max(0, props.totalSteps - 1), props.maxPlayableStep));
 
   return (
-    <div className="shrink-0 border-t border-[var(--border)] bg-[var(--surface)] px-3.5 py-2 flex flex-col gap-1.5">
+    <div className="h-[38px] w-full">
+      <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-[38px] block">
+        <line
+          x1={padX}
+          y1={h - 23}
+          x2={w - padX}
+          y2={h - 23}
+          stroke="var(--border)"
+          strokeDasharray="3 3"
+          className="pointer-events-none"
+        />
+        <polygon points={area} fill="var(--accent-soft)" className="pointer-events-none" />
+        <polyline
+          points={poly}
+          fill="none"
+          stroke="var(--accent)"
+          strokeWidth="1.8"
+          strokeLinejoin="round"
+          className="pointer-events-none"
+        />
+        {coords.map((c, idx) => {
+          const active = c.turn === props.currentTurn;
+          const showLabel = active || idx === coords.length - 1 || idx % labelStride === 0;
+          return (
+            <g
+              key={c.turn}
+              onClick={(): void => props.onSelectStep(c.step)}
+              className="cursor-pointer"
+            >
+              <rect
+                x={c.x - Math.max(10, stepX / 2)}
+                y={0}
+                width={Math.max(20, stepX)}
+                height={h}
+                fill="transparent"
+              />
+              <circle
+                cx={c.x}
+                cy={c.y}
+                r={active ? 4.5 : 3}
+                fill={active ? "var(--accent)" : "var(--text-2)"}
+                stroke="var(--surface)"
+                strokeWidth="1.4"
+              />
+              {showLabel ? (
+                <text
+                  x={c.x}
+                  y={h - 1}
+                  textAnchor="middle"
+                  fontSize="9"
+                  fill={active ? "var(--text)" : "var(--text-3)"}
+                  fontWeight={active ? 700 : 500}
+                  className="tabular"
+                >
+                  T{c.turn}
+                </text>
+              ) : null}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+export function TurnTimelineBar(props: {
+  timeline: TimelinePoint[];
+  evalSource?: string;
+  recentEvents: RecentEvent[];
+  currentStep: number;
+  totalSteps: number;
+  maxPlayableStep: number;
+  currentTurn: number;
+  historyOpen: boolean;
+  onToggleHistory: () => void;
+  onCloseHistory: () => void;
+  onSelectStep: (step: number) => void;
+}): ReactNode {
+  const upperStep = Math.max(0, Math.min(Math.max(0, props.totalSteps - 1), props.maxPlayableStep));
+  const curveTitle = props.evalSource === "model" ? "Model Win%" : "Turn Timeline";
+
+  return (
+    <div className="relative shrink-0 border-t border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 flex flex-col gap-1">
+      {props.historyOpen && props.recentEvents.length > 0 ? (
+        <div className="absolute left-3 bottom-full mb-1.5 z-40 w-[340px] max-w-[calc(100%-24px)] rounded-lg border border-[var(--border-strong)] bg-[var(--surface)] shadow-[var(--shadow-lg)] p-2 flex flex-col gap-1">
+          <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[var(--text-3)] px-1 pb-1 border-b border-[var(--border)]">
+            <span>Recent Actions (Newest First)</span>
+            <button
+              type="button"
+              onClick={props.onCloseHistory}
+              aria-label="Close recent actions"
+              className="p-0.5 hover:text-[var(--text)] cursor-pointer"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+          {props.recentEvents.toReversed().map((ev) => (
+            <button
+              key={`${ev.step}-${ev.text}`}
+              type="button"
+              onClick={(): void => {
+                props.onSelectStep(ev.step);
+                props.onCloseHistory();
+              }}
+              className="flex items-center gap-1.5 rounded px-1.5 py-1 text-left text-[11px] hover:bg-[var(--surface-2)] cursor-pointer"
+            >
+              <span className="tabular text-[10px] text-[var(--text-3)] shrink-0">
+                T{ev.turn} #{ev.step}
+              </span>
+              <span
+                className={`font-semibold shrink-0 ${
+                  ev.actor_side === "hero" ? "text-[var(--win)]" : "text-[var(--loss)]"
+                }`}
+              >
+                {ev.actor_side === "hero" ? "Hero" : "Opp"}:
+              </span>
+              <span className="truncate">{ev.text}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
       <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--text-2)]">
         <div className="flex items-center gap-2 min-w-0">
-          <strong className="text-[var(--text)] whitespace-nowrap">
-            Board Advantage Heuristic
-          </strong>
+          <strong className="text-[var(--text)] whitespace-nowrap">{curveTitle}</strong>
           <span className="tabular whitespace-nowrap">
-            · T{props.currentTurn} · Step {props.currentStep} / {upperStep}
+            T{props.currentTurn} · Step {props.currentStep}/{upperStep}
           </span>
+          {props.recentEvents.length > 0 ? (
+            <button
+              type="button"
+              onClick={props.onToggleHistory}
+              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10.5px] border cursor-pointer transition-colors ${
+                props.historyOpen
+                  ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]"
+                  : "border-[var(--border)] text-[var(--text-2)] hover:text-[var(--text)]"
+              }`}
+            >
+              <History className="w-3 h-3" />
+              History
+            </button>
+          ) : null}
         </div>
         <div className="flex items-center gap-2">
           <input
@@ -732,70 +860,12 @@ export function TurnTimelineBar(props: {
           </button>
         </div>
       </div>
-      <div className="h-[42px] w-full">
-        {coords.length > 0 ? (
-          <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-[42px] block">
-            <line
-              x1={padX}
-              y1={h - 26}
-              x2={w - padX}
-              y2={h - 26}
-              stroke="var(--border)"
-              strokeDasharray="3 3"
-              className="pointer-events-none"
-            />
-            <polygon points={area} fill="var(--win-soft)" className="pointer-events-none" />
-            <polyline
-              points={poly}
-              fill="none"
-              stroke="var(--win)"
-              strokeWidth="2"
-              strokeLinejoin="round"
-              className="pointer-events-none"
-            />
-            {coords.map((c, idx) => {
-              const active = c.turn === props.currentTurn;
-              const showLabel = active || idx === coords.length - 1 || idx % labelStride === 0;
-              return (
-                <g
-                  key={c.turn}
-                  onClick={(): void => props.onSelectStep(c.step)}
-                  className="cursor-pointer"
-                >
-                  <rect
-                    x={c.x - Math.max(10, stepX / 2)}
-                    y={0}
-                    width={Math.max(20, stepX)}
-                    height={h}
-                    fill="transparent"
-                  />
-                  <circle
-                    cx={c.x}
-                    cy={c.y}
-                    r={active ? 4.8 : 3.2}
-                    fill={active ? "var(--accent)" : "var(--win)"}
-                    stroke="var(--surface)"
-                    strokeWidth="1.5"
-                  />
-                  {showLabel ? (
-                    <text
-                      x={c.x}
-                      y={h - 1}
-                      textAnchor="middle"
-                      fontSize="9"
-                      fill={active ? "var(--text)" : "var(--text-3)"}
-                      fontWeight={active ? 700 : 500}
-                      className="tabular"
-                    >
-                      T{c.turn}
-                    </text>
-                  ) : null}
-                </g>
-              );
-            })}
-          </svg>
-        ) : null}
-      </div>
+
+      <TimelineCurveSvg
+        timeline={props.timeline}
+        currentTurn={props.currentTurn}
+        onSelectStep={props.onSelectStep}
+      />
     </div>
   );
 }

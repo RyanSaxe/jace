@@ -68,6 +68,16 @@ function installFakeFetch(): void {
           checkpoints: [{ iteration: 400, name: "iter-0400", path: "/tmp/a", size_bytes: 10 }],
           eval_iterations: [400],
         };
+      } else if (url.startsWith("/api/games/facets")) {
+        body = {
+          runs: ["v2-r89-flagship-w384l6"],
+          colors: ["WBR", "WR"],
+          sets: [],
+          results: ["win"],
+          cards: ["Fire Lord Zuko", "Plains"],
+          total_playable: 1,
+          total_unplayable: 0,
+        };
       } else if (url.startsWith("/api/games")) body = MOCK_GAMES;
       else if (url.startsWith("/api/cards-catalog")) body = { cards: ["Fire Lord Zuko"] };
       else if (url.startsWith("/api/game-detail")) {

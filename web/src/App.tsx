@@ -26,11 +26,14 @@ const NAV_ITEMS: ReadonlyArray<{ id: NavTab; label: string; shortcut: string }> 
 
 const INITIAL_GAMES_FILTERS: GamesFilterState = {
   runId: "",
+  setCode: "",
   result: "",
   colors: "",
   card: "",
+  minSurprise: null,
+  minSwing: null,
   search: "",
-  sort: "steps_desc",
+  sort: "surprise_desc",
   page: 0,
 };
 
@@ -93,9 +96,7 @@ export function App(): ReactNode {
       turn: board.turn,
       seed: target.seed,
       label: `Turn ${board.turn} · ${board.action_space_kind}`,
-      note:
-        note?.trim() ||
-        `Hero ${board.hero.life} vs Opp ${board.opp.life} (${board.hero.zone_counts.battlefield + board.opp.zone_counts.battlefield} perms)`,
+      note: note?.trim() || `Hero ${board.hero.life} life vs Opp ${board.opp.life} life`,
     });
     setWatchlist((prev) => [created, ...prev]);
   };
@@ -260,6 +261,7 @@ export function App(): ReactNode {
               runs={runs}
               details={details}
               loading={runsLoading}
+              error={runsError}
               onReload={reload}
               onBrowseGames={(runId): void => {
                 setGamesFilters({ ...INITIAL_GAMES_FILTERS, runId });
