@@ -30,12 +30,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 __all__ = (
     "DEFAULT_EXPERIMENT",
+    "DEFAULT_MAX_STALL_RESTARTS",
     "DEFAULT_POLL_INTERVAL_S",
     "DEFAULT_REPO_URL",
+    "DEFAULT_STALL_TIMEOUT_S",
     "DEFAULT_SYNC_INTERVAL_S",
     "DEFAULT_UPLOAD_CHUNK_BYTES",
     "GPU_CHOICES",
@@ -56,6 +58,8 @@ DEFAULT_REPO_URL = "https://github.com/RyanSaxe/jace.git"
 DEFAULT_EXPERIMENT = "v2-colab"
 DEFAULT_POLL_INTERVAL_S = 300
 DEFAULT_SYNC_INTERVAL_S = 900
+DEFAULT_STALL_TIMEOUT_S = 1200
+DEFAULT_MAX_STALL_RESTARTS = 6
 DEFAULT_UPLOAD_CHUNK_BYTES = 48 * 1024 * 1024
 
 _COLAB_CMD: tuple[str, ...] = ("uvx", "--from", "google-colab-cli", "colab")
@@ -109,6 +113,8 @@ class ColabRunConfig:
     experiment: str = DEFAULT_EXPERIMENT
     poll_interval_s: int = DEFAULT_POLL_INTERVAL_S
     sync_interval_s: int = DEFAULT_SYNC_INTERVAL_S
+    stall_timeout_s: int = DEFAULT_STALL_TIMEOUT_S
+    max_stall_restarts: int = DEFAULT_MAX_STALL_RESTARTS
     upload_chunk_bytes: int = DEFAULT_UPLOAD_CHUNK_BYTES
     keep_vm: bool = False
     dry_run: bool = False
@@ -193,16 +199,45 @@ def _sync_targets(backup_dir: Path, *, remote_run_dir: str) -> tuple[tuple[str, 
     )
 
 
-def build_remote_script(cfg: ColabRunConfig) -> str:
+def _parse_int_or_default(raw: str, default: int) -> int:
+    return int(raw) if raw.lstrip("-").isdigit() else default
+
+
+def _shift_seed_args(extra_args: Sequence[str], *, seed_offset: int) -> list[str]:
+    base_seed = 1
+    filtered: list[str] = []
+    skip_next = False
+    for idx, arg in enumerate(extra_args):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--seed" and idx + 1 < len(extra_args):
+            base_seed = _parse_int_or_default(extra_args[idx + 1], base_seed)
+            skip_next = True
+        elif arg.startswith("--seed="):
+            base_seed = _parse_int_or_default(arg.removeprefix("--seed="), base_seed)
+        else:
+            filtered.append(arg)
+    return [*filtered, "--seed", str(base_seed + seed_offset)]
+
+
+def _build_train_args(cfg: ColabRunConfig, *, force_resume: bool = False, seed_offset: int = 0) -> list[str]:
     train_args = [
         *("uv", "run", "python", "-m", "jace.train.full_data"),
         *("--runs-dir", _REMOTE_RUNS_DIR, "--experiment", cfg.experiment),
         *("--run-id", cfg.run_id, "--decks-path", _REMOTE_DECKS_PATH),
     ]
-    if cfg.resume_from is not None and "--resume" not in cfg.extra_args:
+    if (cfg.resume_from is not None or force_resume) and "--resume" not in cfg.extra_args:
         train_args.append("--resume")
-    train_args.extend(cfg.extra_args)
+    if seed_offset == 0:
+        train_args.extend(cfg.extra_args)
+    else:
+        train_args.extend(_shift_seed_args(cfg.extra_args, seed_offset=seed_offset))
+    return train_args
 
+
+def build_remote_script(cfg: ColabRunConfig) -> str:
+    train_args = _build_train_args(cfg)
     clone_cmd = (
         f"  git clone --branch {shlex.quote(cfg.branch)} --single-branch "
         f"{shlex.quote(cfg.repo_url)} {shlex.quote(_REMOTE_REPO_DIR)}"
@@ -219,6 +254,23 @@ def build_remote_script(cfg: ColabRunConfig) -> str:
         f"rm -f {_REMOTE_EXIT_FILE}",
         f"nohup bash -lc {shlex.quote(inner_cmd)} >{_REMOTE_LOG_FILE} 2>&1 </dev/null &",
         f"PID=$!; echo $PID > {_REMOTE_PID_FILE}; sleep 2; kill -0 $PID; echo LAUNCHED pid=$PID",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _build_restart_script(cfg: ColabRunConfig, *, seed_offset: int) -> str:
+    train_args = _build_train_args(cfg, force_resume=True, seed_offset=seed_offset)
+    inner_cmd = f"{shlex.join(train_args)}; rc=$?; echo $rc > {_REMOTE_EXIT_FILE}; exit $rc"
+    lines = [
+        "set -euo pipefail",
+        'export PATH="$HOME/.local/bin:$PATH"',
+        'export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"',
+        "pkill -9 -f jace.train.full_data || true",
+        "sleep 2",
+        f"cd {shlex.quote(_REMOTE_REPO_DIR)}",
+        f"rm -f {_REMOTE_EXIT_FILE}",
+        f"nohup bash -lc {shlex.quote(inner_cmd)} >>{_REMOTE_LOG_FILE} 2>&1 </dev/null &",
+        f"PID=$!; echo $PID > {_REMOTE_PID_FILE}; sleep 2; kill -0 $PID; echo RESTARTED pid=$PID",
     ]
     return "\n".join(lines) + "\n"
 
@@ -241,8 +293,9 @@ def _remote_poll_code(remote_run_dir: str) -> str:
         'gpu = subprocess.check_output(["nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu",'
         ' "--format=csv,noheader"]).decode().strip()\n'
         f"mp = pathlib.Path({metrics_path!r})\n"
-        'last = mp.read_text().splitlines()[-1][:140] if mp.exists() and mp.stat().st_size else ""\n'
-        'print(f"ALIVE={alive} EXIT={exit_code} PID={pid} GPU=[{gpu}] LAST={last}")\n'
+        "lines = mp.read_text().splitlines() if mp.exists() and mp.stat().st_size else []\n"
+        'last = lines[-1][:140] if lines else ""\n'
+        'print(f"ALIVE={alive} EXIT={exit_code} PID={pid} LINES={len(lines)} GPU=[{gpu}] LAST={last}")\n'
         f"lp = pathlib.Path({_REMOTE_LOG_FILE!r})\n"
         'if not alive and lp.exists(): print("LOG_TAIL:\\n" + lp.read_text(errors="ignore")[-1500:])\n'
     )
@@ -341,11 +394,75 @@ def _poll_once(
     return stdout
 
 
-def _watch_remote_training(cfg: ColabRunConfig, *, remote_run_dir: str, runner: CommandRunner) -> int:
+def _parse_remote_lines(stdout: str) -> int | None:
+    for token in stdout.split():
+        if token.startswith("LINES="):
+            raw = token.removeprefix("LINES=")
+            return int(raw) if raw.isdigit() else None
+    return None
+
+
+def _restart_stalled_training(
+    cfg: ColabRunConfig,
+    *,
+    remote_run_dir: str,
+    restart_idx: int,
+    runner: CommandRunner,
+) -> None:
+    _LOGGER.warning(
+        "stall watchdog triggered (restart %d/%d); syncing and restarting with shifted seed",
+        restart_idx,
+        cfg.max_stall_restarts,
+    )
+    _sync_once(cfg, remote_run_dir=remote_run_dir, runner=runner)
+    restart_script = _build_restart_script(cfg, seed_offset=restart_idx * 1000)
+    ssh_cmd = (*_COLAB_CMD, "ssh", "-s", cfg.session, "--", "bash", "-lc", restart_script)
+    runner(ssh_cmd, check=True, timeout=_SETUP_TIMEOUT_S)
+
+
+@dataclass(slots=True)
+class _StallTracker:
+    last_lines: int | None
+    last_progress: float
+    restarts: int = 0
+
+    def observe(
+        self,
+        stdout: str,
+        *,
+        cfg: ColabRunConfig,
+        remote_run_dir: str,
+        runner: CommandRunner,
+        clock: Callable[[], float],
+    ) -> int | None:
+        lines = _parse_remote_lines(stdout)
+        if lines is not None and (self.last_lines is None or lines > self.last_lines):
+            self.last_lines = lines
+            self.last_progress = clock()
+            return None
+        if cfg.stall_timeout_s <= 0 or (clock() - self.last_progress) < cfg.stall_timeout_s:
+            return None
+        if self.restarts >= cfg.max_stall_restarts:
+            _LOGGER.error("stall watchdog exhausted %d restarts; stopping VM", cfg.max_stall_restarts)
+            return 124
+        self.restarts += 1
+        _restart_stalled_training(cfg, remote_run_dir=remote_run_dir, restart_idx=self.restarts, runner=runner)
+        self.last_progress = clock()
+        return None
+
+
+def _watch_remote_training(
+    cfg: ColabRunConfig,
+    *,
+    remote_run_dir: str,
+    runner: CommandRunner,
+    clock: Callable[[], float] = time.monotonic,
+) -> int:
     poll_code = _remote_poll_code(remote_run_dir)
     exec_cmd = (*_COLAB_CMD, "exec", "-s", cfg.session, "--timeout", str(_REMOTE_EXEC_TIMEOUT_S))
     sync_every = max(1, cfg.sync_interval_s // max(1, cfg.poll_interval_s)) if cfg.sync_interval_s > 0 else 0
     ticks = 0
+    tracker = _StallTracker(last_lines=None, last_progress=clock())
     while True:
         if cfg.poll_interval_s > 0:
             time.sleep(cfg.poll_interval_s)
@@ -355,6 +472,9 @@ def _watch_remote_training(cfg: ColabRunConfig, *, remote_run_dir: str, runner: 
             _sync_once(cfg, remote_run_dir=remote_run_dir, runner=runner)
         if "ALIVE=False" in stdout:
             return _parse_remote_exit_code(stdout)
+        stall_exit = tracker.observe(stdout, cfg=cfg, remote_run_dir=remote_run_dir, runner=runner, clock=clock)
+        if stall_exit is not None:
+            return stall_exit
 
 
 def _stop_session(session: str, *, runner: CommandRunner) -> None:
@@ -401,7 +521,12 @@ def format_dry_run_plan(cfg: ColabRunConfig) -> str:
     return "\n".join(sections) + "\n"
 
 
-def run_colab_training(cfg: ColabRunConfig, *, runner: CommandRunner | None = None) -> int:
+def run_colab_training(
+    cfg: ColabRunConfig,
+    *,
+    runner: CommandRunner | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> int:
     _validate_inputs(cfg)
     if cfg.dry_run:
         sys.stdout.write(format_dry_run_plan(cfg))
@@ -419,7 +544,7 @@ def run_colab_training(cfg: ColabRunConfig, *, runner: CommandRunner | None = No
         ssh_cmd = (*_COLAB_CMD, "ssh", "-s", cfg.session, "--", "bash", "-lc", remote_script)
         active_runner(ssh_cmd, check=True, timeout=_SETUP_TIMEOUT_S)
         try:
-            return _watch_remote_training(cfg, remote_run_dir=remote_run_dir, runner=active_runner)
+            return _watch_remote_training(cfg, remote_run_dir=remote_run_dir, runner=active_runner, clock=clock)
         finally:
             _sync_once(cfg, remote_run_dir=remote_run_dir, runner=active_runner)
     finally:
@@ -463,6 +588,18 @@ def _parse_args(argv: Sequence[str] | None) -> ColabRunConfig:
         default=DEFAULT_SYNC_INTERVAL_S,
         help="seconds between periodic HTTP syncs (0 disables periodic sync)",
     )
+    parser.add_argument(
+        "--stall-timeout-s",
+        type=int,
+        default=DEFAULT_STALL_TIMEOUT_S,
+        help="seconds with unchanged metrics.jsonl before auto-restarting with shifted seed (0 disables)",
+    )
+    parser.add_argument(
+        "--max-stall-restarts",
+        type=int,
+        default=DEFAULT_MAX_STALL_RESTARTS,
+        help="max automatic in-place stall restarts before stopping the VM",
+    )
     parser.add_argument("--keep-vm", action="store_true", default=False, help="keep Colab VM running on exit")
     parser.add_argument("--dry-run", action="store_true", default=False, help="print plan without calling colab")
     ns, extra = parser.parse_known_args(argv)
@@ -480,6 +617,8 @@ def _parse_args(argv: Sequence[str] | None) -> ColabRunConfig:
         experiment=ns.experiment,
         poll_interval_s=ns.poll_interval_s,
         sync_interval_s=ns.sync_interval_s,
+        stall_timeout_s=ns.stall_timeout_s,
+        max_stall_restarts=ns.max_stall_restarts,
         keep_vm=ns.keep_vm,
         dry_run=ns.dry_run,
         extra_args=forwarded,

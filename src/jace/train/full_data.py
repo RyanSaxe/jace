@@ -143,6 +143,7 @@ class FullDataConfig:
     collect_device: str = "cpu"
     learn_device: str = field(default_factory=default_device_name)
     eval_every: int = 40
+    resume_save_every: int = 25
     eval_deals: int = 100
     forensics_deals: int = 20
     probe_count: int = 64
@@ -387,6 +388,15 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
         append_train_metric(layout, record)
         if record.update % cfg.eval_every == 0 or record.update == cfg.updates:
             run_eval(iteration=record.update, record_games=True)
+        elif cfg.resume_save_every > 0 and record.update % cfg.resume_save_every == 0:
+            save_resume_state(
+                layout,
+                iteration=record.update,
+                optimizer=optimizer,
+                snapshot_pool=pool,
+                agent=agent,
+                ema=ema_weights,
+            )
 
     train_cfg = TrainConfig(
         updates=cfg.updates,
@@ -518,6 +528,7 @@ def _parse_args(argv: Sequence[str] | None) -> FullDataConfig:
     parser.add_argument("--collect-device", default="cpu")
     parser.add_argument("--learn-device", default=default_device_name())
     parser.add_argument("--eval-every", type=int, default=40)
+    parser.add_argument("--resume-save-every", type=int, default=25)
     parser.add_argument("--eval-deals", type=int, default=100)
     parser.add_argument("--forensics-deals", type=int, default=20)
     parser.add_argument("--probe-count", type=int, default=64)
