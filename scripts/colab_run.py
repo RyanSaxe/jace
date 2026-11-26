@@ -58,8 +58,9 @@ DEFAULT_REPO_URL = "https://github.com/RyanSaxe/jace.git"
 DEFAULT_EXPERIMENT = "v2-colab"
 DEFAULT_POLL_INTERVAL_S = 300
 DEFAULT_SYNC_INTERVAL_S = 900
-DEFAULT_STALL_TIMEOUT_S = 1200
-DEFAULT_MAX_STALL_RESTARTS = 6
+DEFAULT_STALL_TIMEOUT_S = 180
+DEFAULT_EVAL_STALL_TIMEOUT_S = 1800
+DEFAULT_MAX_STALL_RESTARTS = 20
 DEFAULT_UPLOAD_CHUNK_BYTES = 48 * 1024 * 1024
 
 _COLAB_CMD: tuple[str, ...] = ("uvx", "--from", "google-colab-cli", "colab")
@@ -114,8 +115,10 @@ class ColabRunConfig:
     poll_interval_s: int = DEFAULT_POLL_INTERVAL_S
     sync_interval_s: int = DEFAULT_SYNC_INTERVAL_S
     stall_timeout_s: int = DEFAULT_STALL_TIMEOUT_S
+    eval_stall_timeout_s: int = DEFAULT_EVAL_STALL_TIMEOUT_S
     max_stall_restarts: int = DEFAULT_MAX_STALL_RESTARTS
     upload_chunk_bytes: int = DEFAULT_UPLOAD_CHUNK_BYTES
+    reuse_session: bool = False
     keep_vm: bool = False
     dry_run: bool = False
     extra_args: tuple[str, ...] = ()
@@ -199,12 +202,20 @@ def _sync_targets(backup_dir: Path, *, remote_run_dir: str) -> tuple[tuple[str, 
     )
 
 
-def _parse_int_or_default(raw: str, default: int) -> int:
-    return int(raw) if raw.lstrip("-").isdigit() else default
+def _extract_int_flag(extra_args: Sequence[str], *, flag: str, default: int) -> int:
+    prefix = f"{flag}="
+    for idx, arg in enumerate(extra_args):
+        if arg == flag and idx + 1 < len(extra_args) and extra_args[idx + 1].lstrip("-").isdigit():
+            return int(extra_args[idx + 1])
+        if arg.startswith(prefix):
+            raw = arg.removeprefix(prefix)
+            if raw.lstrip("-").isdigit():
+                return int(raw)
+    return default
 
 
 def _shift_seed_args(extra_args: Sequence[str], *, seed_offset: int) -> list[str]:
-    base_seed = 1
+    base_seed = _extract_int_flag(extra_args, flag="--seed", default=1)
     filtered: list[str] = []
     skip_next = False
     for idx, arg in enumerate(extra_args):
@@ -212,11 +223,8 @@ def _shift_seed_args(extra_args: Sequence[str], *, seed_offset: int) -> list[str
             skip_next = False
             continue
         if arg == "--seed" and idx + 1 < len(extra_args):
-            base_seed = _parse_int_or_default(extra_args[idx + 1], base_seed)
             skip_next = True
-        elif arg.startswith("--seed="):
-            base_seed = _parse_int_or_default(arg.removeprefix("--seed="), base_seed)
-        else:
+        elif not arg.startswith("--seed="):
             filtered.append(arg)
     return [*filtered, "--seed", str(base_seed + seed_offset)]
 
@@ -237,18 +245,24 @@ def _build_train_args(cfg: ColabRunConfig, *, force_resume: bool = False, seed_o
 
 
 def build_remote_script(cfg: ColabRunConfig) -> str:
-    train_args = _build_train_args(cfg)
+    train_args = _build_train_args(cfg, force_resume=cfg.reuse_session)
+    branch_q = shlex.quote(cfg.branch)
     clone_cmd = (
-        f"  git clone --branch {shlex.quote(cfg.branch)} --single-branch "
-        f"{shlex.quote(cfg.repo_url)} {shlex.quote(_REMOTE_REPO_DIR)}"
+        f"  git clone --branch {branch_q} --single-branch {shlex.quote(cfg.repo_url)} {shlex.quote(_REMOTE_REPO_DIR)}"
     )
     inner_cmd = f"{shlex.join(train_args)}; rc=$?; echo $rc > {_REMOTE_EXIT_FILE}; exit $rc"
+    repo_sync_cmd = (
+        f"if [ ! -d {shlex.quote(_REMOTE_REPO_DIR)}/.git ]; then\n{clone_cmd}\nelse\n"
+        f"  git -C {shlex.quote(_REMOTE_REPO_DIR)} fetch origin {branch_q} && "
+        f"git -C {shlex.quote(_REMOTE_REPO_DIR)} checkout -B {branch_q} FETCH_HEAD\nfi"
+    )
     lines = [
         "set -euo pipefail",
         'export PATH="$HOME/.local/bin:$PATH"',
         'export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"',
         "if ! command -v uv >/dev/null 2>&1; then curl -LsSf https://astral.sh/uv/install.sh | sh; fi",
-        f"if [ ! -d {shlex.quote(_REMOTE_REPO_DIR)}/.git ]; then\n{clone_cmd}\nfi",
+        repo_sync_cmd,
+        *(["pkill -9 -f jace.train.full_data || true", "sleep 2"] if cfg.reuse_session else []),
         f"cd {shlex.quote(_REMOTE_REPO_DIR)}",
         "uv sync --frozen",
         f"rm -f {_REMOTE_EXIT_FILE}",
@@ -278,7 +292,7 @@ def _build_restart_script(cfg: ColabRunConfig, *, seed_offset: int) -> str:
 def _remote_poll_code(remote_run_dir: str) -> str:
     metrics_path = f"{remote_run_dir}/metrics.jsonl"
     return (
-        "import os, pathlib, subprocess\n"
+        "import json, os, pathlib, subprocess\n"
         f"pid_file, exit_file = pathlib.Path({_REMOTE_PID_FILE!r}), pathlib.Path({_REMOTE_EXIT_FILE!r})\n"
         "pid = int(pid_file.read_text().strip()) if pid_file.exists() else -1\n"
         "alive = False\n"
@@ -295,7 +309,15 @@ def _remote_poll_code(remote_run_dir: str) -> str:
         f"mp = pathlib.Path({metrics_path!r})\n"
         "lines = mp.read_text().splitlines() if mp.exists() and mp.stat().st_size else []\n"
         'last = lines[-1][:140] if lines else ""\n'
-        'print(f"ALIVE={alive} EXIT={exit_code} PID={pid} LINES={len(lines)} GPU=[{gpu}] LAST={last}")\n'
+        'lu, lk = "none", "none"\n'
+        "if lines:\n"
+        "    try:\n"
+        "        rec = json.loads(lines[-1])\n"
+        '        lu, lk = str(rec.get("update", "none")), str(rec.get("kind", "none"))\n'
+        "    except Exception:\n"
+        "        pass\n"
+        'print(f"ALIVE={alive} EXIT={exit_code} PID={pid} LINES={len(lines)} '
+        'LAST_UPDATE={lu} LAST_KIND={lk} GPU=[{gpu}] LAST={last}")\n'
         f"lp = pathlib.Path({_REMOTE_LOG_FILE!r})\n"
         'if not alive and lp.exists(): print("LOG_TAIL:\\n" + lp.read_text(errors="ignore")[-1500:])\n'
     )
@@ -394,12 +416,44 @@ def _poll_once(
     return stdout
 
 
-def _parse_remote_lines(stdout: str) -> int | None:
-    for token in stdout.split():
-        if token.startswith("LINES="):
-            raw = token.removeprefix("LINES=")
-            return int(raw) if raw.isdigit() else None
+def _parse_poll_token(stdout: str, prefix: str) -> str | None:
+    for item in stdout.split():
+        if item.startswith(prefix):
+            return item.removeprefix(prefix)
     return None
+
+
+def _parse_remote_lines(stdout: str) -> int | None:
+    raw = _parse_poll_token(stdout, "LINES=")
+    return int(raw) if raw is not None and raw.isdigit() else None
+
+
+def _is_in_eval_window(stdout: str, *, eval_every: int) -> bool:
+    if eval_every <= 0:
+        return False
+    if _parse_poll_token(stdout, "LAST_KIND=") != "train":
+        return False
+    raw_u = _parse_poll_token(stdout, "LAST_UPDATE=")
+    if raw_u is None or not raw_u.isdigit():
+        return False
+    update = int(raw_u)
+    return update > 0 and update % eval_every == 0
+
+
+def _sync_metrics_only(cfg: ColabRunConfig, *, remote_run_dir: str, runner: CommandRunner) -> None:
+    cfg.backup_dir.mkdir(parents=True, exist_ok=True)
+    cmd = (
+        *_COLAB_CMD,
+        "download",
+        "-s",
+        cfg.session,
+        f"{remote_run_dir}/metrics.jsonl",
+        str(cfg.backup_dir / "metrics.jsonl"),
+    )
+    try:
+        runner(cmd, check=False, timeout=_TRANSFER_TIMEOUT_S)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        _LOGGER.warning("metrics sync before restart failed: %s", exc)
 
 
 def _restart_stalled_training(
@@ -410,11 +464,11 @@ def _restart_stalled_training(
     runner: CommandRunner,
 ) -> None:
     _LOGGER.warning(
-        "stall watchdog triggered (restart %d/%d); syncing and restarting with shifted seed",
+        "stall watchdog triggered (restart %d/%d); syncing metrics and restarting with shifted seed",
         restart_idx,
         cfg.max_stall_restarts,
     )
-    _sync_once(cfg, remote_run_dir=remote_run_dir, runner=runner)
+    _sync_metrics_only(cfg, remote_run_dir=remote_run_dir, runner=runner)
     restart_script = _build_restart_script(cfg, seed_offset=restart_idx * 1000)
     ssh_cmd = (*_COLAB_CMD, "ssh", "-s", cfg.session, "--", "bash", "-lc", restart_script)
     runner(ssh_cmd, check=True, timeout=_SETUP_TIMEOUT_S)
@@ -424,6 +478,7 @@ def _restart_stalled_training(
 class _StallTracker:
     last_lines: int | None
     last_progress: float
+    eval_every: int
     restarts: int = 0
 
     def observe(
@@ -440,7 +495,10 @@ class _StallTracker:
             self.last_lines = lines
             self.last_progress = clock()
             return None
-        if cfg.stall_timeout_s <= 0 or (clock() - self.last_progress) < cfg.stall_timeout_s:
+        threshold = (
+            cfg.eval_stall_timeout_s if _is_in_eval_window(stdout, eval_every=self.eval_every) else cfg.stall_timeout_s
+        )
+        if threshold <= 0 or (clock() - self.last_progress) < threshold:
             return None
         if self.restarts >= cfg.max_stall_restarts:
             _LOGGER.error("stall watchdog exhausted %d restarts; stopping VM", cfg.max_stall_restarts)
@@ -462,7 +520,8 @@ def _watch_remote_training(
     exec_cmd = (*_COLAB_CMD, "exec", "-s", cfg.session, "--timeout", str(_REMOTE_EXEC_TIMEOUT_S))
     sync_every = max(1, cfg.sync_interval_s // max(1, cfg.poll_interval_s)) if cfg.sync_interval_s > 0 else 0
     ticks = 0
-    tracker = _StallTracker(last_lines=None, last_progress=clock())
+    eval_every = _extract_int_flag(cfg.extra_args, flag="--eval-every", default=40)
+    tracker = _StallTracker(last_lines=None, last_progress=clock(), eval_every=eval_every)
     while True:
         if cfg.poll_interval_s > 0:
             time.sleep(cfg.poll_interval_s)
@@ -536,11 +595,13 @@ def run_colab_training(
     remote_run_dir = _remote_run_dir(cfg)
     remote_script = build_remote_script(cfg)
     (cfg.backup_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
-    active_runner(_provision_command(cfg), check=True, timeout=_PROVISION_TIMEOUT_S)
+    if not cfg.reuse_session:
+        active_runner(_provision_command(cfg), check=True, timeout=_PROVISION_TIMEOUT_S)
 
     try:
-        _upload_file(cfg, local_path=cfg.decks_path, remote_path=_REMOTE_DECKS_PATH, runner=active_runner)
-        _upload_resume_files(cfg, remote_run_dir=remote_run_dir, runner=active_runner)
+        if not cfg.reuse_session:
+            _upload_file(cfg, local_path=cfg.decks_path, remote_path=_REMOTE_DECKS_PATH, runner=active_runner)
+            _upload_resume_files(cfg, remote_run_dir=remote_run_dir, runner=active_runner)
         ssh_cmd = (*_COLAB_CMD, "ssh", "-s", cfg.session, "--", "bash", "-lc", remote_script)
         active_runner(ssh_cmd, check=True, timeout=_SETUP_TIMEOUT_S)
         try:
@@ -592,13 +653,25 @@ def _parse_args(argv: Sequence[str] | None) -> ColabRunConfig:
         "--stall-timeout-s",
         type=int,
         default=DEFAULT_STALL_TIMEOUT_S,
-        help="seconds with unchanged metrics.jsonl before auto-restarting with shifted seed (0 disables)",
+        help="seconds with unchanged metrics.jsonl during training before auto-restarting (0 disables)",
+    )
+    parser.add_argument(
+        "--eval-stall-timeout-s",
+        type=int,
+        default=DEFAULT_EVAL_STALL_TIMEOUT_S,
+        help="seconds allowed at eval_every boundaries before auto-restarting (0 disables)",
     )
     parser.add_argument(
         "--max-stall-restarts",
         type=int,
         default=DEFAULT_MAX_STALL_RESTARTS,
         help="max automatic in-place stall restarts before stopping the VM",
+    )
+    parser.add_argument(
+        "--reuse-session",
+        action="store_true",
+        default=False,
+        help="attach to an already-provisioned Colab session without re-provisioning or re-uploading",
     )
     parser.add_argument("--keep-vm", action="store_true", default=False, help="keep Colab VM running on exit")
     parser.add_argument("--dry-run", action="store_true", default=False, help="print plan without calling colab")
@@ -618,7 +691,9 @@ def _parse_args(argv: Sequence[str] | None) -> ColabRunConfig:
         poll_interval_s=ns.poll_interval_s,
         sync_interval_s=ns.sync_interval_s,
         stall_timeout_s=ns.stall_timeout_s,
+        eval_stall_timeout_s=ns.eval_stall_timeout_s,
         max_stall_restarts=ns.max_stall_restarts,
+        reuse_session=ns.reuse_session,
         keep_vm=ns.keep_vm,
         dry_run=ns.dry_run,
         extra_args=forwarded,
