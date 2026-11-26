@@ -85,7 +85,16 @@ def test_runs_and_duckdb_game_search(tmp_path: Path) -> None:
     payload = games_resp.json()
     assert payload["total"] == 1
     assert payload["games"][0]["seed"] == 20001
-    assert payload["games"][0]["set_code"] == "TLA"
+    assert payload["games"][0]["set_code"] == ""
+    assert payload["games"][0]["playable"] is True
+    assert "surprise_score" in payload["games"][0]
+    assert "turning_point_step" in payload["games"][0]
+
+    facets = client.get("/api/games/facets").json()
+    assert facets["total_playable"] == 1
+    assert facets["total_unplayable"] == 0
+    assert facets["runs"] == ["v2-test/run-alpha"]
+    assert "Fire Lord Zuko" in facets["cards"]
 
     # Second refresh should skip already-indexed files.
     refresh = client.post("/api/index/refresh").json()
@@ -260,3 +269,98 @@ def test_leg1_seat_swap_and_hero_pov_action_privacy_and_cr304_fork(tmp_path: Pat
     )
     assert fork_resp.status_code == 200
     assert any("CR 304.4" in w for w in fork_resp.json()["warnings"])
+
+
+def test_unplayable_games_hidden_by_default_and_any_step_branch_actions(tmp_path: Path) -> None:
+    runs_dir = _make_fixture_runs(tmp_path)
+    game_file = runs_dir / "v2-test" / "run-alpha" / "games" / "eval-iter-0100.jsonl"
+    good = _record_small_game(seed=30001)
+    bad = _record_small_game(seed=30002)
+    bad_games = bad["games"]
+    assert isinstance(bad_games, list)
+    bad_games[0]["actions"][2] = 9999
+    game_file.write_text(json.dumps(good) + "\n" + json.dumps(bad) + "\n", encoding="utf-8")
+
+    client = TestClient(create_app(StudioConfig(runs_dir=runs_dir, allow_scryfall_network=False)))
+    playable_only = client.get("/api/games").json()
+    assert playable_only["total"] == 1
+    assert playable_only["games"][0]["seed"] == 30001
+
+    facets = client.get("/api/games/facets").json()
+    assert facets["total_playable"] == 1
+    assert facets["total_unplayable"] == 1
+    run_facets = client.get("/api/games/facets", params={"run_id": "v2-test/run-alpha"}).json()
+    assert run_facets["total_playable"] == 1
+    assert run_facets["total_unplayable"] == 1
+    empty_facets = client.get("/api/games/facets", params={"run_id": "v2-test/nonexistent"}).json()
+    assert empty_facets["total_playable"] == 0
+    assert empty_facets["total_unplayable"] == 0
+
+    # Step 0 (MULLIGAN) finds nearest Priority step scanning forward
+    step0 = client.get(
+        "/api/game-step",
+        params={"run_id": "v2-test/run-alpha", "iteration": 100, "game_idx": 0, "step": 0, "pov": "omniscient"},
+    ).json()
+    assert step0["nearest_priority_step"] is not None
+    assert step0["nearest_priority_step"] > 0
+
+    # Any-step counterfactual action branching works even on step 0 (MULLIGAN, non-Priority),
+    # and stage-indexed board edits apply cleanly after branching onto a Priority step
+    branch_resp = client.post(
+        "/api/fork",
+        json={
+            "run_id": "v2-test/run-alpha",
+            "iteration": 100,
+            "game_idx": 0,
+            "step": 0,
+            "pov": "omniscient",
+            "edits": [],
+            "branch_actions": [0],
+        },
+    )
+    assert branch_resp.status_code == 200
+    bdata = branch_resp.json()
+    assert len(bdata["branch_events"]) == 1
+    assert bdata["board"]["step"] == 1
+
+    # Keep both mulligans (2 branch actions -> Turn 1 PRIORITY) then set Hero life to 12 at after_branch=2
+    post_branch_edit = client.post(
+        "/api/fork",
+        json={
+            "run_id": "v2-test/run-alpha",
+            "iteration": 100,
+            "game_idx": 0,
+            "step": 0,
+            "pov": "omniscient",
+            "edits": [{"op": "set_life", "seat": 0, "value": 12, "after_branch": 2}],
+            "branch_actions": [0, 0],
+        },
+    )
+    assert post_branch_edit.status_code == 200
+    pdata = post_branch_edit.json()
+    assert pdata["warnings"] == []
+    assert pdata["board"]["hero"]["life"] == 12
+
+    # Hero POV privacy: branching from Opponent's decision to Hero's decision still hides base_evaluation probs
+    opp_step = next(
+        idx
+        for idx in range(15)
+        if not client.get(
+            "/api/game-step",
+            params={"run_id": "v2-test/run-alpha", "iteration": 100, "game_idx": 0, "step": idx, "pov": "hero"},
+        ).json()["board"]["actor_is_hero"]
+    )
+    priv_resp = client.post(
+        "/api/fork",
+        json={
+            "run_id": "v2-test/run-alpha",
+            "iteration": 100,
+            "game_idx": 0,
+            "step": opp_step,
+            "pov": "hero",
+            "edits": [],
+            "branch_actions": [0],
+        },
+    )
+    assert priv_resp.status_code == 200
+    assert priv_resp.json()["base_evaluation"]["primary"]["probs"] == []

@@ -1,9 +1,9 @@
 """FastAPI server and CLI entrypoint for Jace Studio.
 
-Exposes live run telemetry, DuckDB/Parquet faceted game search, native `managym`
-step replay, local Scryfall card art caching, watchlist persistence, and stateless
-counterfactual forking (`POST /api/fork`). Serves the built React app from
-`web/dist` when present.
+Exposes live run telemetry, DuckDB/Parquet faceted game search (including
+replayability filtering and model-surprise sorting), native `managym` step
+replay, Scryfall card and token art caching, watchlist persistence, and
+stateless counterfactual forking + any-step action branching (`POST /api/fork`).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import threading
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
@@ -23,10 +23,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from jace.studio.index import GameQuery, StudioIndex
-from jace.studio.inference import ForkEdit, InferenceEngine, apply_fork_edits
-from jace.studio.replay import PlayerSpec, PovMode, ReplayService, serialize_observation
+from jace.studio.inference import ForkEdit, InferenceEngine, apply_fork_and_branch
+from jace.studio.replay import PlayerSpec, PovMode, RecordedGame, ReplayService, serialize_observation
 from jace.studio.runs import discover_runs, load_run_detail
 from jace.studio.scryfall import ScryfallCache
+
+if TYPE_CHECKING:
+    import managym
 
 __all__ = (
     "StudioConfig",
@@ -53,6 +56,7 @@ class ForkEditPayload(BaseModel):
     seat: int = Field(ge=0, le=1)
     value: int | None = Field(default=None, ge=1, le=99)
     card: str | None = Field(default=None, max_length=120)
+    after_branch: int = Field(default=0, ge=0, le=64)
 
 
 class ForkRequest(BaseModel):
@@ -64,6 +68,7 @@ class ForkRequest(BaseModel):
     ckpt_a: str | None = None
     ckpt_b: str | None = None
     edits: list[ForkEditPayload] = Field(default_factory=list, max_length=32)
+    branch_actions: list[int] = Field(default_factory=list, max_length=64)
 
 
 class WatchlistItemPayload(BaseModel):
@@ -84,8 +89,13 @@ class GamesFilterParams(BaseModel):
     result: str | None = None
     colors: str | None = None
     min_steps: int | None = Field(default=None, ge=0)
+    min_turns: int | None = Field(default=None, ge=0)
+    max_turns: int | None = Field(default=None, ge=0)
+    min_surprise: float | None = Field(default=None, ge=0.0, le=1.0)
+    min_swing: float | None = Field(default=None, ge=0.0, le=1.0)
+    include_unplayable: bool = False
     search: str | None = None
-    sort: str = "steps_desc"
+    sort: str = "surprise_desc"
     limit: int = Field(default=100, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
 
@@ -173,12 +183,17 @@ def _register_run_routes(app: FastAPI, runs_dir: Path) -> None:
         return asdict(detail)
 
 
-def _register_index_routes(app: FastAPI, index: StudioIndex) -> None:
+def _register_index_routes(app: FastAPI, *, index: StudioIndex, replays: ReplayService) -> None:
     @app.post("/api/index/refresh", summary="Force-sync Parquet game index from disk")
     def refresh_index() -> dict[str, int]:
+        replays.clear_cache()
         return index.sync(force=True)
 
-    @app.get("/api/games", summary="Search recorded evaluation games via DuckDB")
+    @app.get("/api/games/facets", summary="Dynamic filter facets discovered from playable games")
+    def games_facets(run_id: Annotated[str | None, Query()] = None) -> dict[str, object]:
+        return asdict(index.facets(run_id=run_id))
+
+    @app.get("/api/games", summary="Search playable evaluation games via DuckDB")
     def search_games(filters: Annotated[GamesFilterParams, Depends()]) -> dict[str, object]:
         query = GameQuery(
             run_id=filters.run_id,
@@ -187,6 +202,11 @@ def _register_index_routes(app: FastAPI, index: StudioIndex) -> None:
             result=filters.result,
             colors=filters.colors,
             min_steps=filters.min_steps,
+            min_turns=filters.min_turns,
+            max_turns=filters.max_turns,
+            min_surprise=filters.min_surprise,
+            min_swing=filters.min_swing,
+            include_unplayable=filters.include_unplayable,
             search=filters.search,
             sort=filters.sort,
             limit=filters.limit,
@@ -201,18 +221,34 @@ def _register_index_routes(app: FastAPI, index: StudioIndex) -> None:
 
 
 def _register_replay_routes(app: FastAPI, *, replays: ReplayService, inference: InferenceEngine) -> None:
-    @app.get("/api/game-detail", summary="Replay turn-level overview and peak step for a game")
+    def _score_timeline(obs_list: list[managym.Observation], game: RecordedGame) -> tuple[list[float], str]:
+        ckpt = inference.find_checkpoint_for_iteration(game.run_id, game.iteration)
+        return inference.evaluate_batch_win_probs(
+            obs_list,
+            run_id=game.run_id,
+            checkpoint_name=ckpt,
+            hero_seat=game.hero_seat,
+        )
+
+    @app.get("/api/game-detail", summary="Replay turn-level overview, model win curve, and turning point")
     def game_overview(params: Annotated[GameOverviewParams, Depends()]) -> dict[str, object]:
         try:
-            return replays.get_game_overview(run_id=params.run_id, iteration=params.iteration, game_idx=params.game_idx)
+            return replays.get_game_overview(
+                run_id=params.run_id,
+                iteration=params.iteration,
+                game_idx=params.game_idx,
+                win_scorer=_score_timeline,
+            )
         except (FileNotFoundError, IndexError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/api/game-step", summary="Replay a single step with checkpoint policy/WDL diff")
     def game_step(params: Annotated[StepQueryParams, Depends()]) -> dict[str, object]:
         try:
-            game, env, obs, actual_step, chosen, replay_warning, recent_events = replays.replay_to_step(
-                run_id=params.run_id, iteration=params.iteration, game_idx=params.game_idx, step=params.step
+            game, env, obs, actual_step, chosen, replay_warning, recent_events, nearest_priority = (
+                replays.replay_to_step(
+                    run_id=params.run_id, iteration=params.iteration, game_idx=params.game_idx, step=params.step
+                )
             )
         except (FileNotFoundError, IndexError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -235,20 +271,33 @@ def _register_replay_routes(app: FastAPI, *, replays: ReplayService, inference: 
             ckpt_b=params.ckpt_b,
             hide_actions=bool(board["actions_hidden"]),
         )
-        return {"board": board, "evaluation": evaluation, "replay_warning": replay_warning}
+        return {
+            "board": board,
+            "evaluation": evaluation,
+            "replay_warning": replay_warning,
+            "nearest_priority_step": nearest_priority,
+        }
 
 
 def _register_fork_routes(app: FastAPI, *, replays: ReplayService, inference: InferenceEngine) -> None:
-    @app.post("/api/fork", summary="Evaluate stateless counterfactual edits at a Priority step")
+    @app.post("/api/fork", summary="Evaluate stateless board edits and any-step counterfactual action branches")
     def fork_position(req: ForkRequest) -> dict[str, object]:
         try:
-            game, env, base_obs, actual_step, _, replay_warning, recent_events = replays.replay_to_step(
-                run_id=req.run_id, iteration=req.iteration, game_idx=req.game_idx, step=req.step
+            game, env, base_obs, actual_step, _, replay_warning, recent_events, nearest_priority = (
+                replays.replay_to_step(run_id=req.run_id, iteration=req.iteration, game_idx=req.game_idx, step=req.step)
             )
         except (FileNotFoundError, IndexError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        edits = [ForkEdit(op=e.op, seat=e.seat, value=e.value, card=e.card) for e in req.edits]
-        cloned, forked_obs, warnings = apply_fork_edits(env, base_obs, edits=edits)
+        edits = [
+            ForkEdit(op=e.op, seat=e.seat, value=e.value, card=e.card, after_branch=e.after_branch) for e in req.edits
+        ]
+        cloned, forked_obs, warnings, branch_events, branch_done = apply_fork_and_branch(
+            env,
+            base_obs,
+            edits=edits,
+            branch_actions=req.branch_actions,
+            hero_seat=game.hero_seat,
+        )
         if replay_warning:
             warnings.insert(0, replay_warning)
         board = serialize_observation(
@@ -257,19 +306,20 @@ def _register_fork_routes(app: FastAPI, *, replays: ReplayService, inference: In
             decklists=_extract_decks(game.players),
             hero_seat=game.hero_seat,
             pov=req.pov,
-            step_index=actual_step,
+            step_index=actual_step + len(branch_events),
             total_steps=len(game.actions),
             chosen_action=None,
             recent_events=recent_events,
         )
-        hide_actions = bool(board["actions_hidden"])
+        base_hide_actions = req.pov == "hero" and int(base_obs.agent.player_index) != game.hero_seat
+        fork_hide_actions = bool(board["actions_hidden"])
         base_eval = inference.evaluate_pair(
             base_obs,
             run_id=req.run_id,
             hero_seat=game.hero_seat,
             ckpt_a=req.ckpt_a,
             ckpt_b=req.ckpt_b,
-            hide_actions=hide_actions,
+            hide_actions=base_hide_actions,
         )
         fork_eval = inference.evaluate_pair(
             forked_obs,
@@ -277,18 +327,26 @@ def _register_fork_routes(app: FastAPI, *, replays: ReplayService, inference: In
             hero_seat=game.hero_seat,
             ckpt_a=req.ckpt_a,
             ckpt_b=req.ckpt_b,
-            hide_actions=hide_actions,
+            hide_actions=fork_hide_actions,
         )
-        return {"board": board, "base_evaluation": base_eval, "fork_evaluation": fork_eval, "warnings": warnings}
+        return {
+            "board": board,
+            "base_evaluation": base_eval,
+            "fork_evaluation": fork_eval,
+            "warnings": warnings,
+            "branch_events": [asdict(ev) for ev in branch_events],
+            "branch_done": branch_done,
+            "nearest_priority_step": nearest_priority,
+        }
 
 
 def _register_asset_routes(app: FastAPI, scryfall: ScryfallCache) -> None:
-    @app.get("/api/cards/{card_name:path}/image", summary="Cached card JPEG or high-contrast token SVG")
+    @app.get("/api/cards/{card_name:path}/image", summary="Cached Scryfall card or token JPEG, or SVG fallback")
     def card_image(card_name: str) -> Response:
         content, media_type = scryfall.get_image(card_name)
         return Response(content=content, media_type=media_type, headers={"Cache-Control": "public, max-age=86400"})
 
-    @app.get("/api/cards/{card_name:path}", summary="Cached card metadata and oracle text")
+    @app.get("/api/cards/{card_name:path}", summary="Cached card or token metadata and oracle text")
     def card_metadata(card_name: str) -> dict[str, object]:
         return asdict(scryfall.get_metadata(card_name))
 
@@ -311,20 +369,20 @@ def _register_watchlist_routes(app: FastAPI, watchlist: _WatchlistStore) -> None
 
 def create_app(config: StudioConfig) -> FastAPI:
     runs_dir = config.runs_dir.resolve()
-    app = FastAPI(title="Jace Studio", version="0.1.0")
+    app = FastAPI(title="Jace Studio", version="0.2.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    index = StudioIndex(runs_dir)
-    replays = ReplayService(runs_dir)
     inference = InferenceEngine(runs_dir)
+    index = StudioIndex(runs_dir, inference=inference)
+    replays = ReplayService(runs_dir)
     scryfall = ScryfallCache(runs_dir / ".studio" / "scryfall", allow_network=config.allow_scryfall_network)
     watchlist = _WatchlistStore(runs_dir / ".studio" / "watchlist.json")
     _register_run_routes(app, runs_dir)
-    _register_index_routes(app, index)
+    _register_index_routes(app, index=index, replays=replays)
     _register_replay_routes(app, replays=replays, inference=inference)
     _register_fork_routes(app, replays=replays, inference=inference)
     _register_asset_routes(app, scryfall)

@@ -26,7 +26,7 @@ __all__ = (
 )
 
 _EVAL_FILE_RE = re.compile(r"^eval-iter-(\d+)\.jsonl$")
-_CKPT_FILE_RE = re.compile(r"^iter-(\d+)\.safetensors$")
+_CKPT_ITER_RE = re.compile(r"iter-(\d+)")
 _MIN_NESTED_PARTS = 2
 _RUNNING_STALE_SECONDS = 1800.0
 
@@ -135,18 +135,19 @@ def _list_checkpoints(run_dir: Path) -> tuple[CheckpointInfo, ...]:
         return ()
     found: list[CheckpointInfo] = []
     for path in sorted(ckpt_dir.iterdir()):
-        match = _CKPT_FILE_RE.match(path.name)
-        if match is None or not path.is_file():
+        if not path.is_file() or path.suffix != ".safetensors":
             continue
+        match = _CKPT_ITER_RE.search(path.stem)
+        iteration = int(match.group(1)) if match is not None else -1
         found.append(
             CheckpointInfo(
-                iteration=int(match.group(1)),
+                iteration=iteration,
                 name=path.stem,
                 path=str(path),
                 size_bytes=path.stat().st_size,
             )
         )
-    return tuple(sorted(found, key=lambda item: item.iteration))
+    return tuple(sorted(found, key=lambda item: (item.iteration, item.name)))
 
 
 def _list_eval_iterations(run_dir: Path) -> tuple[int, ...]:

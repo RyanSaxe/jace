@@ -1,9 +1,10 @@
-"""DuckDB and Hive-partitioned Parquet game indexer for Jace Studio.
+"""DuckDB and Parquet game indexer with replayability and mistake/surprise scoring.
 
-Incrementally scans `games/eval-iter-*.jsonl` recordings across all discovered
-runs, respects mirrored paired-deal seat swaps (`context.players`), writes
-atomic Parquet partitions under `<index_dir>/games/set=<SET>/...`, and answers
-faceted queries in milliseconds through in-process DuckDB.
+Incrementally scans `games/eval-iter-*.jsonl` recordings across discovered runs,
+derives metadata solely from recorded payloads (never fabricating set codes),
+verifies replayability on the installed `managym` engine, scores playable games
+for model overconfidence/underconfidence surprises and win% swings, and serves
+faceted DuckDB queries in milliseconds.
 """
 
 from __future__ import annotations
@@ -21,12 +22,16 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from jace.studio.replay import RecordedGame, engine_step_errors, load_recorded_games, sample_game_observations
 from jace.studio.runs import discover_runs
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from jace.studio.inference import InferenceEngine
+
 __all__ = (
+    "GameFacets",
     "GameQuery",
     "GameRecordSummary",
     "StudioIndex",
@@ -34,8 +39,9 @@ __all__ = (
 
 _EVAL_FILE_RE = re.compile(r"^eval-iter-(\d+)\.jsonl$")
 _BASIC_LANDS = frozenset({"Plains", "Island", "Swamp", "Mountain", "Forest"})
-_INDEX_SCHEMA_VERSION = "2"
+_INDEX_SCHEMA_VERSION = "3"
 _SYNC_TTL_SECONDS = 5.0
+_FAST_FAIL_SAMPLE = 3
 
 _GAMES_SCHEMA = pa.schema(
     [
@@ -55,6 +61,13 @@ _GAMES_SCHEMA = pa.schema(
         ("opp_colors", pa.string()),
         ("cards_seen", pa.list_(pa.string())),
         ("key_cards", pa.list_(pa.string())),
+        ("playable", pa.bool_()),
+        ("max_pred_win", pa.float32()),
+        ("min_pred_win", pa.float32()),
+        ("surprise_score", pa.float32()),
+        ("max_swing", pa.float32()),
+        ("turning_point_step", pa.int32()),
+        ("eval_source", pa.string()),
         ("source_file", pa.string()),
     ]
 )
@@ -68,10 +81,12 @@ _COLOR_BY_LAND = {
 }
 
 _SORT_SQL = {
+    "surprise_desc": "surprise_score DESC, max_swing DESC, steps DESC",
+    "swing_desc": "max_swing DESC, surprise_score DESC, steps DESC",
     "steps_desc": "steps DESC, iteration DESC, seed ASC",
     "steps_asc": "steps ASC, iteration DESC, seed ASC",
-    "iter_desc": "iteration DESC, game_idx ASC",
     "turns_desc": "turns DESC, steps DESC",
+    "iter_desc": "iteration DESC, game_idx ASC",
     "seed_asc": "seed ASC, iteration DESC",
 }
 
@@ -84,8 +99,13 @@ class GameQuery:
     result: str | None = None
     colors: str | None = None
     min_steps: int | None = None
+    min_turns: int | None = None
+    max_turns: int | None = None
+    min_surprise: float | None = None
+    min_swing: float | None = None
+    include_unplayable: bool = False
     search: str | None = None
-    sort: str = "steps_desc"
+    sort: str = "surprise_desc"
     limit: int = 100
     offset: int = 0
 
@@ -108,6 +128,24 @@ class GameRecordSummary:
     opp_colors: str
     cards_seen: tuple[str, ...]
     key_cards: tuple[str, ...]
+    playable: bool
+    max_pred_win: float
+    min_pred_win: float
+    surprise_score: float
+    max_swing: float
+    turning_point_step: int
+    eval_source: str
+
+
+@dataclass(frozen=True, slots=True)
+class GameFacets:
+    runs: tuple[str, ...]
+    colors: tuple[str, ...]
+    sets: tuple[str, ...]
+    results: tuple[str, ...]
+    cards: tuple[str, ...]
+    total_playable: int
+    total_unplayable: int
 
 
 def _deck_colors(decklist: dict[str, object]) -> str:
@@ -124,6 +162,17 @@ def _resolve_hero_seat(context: object) -> int:
             if str(role).lower() == "agent":
                 return idx
     return 0
+
+
+def _resolve_set_code(game: dict[str, object], context: object) -> str:
+    raw = game.get("set_code") or game.get("set")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip().upper()
+    if isinstance(context, dict):
+        ctx_set = context.get("set_code") or context.get("set")
+        if isinstance(ctx_set, str) and ctx_set.strip():
+            return ctx_set.strip().upper()
+    return ""
 
 
 def _extract_result(end_block: object, *, hero_seat: int) -> tuple[str, int, int]:
@@ -156,6 +205,7 @@ def _parse_single_game(
     iteration: int,
     game_idx: int,
     hero_seat: int,
+    context: object,
     source_file: str,
 ) -> dict[str, object]:
     opp_seat = 1 - hero_seat
@@ -173,7 +223,7 @@ def _parse_single_game(
         "run_id": run_id,
         "iteration": iteration,
         "game_idx": game_idx,
-        "set_code": "TLA",
+        "set_code": _resolve_set_code(game, context),
         "seed": seed,
         "result": result,
         "winner_seat": winner_seat,
@@ -186,11 +236,18 @@ def _parse_single_game(
         "opp_colors": _deck_colors(opp_deck),
         "cards_seen": all_cards,
         "key_cards": non_basics[:8],
+        "playable": False,
+        "max_pred_win": 0.5,
+        "min_pred_win": 0.5,
+        "surprise_score": 0.0,
+        "max_swing": 0.0,
+        "turning_point_step": 0,
+        "eval_source": "none",
         "source_file": source_file,
     }
 
 
-def _parse_jsonl_games(raw_line: str) -> list[tuple[dict[str, object], int]]:
+def _parse_jsonl_games(raw_line: str) -> list[tuple[dict[str, object], int, object]]:
     line = raw_line.strip()
     if not line:
         return []
@@ -200,22 +257,89 @@ def _parse_jsonl_games(raw_line: str) -> list[tuple[dict[str, object], int]]:
         return []
     if not isinstance(payload, dict):
         return []
-    top_seat = _resolve_hero_seat(payload.get("context"))
+    top_ctx = payload.get("context")
+    top_seat = _resolve_hero_seat(top_ctx)
     games = payload.get("games")
     items = games if isinstance(games, list) else [payload]
-    found: list[tuple[dict[str, object], int]] = []
+    found: list[tuple[dict[str, object], int, object]] = []
     for item in items:
         if isinstance(item, dict) and "actions" in item:
-            seat = _resolve_hero_seat(item.get("context")) if "context" in item else top_seat
-            found.append((item, seat))
+            item_ctx = item.get("context", top_ctx)
+            seat = _resolve_hero_seat(item_ctx) if "context" in item else top_seat
+            found.append((item, seat, item_ctx))
     return found
 
 
-def _extract_games_from_jsonl(jsonl_path: Path, *, run_id: str, iteration: int) -> list[dict[str, object]]:
+def _summarize_win_curve(
+    step_ids: list[int],
+    win_probs: list[float],
+    *,
+    result: str,
+) -> tuple[float, float, float, float, int]:
+    if not win_probs:
+        return 0.5, 0.5, 0.0, 0.0, 0
+    max_idx = max(range(len(win_probs)), key=win_probs.__getitem__)
+    min_idx = min(range(len(win_probs)), key=win_probs.__getitem__)
+    max_win, min_win = win_probs[max_idx], win_probs[min_idx]
+    max_swing = 0.0
+    swing_step = step_ids[0]
+    for prev_p, cur_p, cur_step in zip(win_probs, win_probs[1:], step_ids[1:], strict=False):
+        delta = abs(cur_p - prev_p)
+        if delta > max_swing:
+            max_swing = delta
+            swing_step = cur_step
+    if result == "loss":
+        return max_win, min_win, round(max_win, 4), round(max_swing, 4), step_ids[max_idx]
+    if result == "win":
+        return max_win, min_win, round(1.0 - min_win, 4), round(max_swing, 4), step_ids[min_idx]
+    return max_win, min_win, round(abs(max_win - 0.5), 4), round(max_swing, 4), swing_step
+
+
+def _score_row_replayability(
+    row: dict[str, object],
+    *,
+    recorded: RecordedGame,
+    inference: InferenceEngine | None,
+    checkpoint_name: str | None,
+) -> bool:
+    run_id = recorded.run_id
+    step_errors = engine_step_errors()
+    try:
+        playable, sampled = sample_game_observations(recorded, stride=4)
+    except (*step_errors, FileNotFoundError):
+        return False
+    if not playable:
+        return False
+    row["playable"] = True
+    step_ids = [idx for idx, _ in sampled]
+    obs_list = [obs for _, obs in sampled]
+    if inference is not None and obs_list:
+        win_probs, src = inference.evaluate_batch_win_probs(
+            obs_list, run_id=run_id, checkpoint_name=checkpoint_name, hero_seat=recorded.hero_seat
+        )
+    else:
+        win_probs, src = [], "none"
+    max_w, min_w, surprise, swing, turn_step = _summarize_win_curve(step_ids, win_probs, result=str(row["result"]))
+    row["max_pred_win"] = max_w
+    row["min_pred_win"] = min_w
+    row["surprise_score"] = surprise
+    row["max_swing"] = swing
+    row["turning_point_step"] = turn_step
+    row["eval_source"] = src
+    return True
+
+
+def _extract_games_from_jsonl(
+    jsonl_path: Path,
+    *,
+    run_id: str,
+    iteration: int,
+    inference: InferenceEngine | None,
+) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     with jsonl_path.open("r", encoding="utf-8") as handle:
         for raw_line in handle:
-            for item, hero_seat in _parse_jsonl_games(raw_line):
+            for item, hero_seat, ctx in _parse_jsonl_games(raw_line):
                 rows.append(
                     _parse_single_game(
                         item,
@@ -223,22 +347,36 @@ def _extract_games_from_jsonl(jsonl_path: Path, *, run_id: str, iteration: int) 
                         iteration=iteration,
                         game_idx=len(rows),
                         hero_seat=hero_seat,
+                        context=ctx,
                         source_file=str(jsonl_path),
                     )
                 )
+    recorded_games = load_recorded_games(jsonl_path, run_id=run_id, iteration=iteration)
+    ckpt = inference.find_checkpoint_for_iteration(run_id, iteration) if inference is not None else None
+    consecutive_failures = 0
+    saw_playable = False
+    for row, recorded in zip(rows, recorded_games, strict=False):
+        if not saw_playable and consecutive_failures >= _FAST_FAIL_SAMPLE:
+            break
+        ok = _score_row_replayability(row, recorded=recorded, inference=inference, checkpoint_name=ckpt)
+        if ok:
+            saw_playable = True
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
     return rows
 
 
-def _partition_path(games_root: Path, *, set_code: str, run_id: str, iteration: int) -> Path:
+def _partition_path(games_root: Path, *, run_id: str, iteration: int) -> Path:
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", run_id).strip("_")[:48] or "run"
     digest = hashlib.sha1(run_id.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
-    return games_root / f"set={set_code}" / f"run={slug}_{digest}" / f"iter-{iteration:04d}.parquet"
+    return games_root / f"run={slug}_{digest}" / f"iter-{iteration:04d}.parquet"
 
 
 def _write_partition(rows: list[dict[str, object]], *, games_root: Path, run_id: str, iteration: int) -> None:
     if not rows:
         return
-    target = _partition_path(games_root, set_code=str(rows[0]["set_code"]), run_id=run_id, iteration=iteration)
+    target = _partition_path(games_root, run_id=run_id, iteration=iteration)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.{threading.get_ident()}.tmp")
     pq.write_table(pa.Table.from_pylist(rows, schema=_GAMES_SCHEMA), tmp)
@@ -250,19 +388,29 @@ def _file_stamp(path: Path) -> str:
     return f"{stat.st_mtime_ns}:{stat.st_size}"
 
 
-def _build_where_clause(query: GameQuery) -> tuple[str, list[object]]:
-    clauses: list[str] = []
-    params: list[object] = []
-    equality_filters = (
+def _append_scalar_filters(query: GameQuery, *, clauses: list[str], params: list[object]) -> None:
+    scalar_filters: tuple[tuple[str, object], ...] = (
         ("run_id = ?", query.run_id),
         ("set_code = ?", query.set_code.upper() if query.set_code else None),
         ("result = ?", query.result.lower() if query.result else None),
         ("steps >= ?", query.min_steps),
+        ("turns >= ?", query.min_turns),
+        ("turns <= ?", query.max_turns),
+        ("surprise_score >= ?", query.min_surprise),
+        ("max_swing >= ?", query.min_swing),
     )
-    for sql_frag, val in equality_filters:
+    for sql_frag, val in scalar_filters:
         if val is not None and val != "":
             clauses.append(sql_frag)
             params.append(val)
+
+
+def _build_where_clause(query: GameQuery) -> tuple[str, list[object]]:
+    clauses: list[str] = []
+    params: list[object] = []
+    if not query.include_unplayable:
+        clauses.append("playable = TRUE")
+    _append_scalar_filters(query, clauses=clauses, params=params)
     if query.colors:
         raw_colors = query.colors.strip().upper()
         canonical = "".join(c for c in "WUBRG" if c in raw_colors) or raw_colors
@@ -283,11 +431,18 @@ def _build_where_clause(query: GameQuery) -> tuple[str, list[object]]:
 
 
 class StudioIndex:
-    def __init__(self, runs_dir: Path, *, index_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        runs_dir: Path,
+        *,
+        index_dir: Path | None = None,
+        inference: InferenceEngine | None = None,
+    ) -> None:
         self._runs_dir = runs_dir.resolve()
         self._index_dir = (index_dir or (self._runs_dir / ".studio" / "index")).resolve()
         self._games_root = self._index_dir / "games"
         self._manifest_path = self._index_dir / "manifest.json"
+        self._inference = inference
         self._lock = threading.Lock()
         self._last_sync_mono = 0.0
 
@@ -327,7 +482,7 @@ class StudioIndex:
             if manifest.get(key) == stamp:
                 continue
             iteration = int(match.group(1))
-            rows = _extract_games_from_jsonl(path, run_id=run_id, iteration=iteration)
+            rows = _extract_games_from_jsonl(path, run_id=run_id, iteration=iteration, inference=self._inference)
             _write_partition(rows, games_root=self._games_root, run_id=run_id, iteration=iteration)
             manifest[key] = stamp
             files_done += 1
@@ -361,11 +516,12 @@ class StudioIndex:
             return [], 0
         glob_pattern = str(self._games_root / "**" / "*.parquet")
         where_sql, params = _build_where_clause(query)
-        order_sql = _SORT_SQL.get(query.sort, _SORT_SQL["steps_desc"])
+        order_sql = _SORT_SQL.get(query.sort, _SORT_SQL["surprise_desc"])
         count_parts = ["SELECT COUNT(*) FROM read_parquet(?, hive_partitioning = false)", where_sql]
         select_parts = [
             "SELECT run_id, iteration, game_idx, set_code, seed, result, winner_seat, hero_seat,",
-            "steps, turns, hero_name, opp_name, hero_colors, opp_colors, cards_seen, key_cards",
+            "steps, turns, hero_name, opp_name, hero_colors, opp_colors, cards_seen, key_cards,",
+            "playable, max_pred_win, min_pred_win, surprise_score, max_swing, turning_point_step, eval_source",
             "FROM read_parquet(?, hive_partitioning = false)",
             where_sql,
             "ORDER BY",
@@ -383,7 +539,7 @@ class StudioIndex:
                 run_id=str(row[0]),
                 iteration=int(row[1]),
                 game_idx=int(row[2]),
-                set_code=str(row[3]),
+                set_code=str(row[3] or ""),
                 seed=int(row[4]),
                 result=str(row[5]),
                 winner_seat=int(row[6]),
@@ -396,6 +552,13 @@ class StudioIndex:
                 opp_colors=str(row[13]),
                 cards_seen=tuple(row[14] or ()),
                 key_cards=tuple(row[15] or ()),
+                playable=bool(row[16]),
+                max_pred_win=round(float(row[17]), 4),
+                min_pred_win=round(float(row[18]), 4),
+                surprise_score=round(float(row[19]), 4),
+                max_swing=round(float(row[20]), 4),
+                turning_point_step=int(row[21]),
+                eval_source=str(row[22] or "none"),
             )
             for row in records
         ]
@@ -406,7 +569,7 @@ class StudioIndex:
         if not self._games_root.is_dir() or not any(self._games_root.rglob("*.parquet")):
             return []
         glob_pattern = str(self._games_root / "**" / "*.parquet")
-        where_sql = "WHERE run_id = ?" if run_id else ""
+        where_sql = "WHERE playable = TRUE AND run_id = ?" if run_id else "WHERE playable = TRUE"
         params: list[object] = [glob_pattern, run_id] if run_id else [glob_pattern]
         cards_parts = [
             "SELECT DISTINCT unnest(cards_seen) AS card",
@@ -418,3 +581,65 @@ class StudioIndex:
         with duckdb.connect(":memory:") as conn:
             rows = conn.execute(cards_sql, [*params, limit]).fetchall()
         return [str(row[0]) for row in rows if row[0] is not None]
+
+    def facets(self, *, run_id: str | None = None) -> GameFacets:
+        self.sync(force=False)
+        if not self._games_root.is_dir() or not any(self._games_root.rglob("*.parquet")):
+            return GameFacets((), (), (), (), (), 0, 0)
+        glob_pattern = str(self._games_root / "**" / "*.parquet")
+        where_sql = "WHERE playable = TRUE AND run_id = ?" if run_id else "WHERE playable = TRUE"
+        params: list[object] = [glob_pattern, run_id] if run_id else [glob_pattern]
+        colors_parts = [
+            "SELECT DISTINCT col FROM (",
+            "SELECT hero_colors AS col FROM read_parquet(?, hive_partitioning = false)",
+            where_sql,
+            "UNION SELECT opp_colors AS col FROM read_parquet(?, hive_partitioning = false)",
+            where_sql,
+            ") WHERE col != '' ORDER BY length(col) ASC, col ASC",
+        ]
+        sets_parts = [
+            "SELECT DISTINCT set_code FROM read_parquet(?, hive_partitioning = false)",
+            where_sql,
+            "AND set_code != '' ORDER BY set_code ASC",
+        ]
+        results_parts = [
+            "SELECT DISTINCT result FROM read_parquet(?, hive_partitioning = false)",
+            where_sql,
+            "ORDER BY result ASC",
+        ]
+        cards_parts = [
+            "SELECT DISTINCT unnest(cards_seen) AS card FROM read_parquet(?, hive_partitioning = false)",
+            where_sql,
+            "ORDER BY card ASC LIMIT 2000",
+        ]
+        counts_where = "WHERE run_id = ?" if run_id else ""
+        counts_parts = [
+            "SELECT SUM(CASE WHEN playable THEN 1 ELSE 0 END), SUM(CASE WHEN NOT playable THEN 1 ELSE 0 END)",
+            "FROM read_parquet(?, hive_partitioning = false)",
+            counts_where,
+        ]
+        with duckdb.connect(":memory:") as conn:
+            counts = conn.execute(" ".join(counts_parts), params).fetchone()
+            runs = [
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT DISTINCT run_id FROM read_parquet(?, hive_partitioning = false) "
+                    "WHERE playable = TRUE ORDER BY run_id ASC",
+                    [glob_pattern],
+                ).fetchall()
+            ]
+            colors = [str(r[0]) for r in conn.execute(" ".join(colors_parts), [*params, *params]).fetchall()]
+            sets = [str(r[0]) for r in conn.execute(" ".join(sets_parts), params).fetchall()]
+            results = [str(r[0]) for r in conn.execute(" ".join(results_parts), params).fetchall()]
+            cards = [str(r[0]) for r in conn.execute(" ".join(cards_parts), params).fetchall() if r[0] is not None]
+        playable_cnt = int(counts[0] or 0) if counts else 0
+        unplayable_cnt = int(counts[1] or 0) if counts else 0
+        return GameFacets(
+            runs=tuple(runs),
+            colors=tuple(colors),
+            sets=tuple(sets),
+            results=tuple(results),
+            cards=tuple(cards),
+            total_playable=playable_cnt,
+            total_unplayable=unplayable_cnt,
+        )

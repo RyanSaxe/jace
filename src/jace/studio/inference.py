@@ -1,9 +1,10 @@
-"""Checkpoint inference, policy diffing, and counterfactual Fork execution for Jace Studio.
+"""Checkpoint inference, policy diffing, batched trajectory scoring, and Fork/Branch execution.
 
 Loads saved `.safetensors` checkpoints through a thread-safe LRU cache with a
-persistent `PolicyInference` scope, evaluates real legal-action probabilities
-and 3-class WDL distributions normalized to Hero's perspective, and runs
-stateless counterfactual forks via `env.clone_env()` and `scenario_*`.
+persistent `PolicyInference` scope, evaluates legal-action probabilities and
+3-class WDL distributions normalized to Hero's perspective, scores sampled game
+trajectories in batches for mistake/surprise indexing, and runs stateless
+counterfactual board edits plus any-step action branching via `env.clone_env()`.
 """
 
 from __future__ import annotations
@@ -18,8 +19,9 @@ import managym
 import torch
 from manabot.backends.torch.checkpoint import load_checkpoint
 from manabot.env.observation import ObservationSpace
+from managym.enums import ActionEnum
 
-from jace.studio.replay import non_permanent_card_names
+from jace.studio.replay import engine_step_errors, non_permanent_card_names
 from jace.studio.runs import resolve_run_dir
 
 if TYPE_CHECKING:
@@ -28,8 +30,10 @@ if TYPE_CHECKING:
     from manabot.backends.torch.policy import ActorCritic, PolicyInference
 
 __all__ = (
+    "BranchStepEvent",
     "ForkEdit",
     "InferenceEngine",
+    "apply_fork_and_branch",
     "apply_fork_edits",
     "compute_policy_diff",
 )
@@ -45,6 +49,16 @@ class ForkEdit:
     seat: int
     value: int | None = None
     card: str | None = None
+    after_branch: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class BranchStepEvent:
+    branch_index: int
+    turn: int
+    actor_side: str
+    action_index: int
+    label: str
 
 
 @dataclass(slots=True)
@@ -120,6 +134,45 @@ def _forward_model(
     return probs, hero_wdl
 
 
+def _forward_batch_hero_win(
+    cached: _CachedModel,
+    obs_list: list[managym.Observation],
+    *,
+    hero_seat: int,
+) -> list[float]:
+    if not obs_list:
+        return []
+    max_actions = max((len(obs.action_space.actions) for obs in obs_list), default=1)
+    space = cached.obs_space
+    active_space = (
+        ObservationSpace(space.config.model_copy(update={"max_actions": max_actions}))
+        if max_actions > space.config.max_actions
+        else space
+    )
+    obs_batch = managym.encode_observation_batch(obs_list, active_space.layout, active_space.config.action_overflow)
+    with torch.no_grad():
+        prepared = cached.scope.prepare(obs_batch)
+        _, value_out = cached.agent.forward_distribution(prepared)
+        if value_out.shape[-1] == _WDL_CLASSES:
+            wdl_probs = torch.softmax(value_out, dim=-1).tolist()
+            results: list[float] = []
+            for obs, row in zip(obs_list, wdl_probs, strict=True):
+                loss_p, _, win_p = float(row[0]), float(row[1]), float(row[2])
+                hero_win = win_p if int(obs.agent.player_index) == hero_seat else loss_p
+                results.append(round(hero_win, 4))
+            return results
+        scalars = value_out.reshape(-1).tolist()
+        results = []
+        for obs, raw_val in zip(obs_list, scalars, strict=True):
+            wdl = _normalize_wdl_for_hero(
+                _scalar_to_wdl(float(raw_val)),
+                acting_seat=int(obs.agent.player_index),
+                hero_seat=hero_seat,
+            )
+            results.append(wdl["win"])
+        return results
+
+
 def compute_policy_diff(probs_a: list[float], probs_b: list[float]) -> dict[str, object]:
     if not probs_a or len(probs_a) != len(probs_b):
         return {"tv": 0.0, "kl": 0.0, "argmax_changed": False}
@@ -148,10 +201,20 @@ def _apply_single_edit(cloned: managym.Env, edit: ForkEdit) -> str | None:
         return None
     if edit.op == "add_battlefield" and edit.card:
         if edit.card in non_permanent_card_names():
-            return f"Cannot put Instant/Sorcery '{edit.card}' onto the battlefield (CR 304.4) — add to Hand instead."
+            return f"Cannot put Instant/Sorcery '{edit.card}' onto the battlefield (CR 304.4) - add to Hand instead."
         cloned.scenario_force_battlefield(edit.seat, edit.card, ready=True)
         return None
     return f"unsupported fork edit: {edit.op}"
+
+
+def _describe_branch_action(obs: managym.Observation, action_idx: int) -> str:
+    actions = obs.action_space.actions
+    if action_idx < 0 or action_idx >= len(actions):
+        return f"Action #{action_idx}"
+    action = actions[action_idx]
+    if action.description:
+        return str(action.description)
+    return ActionEnum(int(action.action_type)).name.replace("_", " ").title()
 
 
 def apply_fork_edits(
@@ -160,6 +223,9 @@ def apply_fork_edits(
     *,
     edits: list[ForkEdit],
 ) -> tuple[managym.Env, managym.Observation, list[str]]:
+    if not edits:
+        return env.clone_env(), base_obs, []
+    step_errors = engine_step_errors()
     cloned = env.clone_env()
     warnings: list[str] = []
     for edit in edits:
@@ -167,15 +233,81 @@ def apply_fork_edits(
             warn = _apply_single_edit(cloned, edit)
             if warn is not None:
                 warnings.append(warn)
-        except (RuntimeError, ValueError) as exc:
+        except step_errors as exc:
             warnings.append(f"{edit.op} ({edit.card or edit.value}): {exc}")
     try:
         refreshed = cloned.scenario_refresh()
-    except (RuntimeError, ValueError) as exc:
-        warnings.append(f"Fork edits require a Priority step ({exc})")
-        # Return original unmutated env + base_obs so hand/board never diverge.
-        return env, base_obs, warnings
+    except step_errors as exc:
+        warnings.append(f"Board edits require a Priority step ({exc})")
+        return env.clone_env(), base_obs, warnings
     return cloned, refreshed, warnings
+
+
+def _group_edits_by_stage(edits: list[ForkEdit], max_stage: int) -> dict[int, list[ForkEdit]]:
+    grouped: dict[int, list[ForkEdit]] = {}
+    for edit in edits:
+        stage = max(0, min(int(edit.after_branch), max_stage))
+        grouped.setdefault(stage, []).append(edit)
+    return grouped
+
+
+def _step_branch_once(
+    cloned: managym.Env,
+    current_obs: managym.Observation,
+    *,
+    idx: int,
+    action_idx: int,
+    hero_seat: int,
+    step_errors: tuple[type[BaseException], ...],
+) -> tuple[managym.Observation, BranchStepEvent | None, bool, str | None]:
+    actions = current_obs.action_space.actions
+    if action_idx < 0 or action_idx >= len(actions):
+        err = f"Branch step {idx + 1}: action index {action_idx} out of bounds ({len(actions)} legal)"
+        return current_obs, None, False, err
+    label = _describe_branch_action(current_obs, action_idx)
+    actor_side = "hero" if int(current_obs.agent.player_index) == hero_seat else "opp"
+    turn_num = int(current_obs.turn.turn_number)
+    try:
+        next_obs, _, done, truncated, _ = cloned.step(action_idx)
+    except step_errors as exc:
+        return current_obs, None, False, f"Branch step {idx + 1} failed: {exc}"
+    event = BranchStepEvent(
+        branch_index=idx, turn=turn_num, actor_side=actor_side, action_index=action_idx, label=label
+    )
+    return next_obs, event, bool(done or truncated), None
+
+
+def apply_fork_and_branch(
+    env: managym.Env,
+    base_obs: managym.Observation,
+    *,
+    edits: list[ForkEdit],
+    branch_actions: list[int],
+    hero_seat: int = 0,
+) -> tuple[managym.Env, managym.Observation, list[str], list[BranchStepEvent], bool]:
+    step_errors = engine_step_errors()
+    edits_by_stage = _group_edits_by_stage(edits, len(branch_actions))
+    cloned, current_obs, warnings = apply_fork_edits(env, base_obs, edits=edits_by_stage.get(0, []))
+    branch_events: list[BranchStepEvent] = []
+    branch_done = False
+    for idx, action_idx in enumerate(branch_actions):
+        next_obs, event, is_done, err = _step_branch_once(
+            cloned, current_obs, idx=idx, action_idx=action_idx, hero_seat=hero_seat, step_errors=step_errors
+        )
+        if err is not None or event is None:
+            if err is not None:
+                warnings.append(err)
+            break
+        branch_events.append(event)
+        current_obs = next_obs
+        if is_done:
+            branch_done = True
+            break
+        stage_edits = edits_by_stage.get(idx + 1, [])
+        if stage_edits:
+            cloned, current_obs, stage_warns = apply_fork_edits(cloned, current_obs, edits=stage_edits)
+            warnings.extend(stage_warns)
+    return cloned, current_obs, warnings, branch_events, branch_done
 
 
 class InferenceEngine:
@@ -192,6 +324,23 @@ class InferenceEngine:
             msg = f"checkpoint not found: {run_id}/{filename}"
             raise FileNotFoundError(msg)
         return path
+
+    def find_checkpoint_for_iteration(self, run_id: str, iteration: int) -> str | None:
+        try:
+            run_dir = resolve_run_dir(self._runs_dir, run_id)
+        except (FileNotFoundError, ValueError):
+            return None
+        ckpt_dir = run_dir / "checkpoints"
+        if not ckpt_dir.is_dir():
+            return None
+        exact = ckpt_dir / f"iter-{iteration:04d}.safetensors"
+        if exact.is_file():
+            return exact.stem
+        exact_ema = ckpt_dir / f"iter-{iteration:04d}-ema.safetensors"
+        if exact_ema.is_file():
+            return exact_ema.stem
+        candidates = sorted(p for p in ckpt_dir.iterdir() if p.is_file() and p.suffix == ".safetensors")
+        return candidates[-1].stem if candidates else None
 
     def _get_or_load_locked(self, path: Path) -> _CachedModel:
         key = str(path)
@@ -210,6 +359,28 @@ class InferenceEngine:
             _, evicted = self._cache.popitem(last=False)
             evicted.scope.__exit__(None, None, None)
         return model
+
+    def evaluate_batch_win_probs(
+        self,
+        obs_list: list[managym.Observation],
+        *,
+        run_id: str,
+        checkpoint_name: str | None,
+        hero_seat: int,
+    ) -> tuple[list[float], str]:
+        if not obs_list:
+            return [], "heuristic"
+        if checkpoint_name and checkpoint_name != "heuristic":
+            try:
+                ckpt_path = self._resolve_checkpoint(run_id, checkpoint_name)
+                with self._lock:
+                    cached = self._get_or_load_locked(ckpt_path)
+                    wins = _forward_batch_hero_win(cached, obs_list, hero_seat=hero_seat)
+            except (FileNotFoundError, RuntimeError, ValueError):
+                pass
+            else:
+                return wins, "model"
+        return [_heuristic_eval(obs, hero_seat=hero_seat)[1]["win"] for obs in obs_list], "heuristic"
 
     def _eval_one(
         self,
