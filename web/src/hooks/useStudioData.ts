@@ -173,24 +173,22 @@ export function useGamesSearch(args: GamesSearchArgs): {
   };
 }
 
-function overviewKey(target: { runId: string; iteration: number; gameIdx: number } | null): string {
-  if (!target || target.iteration < 0 || target.gameIdx < 0) return "";
-  return `${target.runId}:${target.iteration}:${target.gameIdx}`;
-}
-
 export function useGameOverview(
-  target: { runId: string; iteration: number; gameIdx: number } | null,
+  runId: string,
+  iteration: number,
+  gameIdx: number,
 ): { overview: GameOverview | null; loading: boolean } {
-  const reqKey = overviewKey(target);
+  const valid = runId !== "" && iteration >= 0 && gameIdx >= 0;
+  const reqKey = valid ? `${runId}:${iteration}:${gameIdx}` : "";
   const [state, setState] = useState<{ key: string; overview: GameOverview | null }>({
     key: "",
     overview: null,
   });
 
   useEffect(() => {
-    if (!target || !reqKey) return undefined;
+    if (!valid || !reqKey) return undefined;
     let active = true;
-    void fetchGameOverview(target)
+    void fetchGameOverview({ runId, iteration, gameIdx })
       .then((res) => {
         if (active) setState({ key: reqKey, overview: res });
       })
@@ -200,7 +198,7 @@ export function useGameOverview(
     return (): void => {
       active = false;
     };
-  }, [reqKey, target]);
+  }, [valid, reqKey, runId, iteration, gameIdx]);
 
   if (!reqKey) return { overview: null, loading: false };
   return { overview: state.key === reqKey ? state.overview : null, loading: state.key !== reqKey };
@@ -216,12 +214,13 @@ export interface StepFetchTarget {
   ckptB?: string;
 }
 
-export function useGameStepData(args: StepFetchTarget | null): {
+export function useGameStepData(args: StepFetchTarget): {
   data: GameStepResponse | null;
   loading: boolean;
   error: string | null;
 } {
-  const reqKey = args ? JSON.stringify(args) : "";
+  const { runId, iteration, gameIdx, step, pov, ckptA, ckptB } = args;
+  const reqKey = `${runId}:${iteration}:${gameIdx}:${step}:${pov}:${ckptA ?? ""}:${ckptB ?? ""}`;
   const [state, setState] = useState<{
     key: string;
     data: GameStepResponse | null;
@@ -229,9 +228,9 @@ export function useGameStepData(args: StepFetchTarget | null): {
   }>({ key: "", data: null, error: null });
 
   useEffect(() => {
-    if (!args || !reqKey) return undefined;
+    if (!runId || iteration < 0 || gameIdx < 0) return undefined;
     let active = true;
-    void fetchGameStep(args)
+    void fetchGameStep({ runId, iteration, gameIdx, step, pov, ckptA, ckptB })
       .then((res) => {
         if (active) setState({ key: reqKey, data: res, error: null });
       })
@@ -243,11 +242,11 @@ export function useGameStepData(args: StepFetchTarget | null): {
     return (): void => {
       active = false;
     };
-  }, [reqKey, args]);
+  }, [reqKey, runId, iteration, gameIdx, step, pov, ckptA, ckptB]);
 
   return {
     data: state.data,
-    loading: reqKey !== "" && state.key !== reqKey,
+    loading: state.key !== reqKey,
     error: state.error,
   };
 }

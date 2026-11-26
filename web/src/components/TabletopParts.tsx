@@ -40,11 +40,14 @@ function keyByOccurrence(names: string[]): Array<{ key: string; name: string; or
 
 export function LandPilesRow(props: {
   piles: LandPile[];
+  compact?: boolean;
   onHover: (info: HoverCardInfo | null) => void;
 }): ReactNode {
   const seen = new Map<string, number>();
+  const dense = Boolean(props.compact) || props.piles.length >= 5;
+  const sizeClass = dense ? "w-[40px] h-[54px]" : "w-[48px] h-[64px]";
   return (
-    <div className="flex items-center gap-2.5 flex-nowrap">
+    <div className={`flex items-center flex-nowrap ${dense ? "gap-1.5" : "gap-2.5"}`}>
       {props.piles.map((pile) => {
         const baseKey = `${pile.name}-${pile.tapped ? "t" : "u"}-${pile.id ?? "basic"}`;
         const occ = (seen.get(baseKey) ?? 0) + 1;
@@ -56,7 +59,7 @@ export function LandPilesRow(props: {
               props.onHover({ name: pile.name, tapped: pile.tapped, count: pile.count })
             }
             onMouseLeave={(): void => props.onHover(null)}
-            className={`relative w-[48px] h-[64px] shrink-0 cursor-pointer transition-transform ${
+            className={`relative ${sizeClass} shrink-0 cursor-pointer transition-transform ${
               pile.tapped ? "card-tapped" : "hover:-translate-y-1"
             }`}
           >

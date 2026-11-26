@@ -175,3 +175,27 @@ def test_watchlist_and_offline_card_fallback(tmp_path: Path) -> None:
     assert img.status_code == 200
     assert img.headers["content-type"] == "image/svg+xml"
     assert b"Ally" in img.content
+
+
+def test_replay_divergence_returns_warning_not_500(tmp_path: Path) -> None:
+    runs_dir = _make_fixture_runs(tmp_path)
+    game_file = runs_dir / "v2-test" / "run-alpha" / "games" / "eval-iter-0100.jsonl"
+    payload = json.loads(game_file.read_text(encoding="utf-8"))
+    payload["games"][0]["actions"][4] = 9999
+    game_file.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    client = TestClient(create_app(StudioConfig(runs_dir=runs_dir, allow_scryfall_network=False)))
+    detail = client.get(
+        "/api/game-detail",
+        params={"run_id": "v2-test/run-alpha", "iteration": 100, "game_idx": 0},
+    )
+    assert detail.status_code == 200
+    assert detail.json()["replay_warning"] is not None
+
+    step = client.get(
+        "/api/game-step",
+        params={"run_id": "v2-test/run-alpha", "iteration": 100, "game_idx": 0, "step": 10},
+    )
+    assert step.status_code == 200
+    assert step.json()["board"]["step"] == 4
+    assert step.json()["replay_warning"] is not None

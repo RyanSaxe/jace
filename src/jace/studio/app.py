@@ -188,7 +188,7 @@ def _register_replay_routes(app: FastAPI, *, replays: ReplayService, inference: 
     @app.get("/api/game-step")
     def game_step(params: Annotated[StepQueryParams, Depends()]) -> dict[str, object]:
         try:
-            game, env, obs, actual_step, chosen = replays.replay_to_step(
+            game, env, obs, actual_step, chosen, replay_warning = replays.replay_to_step(
                 run_id=params.run_id, iteration=params.iteration, game_idx=params.game_idx, step=params.step
             )
         except (FileNotFoundError, IndexError, ValueError) as exc:
@@ -203,20 +203,22 @@ def _register_replay_routes(app: FastAPI, *, replays: ReplayService, inference: 
             chosen_action=chosen,
         )
         evaluation = inference.evaluate_pair(obs, run_id=params.run_id, ckpt_a=params.ckpt_a, ckpt_b=params.ckpt_b)
-        return {"board": board, "evaluation": evaluation}
+        return {"board": board, "evaluation": evaluation, "replay_warning": replay_warning}
 
 
 def _register_fork_routes(app: FastAPI, *, replays: ReplayService, inference: InferenceEngine) -> None:
     @app.post("/api/fork")
     def fork_position(req: ForkRequest) -> dict[str, object]:
         try:
-            game, env, base_obs, actual_step, _ = replays.replay_to_step(
+            game, env, base_obs, actual_step, _, replay_warning = replays.replay_to_step(
                 run_id=req.run_id, iteration=req.iteration, game_idx=req.game_idx, step=req.step
             )
         except (FileNotFoundError, IndexError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         edits = [ForkEdit(op=e.op, seat=e.seat, value=e.value, card=e.card) for e in req.edits]
         cloned, forked_obs, warnings = apply_fork_edits(env, base_obs, edits=edits)
+        if replay_warning:
+            warnings.insert(0, replay_warning)
         board = serialize_observation(
             cloned,
             forked_obs,

@@ -341,8 +341,8 @@ export function RunsView(props: {
   };
 
   return (
-    <div className="flex flex-col lg:flex-row h-full min-h-0">
-      <div className="flex-1 min-w-0 flex flex-col min-h-0 overflow-hidden">
+    <div className="flex flex-col lg:flex-row h-full min-h-0 overflow-y-auto lg:overflow-hidden">
+      <div className="flex-none lg:flex-1 min-w-0 flex flex-col lg:min-h-0 lg:overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 border-b border-[var(--border)] bg-[var(--surface)]">
           <div className="flex items-center gap-2">
             <Activity className="w-4 h-4 text-[var(--accent)]" />
@@ -375,8 +375,8 @@ export function RunsView(props: {
             onToggleRun={toggleSeries}
           />
 
-          <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] overflow-hidden">
-            <table className="w-full border-collapse text-left text-xs">
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] overflow-x-auto">
+            <table className="w-full min-w-[640px] border-collapse text-left text-xs">
               <thead>
                 <tr className="border-b border-[var(--border)] bg-[var(--surface-2)] text-[10.5px] uppercase tracking-wider text-[var(--text-3)]">
                   <th className="py-2 px-3 font-semibold">Run</th>

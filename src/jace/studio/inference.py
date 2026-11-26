@@ -8,6 +8,7 @@ and runs stateless counterfactual forks via `env.clone_env()` and `scenario_*`.
 from __future__ import annotations
 
 import math
+import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -127,6 +128,7 @@ class InferenceEngine:
     def __init__(self, runs_dir: Path) -> None:
         self._runs_dir = runs_dir.resolve()
         self._cache: OrderedDict[str, tuple[ActorCritic, ObservationSpace]] = OrderedDict()
+        self._lock = threading.Lock()
 
     def _resolve_checkpoint(self, run_id: str, checkpoint_name: str) -> Path:
         run_dir = resolve_run_dir(self._runs_dir, run_id)
@@ -139,16 +141,18 @@ class InferenceEngine:
 
     def _load(self, path: Path) -> tuple[ActorCritic, ObservationSpace]:
         key = str(path)
-        cached = self._cache.get(key)
-        if cached is not None:
-            self._cache.move_to_end(key)
-            return cached
+        with self._lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+                return cached
         loaded = load_checkpoint(key)
         agent, obs_space = loaded[0], loaded[1]
         agent.eval()
-        self._cache[key] = (agent, obs_space)
-        while len(self._cache) > _MAX_LOADED_CKPTS:
-            self._cache.popitem(last=False)
+        with self._lock:
+            self._cache[key] = (agent, obs_space)
+            while len(self._cache) > _MAX_LOADED_CKPTS:
+                self._cache.popitem(last=False)
         return agent, obs_space
 
     def _eval_one(

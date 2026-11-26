@@ -374,6 +374,12 @@ def _heuristic_win_estimate(obs: managym.Observation) -> float:
     return round(max(0.05, min(0.95, score)), 4)
 
 
+def _engine_step_errors() -> tuple[type[BaseException], ...]:
+    candidates = (*BaseException.__subclasses__(), *Exception.__subclasses__())
+    engine_errs = tuple(cls for cls in candidates if cls.__name__ in ("PanicException", "PyAgentError"))
+    return (*engine_errs, RuntimeError, ValueError)
+
+
 def _new_env_for_game(game: RecordedGame) -> tuple[managym.Env, managym.Observation]:
     configs = [managym.PlayerConfig(name=name, decklist=dict(deck)) for name, deck in game.players]
     env = managym.Env(seed=game.seed, skip_trivial=game.skip_trivial)
@@ -405,9 +411,11 @@ class ReplayService:
 
     def _build_game_overview(self, game: RecordedGame) -> dict[str, object]:
         env, obs = _new_env_for_game(game)
+        step_errors = _engine_step_errors()
         turns_map: dict[int, dict[str, object]] = {}
         peak_step = 0
         peak_score = -1
+        warning: str | None = None
         for step_idx, action in enumerate(game.actions):
             turn_num = int(obs.turn.turn_number)
             hero_pack, opp_pack = _seat_aligned_obs(obs)
@@ -425,7 +433,11 @@ class ReplayService:
                 "stack_len": len(obs.stack_objects),
                 "eval_win": _heuristic_win_estimate(obs),
             }
-            obs, _, done, truncated, _ = env.step(action)
+            try:
+                obs, _, done, truncated, _ = env.step(action)
+            except step_errors as exc:
+                warning = f"Replay stopped at step {step_idx} (recorded on an older engine version): {exc}"
+                break
             if done or truncated:
                 break
         timeline = [turns_map[t] for t in sorted(turns_map)]
@@ -437,6 +449,7 @@ class ReplayService:
             "winner": game.winner,
             "total_steps": len(game.actions),
             "peak_step": peak_step,
+            "replay_warning": warning,
             "players": [{"name": name, "deck_size": sum(deck.values())} for name, deck in game.players],
             "timeline": timeline,
         }
@@ -448,13 +461,18 @@ class ReplayService:
         iteration: int,
         game_idx: int,
         step: int,
-    ) -> tuple[RecordedGame, managym.Env, managym.Observation, int, int | None]:
+    ) -> tuple[RecordedGame, managym.Env, managym.Observation, int, int | None, str | None]:
         game = load_recorded_game(self._runs_dir, run_id=run_id, iteration=iteration, game_idx=game_idx)
         env, obs = _new_env_for_game(game)
+        step_errors = _engine_step_errors()
         target = max(0, min(step, max(0, len(game.actions) - 1)))
         for idx in range(target):
-            obs, _, done, truncated, _ = env.step(game.actions[idx])
+            try:
+                obs, _, done, truncated, _ = env.step(game.actions[idx])
+            except step_errors as exc:
+                warn = f"Replay stopped at step {idx} (older engine version): {exc}"
+                return game, env, obs, idx, None, warn
             if done or truncated:
-                return game, env, obs, idx, None
+                return game, env, obs, idx, None, None
         chosen = game.actions[target] if target < len(game.actions) else None
-        return game, env, obs, target, chosen
+        return game, env, obs, target, chosen, None

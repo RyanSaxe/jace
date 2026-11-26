@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/Primitives";
 import { cardImageUrl } from "@/lib/api";
 import type { BoardState, EvaluationPair, ForkEdit } from "@/lib/types";
 
+const BASIC_LANDS = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"]);
+
 const FORK_CARD_PRESETS = [
   "Fire Lord Zuko",
   "Appa, Steadfast Guardian",
@@ -13,7 +15,14 @@ const FORK_CARD_PRESETS = [
   "Boiling Rock Rioter",
 ];
 
+function deckForkCards(board: BoardState): string[] {
+  const pool = [...board.hero.library_summary.map((row) => row.name), ...board.hero.graveyard];
+  const unique = [...new Set(pool)].filter((name) => !BASIC_LANDS.has(name)).slice(0, 4);
+  return unique.length > 0 ? unique : FORK_CARD_PRESETS;
+}
+
 function ForkControlsSection(props: {
+  board: BoardState;
   forkBusy: boolean;
   editCount: number;
   baseWinPct: number;
@@ -21,7 +30,11 @@ function ForkControlsSection(props: {
   warnings: string[];
   onAddEdit: (edit: ForkEdit) => void;
 }): ReactNode {
+  const [targetZone, setTargetZone] = useState<"add_battlefield" | "add_hand_card">(
+    "add_battlefield",
+  );
   const deltaWin = props.winPct - props.baseWinPct;
+  const candidates = deckForkCards(props.board);
   return (
     <div className="p-3 border-b border-[var(--border)] flex flex-col gap-2">
       <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider">
@@ -39,17 +52,41 @@ function ForkControlsSection(props: {
         </span>
       </div>
       <div>
-        <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-3)] mb-1">
-          + Force onto Hero Battlefield
+        <div className="flex items-center justify-between gap-1 mb-1">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-3)]">
+            + Pull from Hero Deck
+          </span>
+          <div className="inline-flex rounded border border-[var(--border)] bg-[var(--bg)] p-0.5 text-[9.5px] font-semibold">
+            <button
+              type="button"
+              onClick={(): void => setTargetZone("add_battlefield")}
+              className={`px-1.5 py-0.5 rounded-sm cursor-pointer ${
+                targetZone === "add_battlefield"
+                  ? "bg-[var(--fork-soft)] text-[var(--fork)]"
+                  : "text-[var(--text-3)]"
+              }`}
+            >
+              Board
+            </button>
+            <button
+              type="button"
+              onClick={(): void => setTargetZone("add_hand_card")}
+              className={`px-1.5 py-0.5 rounded-sm cursor-pointer ${
+                targetZone === "add_hand_card"
+                  ? "bg-[var(--fork-soft)] text-[var(--fork)]"
+                  : "text-[var(--text-3)]"
+              }`}
+            >
+              Hand
+            </button>
+          </div>
         </div>
         <div className="grid grid-cols-2 gap-1">
-          {FORK_CARD_PRESETS.map((cardName) => (
+          {candidates.map((cardName) => (
             <button
               key={cardName}
               type="button"
-              onClick={(): void =>
-                props.onAddEdit({ op: "add_battlefield", seat: 0, card: cardName })
-              }
+              onClick={(): void => props.onAddEdit({ op: targetZone, seat: 0, card: cardName })}
               className="flex items-center gap-1.5 rounded border border-[var(--border)] bg-[var(--bg)] p-1 text-left text-[10px] font-medium hover:border-[var(--fork)] hover:bg-[var(--fork-soft)] cursor-pointer min-w-0 overflow-hidden"
             >
               <img
@@ -226,6 +263,7 @@ export function TabletopDock(props: {
 
       {props.forkMode ? (
         <ForkControlsSection
+          board={props.board}
           forkBusy={props.forkBusy}
           editCount={props.forkEdits.length}
           baseWinPct={baseWinPct}

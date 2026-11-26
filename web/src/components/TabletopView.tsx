@@ -140,10 +140,14 @@ function TabletopPlaymat(props: {
                 }
               />
               <div className="flex-1 min-h-0 flex flex-col justify-center gap-1.5">
-                <div className="flex items-center justify-between gap-2 h-[66px]">
-                  <LandPilesRow piles={b.opp.lands} onHover={props.onSetHover} />
+                <div className="flex items-center justify-between gap-2 h-[66px] min-w-0 overflow-x-auto">
+                  <LandPilesRow
+                    piles={b.opp.lands}
+                    compact={b.opp.other_permanents.length > 0}
+                    onHover={props.onSetHover}
+                  />
                   {b.opp.other_permanents.length > 0 ? (
-                    <div className="pl-2 border-l border-dashed border-[var(--border-strong)]">
+                    <div className="pl-2 shrink-0 border-l border-dashed border-[var(--border-strong)]">
                       <PermanentsRow
                         permanents={b.opp.other_permanents}
                         compact
@@ -191,10 +195,14 @@ function TabletopPlaymat(props: {
                   highlightTone={props.highlightTone}
                   onHover={props.onSetHover}
                 />
-                <div className="flex items-center justify-between gap-2 h-[66px]">
-                  <LandPilesRow piles={b.hero.lands} onHover={props.onSetHover} />
+                <div className="flex items-center justify-between gap-2 h-[66px] min-w-0 overflow-x-auto">
+                  <LandPilesRow
+                    piles={b.hero.lands}
+                    compact={b.hero.other_permanents.length > 0}
+                    onHover={props.onSetHover}
+                  />
                   {b.hero.other_permanents.length > 0 ? (
-                    <div className="pl-2 border-l border-dashed border-[var(--border-strong)]">
+                    <div className="pl-2 shrink-0 border-l border-dashed border-[var(--border-strong)]">
                       <PermanentsRow
                         permanents={b.hero.other_permanents}
                         compact
@@ -293,7 +301,7 @@ function TabletopWorkspaceBody(props: {
   const lossPct = Math.max(0, 100 - winPct - drawPct);
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
+    <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden">
       <div className="hidden sm:flex">
         <aside
           aria-label="Win probability bar"
@@ -482,11 +490,7 @@ function LoadedTabletop(props: {
   const checkpoints = listOrEmpty(runDetail?.checkpoints).map((c) => c.name);
   const { effectiveA, effectiveB } = resolveDefaultCheckpoints(checkpoints, ckptA, ckptB);
 
-  const overviewTarget = useMemo(
-    () => ({ runId: target.run_id, iteration: target.iteration, gameIdx: target.game_idx }),
-    [target.run_id, target.iteration, target.game_idx],
-  );
-  const { overview } = useGameOverview(overviewTarget);
+  const { overview } = useGameOverview(target.run_id, target.iteration, target.game_idx);
 
   const stepTarget = useMemo(
     () => ({

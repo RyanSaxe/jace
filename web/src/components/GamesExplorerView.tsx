@@ -245,6 +245,11 @@ function nonEmpty(value: string): string | undefined {
   return value === "" ? undefined : value;
 }
 
+function gameIdentity(game: GameSummary | null): [string, number, number] {
+  if (!game) return ["", -1, -1];
+  return [game.run_id, game.iteration, game.game_idx];
+}
+
 export function GamesExplorerView(props: {
   runs: RunSummary[];
   initialRunId: string;
@@ -268,11 +273,8 @@ export function GamesExplorerView(props: {
 
   const safeIdx = Math.min(selectedIdx, Math.max(0, games.length - 1));
   const activeGame = games[safeIdx] ?? null;
-
-  const overviewReq = activeGame
-    ? { runId: activeGame.run_id, iteration: activeGame.iteration, gameIdx: activeGame.game_idx }
-    : null;
-  const { overview, loading: loadingOverview } = useGameOverview(overviewReq);
+  const [ovRunId, ovIter, ovGameIdx] = gameIdentity(activeGame);
+  const { overview, loading: loadingOverview } = useGameOverview(ovRunId, ovIter, ovGameIdx);
 
   const handleKey = useCallback(
     (event: KeyboardEvent): void => {
@@ -299,8 +301,8 @@ export function GamesExplorerView(props: {
   useKeyboardShortcut(handleKey);
 
   return (
-    <div className="flex flex-col lg:flex-row h-full min-h-0">
-      <div className="flex-1 min-w-0 flex flex-col min-h-0 overflow-hidden">
+    <div className="flex flex-col lg:flex-row h-full min-h-0 overflow-y-auto lg:overflow-hidden">
+      <div className="flex-none lg:flex-1 min-w-0 flex flex-col lg:min-h-0 lg:overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 border-b border-[var(--border)] bg-[var(--surface)]">
           <div className="flex items-center gap-2">
             <Layers className="w-4 h-4 text-[var(--accent)]" />
@@ -394,8 +396,8 @@ export function GamesExplorerView(props: {
               {error}
             </div>
           ) : null}
-          <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] overflow-hidden">
-            <table className="w-full border-collapse text-left text-xs">
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] overflow-x-auto">
+            <table className="w-full min-w-[620px] border-collapse text-left text-xs">
               <thead>
                 <tr className="border-b border-[var(--border)] bg-[var(--surface-2)] text-[10.5px] uppercase tracking-wider text-[var(--text-3)]">
                   <th className="py-2 px-3 font-semibold">Seed / Run</th>
