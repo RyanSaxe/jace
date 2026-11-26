@@ -244,6 +244,13 @@ def _build_train_args(cfg: ColabRunConfig, *, force_resume: bool = False, seed_o
     return train_args
 
 
+_KILL_REMOTE_TRAIN = (
+    "if [ -f /content/train.pid ]; then "
+    'OLD=$(cat /content/train.pid); pkill -9 -P "$OLD" 2>/dev/null || true; kill -9 "$OLD" 2>/dev/null || true; '
+    "fi; pkill -9 -f '/content/jace/.venv/bin/python -m jace\\.train\\.full_data' || true"
+)
+
+
 def build_remote_script(cfg: ColabRunConfig) -> str:
     train_args = _build_train_args(cfg, force_resume=cfg.reuse_session)
     branch_q = shlex.quote(cfg.branch)
@@ -262,7 +269,7 @@ def build_remote_script(cfg: ColabRunConfig) -> str:
         'export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"',
         "if ! command -v uv >/dev/null 2>&1; then curl -LsSf https://astral.sh/uv/install.sh | sh; fi",
         repo_sync_cmd,
-        *(["pkill -9 -f jace.train.full_data || true", "sleep 2"] if cfg.reuse_session else []),
+        *([_KILL_REMOTE_TRAIN, "sleep 2"] if cfg.reuse_session else []),
         f"cd {shlex.quote(_REMOTE_REPO_DIR)}",
         "uv sync --frozen",
         f"rm -f {_REMOTE_EXIT_FILE}",
@@ -279,7 +286,7 @@ def _build_restart_script(cfg: ColabRunConfig, *, seed_offset: int) -> str:
         "set -euo pipefail",
         'export PATH="$HOME/.local/bin:$PATH"',
         'export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"',
-        "pkill -9 -f jace.train.full_data || true",
+        _KILL_REMOTE_TRAIN,
         "sleep 2",
         f"cd {shlex.quote(_REMOTE_REPO_DIR)}",
         f"rm -f {_REMOTE_EXIT_FILE}",

@@ -287,7 +287,7 @@ def test_stall_watchdog_restarts_with_shifted_seed_and_stops_on_exhaustion(tmp_p
     assert run_colab_training(recover_cfg, runner=recover_runner, clock=fake_clock) == 0
     ssh_cmds = [cmd[-1] for cmd, _, _, _ in recover_runner.calls if cmd[4] == "ssh"]
     assert len(ssh_cmds) == 2
-    assert "pkill -9 -f jace.train.full_data" in ssh_cmds[1]
+    assert "/content/jace/.venv/bin/python" in ssh_cmds[1]
     assert "--resume" in ssh_cmds[1]
     assert "--seed 1005" in ssh_cmds[1]
 
