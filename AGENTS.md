@@ -3,10 +3,11 @@
 ## Setup and checks
 
 ```sh
-uv sync
+uv sync --extra studio
 prek install
 prek run --all-files
-uv run --locked pytest -q
+uv run --locked --extra studio pytest -q
+npm --prefix web test && npm --prefix web run build
 ```
 
 ## Workflow

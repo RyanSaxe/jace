@@ -42,13 +42,15 @@ Requires Python 3.13, [uv](https://docs.astral.sh/uv/), and Rust (to compile
 ```sh
 git clone https://github.com/RyanSaxe/jace.git
 cd jace
-uv sync
-uv run pytest -q                              # unit tests
+uv sync --extra studio
+uv run --extra studio pytest -q               # unit tests
 uv run python -m jace.train.ten_decks --help  # 10-deck lab (no external data)
 uv run python -m jace.train.full_data --help  # full 17Lands self-play
 uv run python -m jace.pretrain.draft --help   # drafter & card encoder pretraining
 uv run python -m jace.pretrain.decks --help   # deck builder & score pretraining
 uv run scripts/colab_run.py --help            # Google Colab GPU launcher
+npm --prefix web ci && npm --prefix web run build
+uv run --extra studio python -m jace.studio --runs-dir ../jace-runs  # Jace Studio UI
 ```
 
 See [Install](docs/getting-started/install.md) for setup and 17Lands data.

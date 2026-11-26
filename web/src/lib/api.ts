@@ -83,7 +83,8 @@ export async function fetchRuns(): Promise<RunSummary[]> {
 }
 
 export async function fetchRunDetail(runId: string): Promise<RunDetail> {
-  return fetchJson(`/api/runs/${encodeURI(runId)}`, isRunDetail);
+  const encoded = runId.split("/").map(encodeURIComponent).join("/");
+  return fetchJson(`/api/runs/${encoded}`, isRunDetail);
 }
 
 export interface GamesSearchArgs {
@@ -91,22 +92,31 @@ export interface GamesSearchArgs {
   setCode?: string;
   card?: string;
   result?: string;
+  colors?: string;
   search?: string;
   sort?: string;
   limit?: number;
+  offset?: number;
 }
 
 export async function fetchGames(
   args: GamesSearchArgs,
 ): Promise<{ total: number; games: GameSummary[] }> {
   const params = new URLSearchParams();
-  if (args.runId) params.set("run_id", args.runId);
-  if (args.setCode) params.set("set_code", args.setCode);
-  if (args.card) params.set("card", args.card);
-  if (args.result) params.set("result", args.result);
-  if (args.search) params.set("search", args.search);
-  if (args.sort) params.set("sort", args.sort);
+  const pairs: Array<[string, string | undefined]> = [
+    ["run_id", args.runId],
+    ["set_code", args.setCode],
+    ["card", args.card],
+    ["result", args.result],
+    ["colors", args.colors],
+    ["search", args.search],
+    ["sort", args.sort],
+  ];
+  for (const [key, val] of pairs) {
+    if (val) params.set(key, val);
+  }
   params.set("limit", String(args.limit ?? 100));
+  if (args.offset && args.offset > 0) params.set("offset", String(args.offset));
   return fetchJson(`/api/games?${params.toString()}`, isGamesEnvelope);
 }
 

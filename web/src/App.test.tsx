@@ -1,6 +1,6 @@
 /** Behavioral UI tests for Jace Studio navigation, runs list, games search, and Tabletop rendering. */
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "@/App";
 
@@ -107,6 +107,7 @@ function installFakeFetch(): void {
 describe("Jace Studio App", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    window.localStorage.clear();
   });
 
   it("renders discovered runs and switches to Games Explorer", async () => {
@@ -118,18 +119,23 @@ describe("Jace Studio App", () => {
     });
     expect(screen.getAllByText("75.5%").length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByRole("button", { name: /^Games/i }));
+    const nav = screen.getByRole("navigation", { name: "Primary navigation" });
+    fireEvent.click(within(nav).getByRole("button", { name: /^Games/i }));
     await waitFor(() => {
       expect(screen.getByText(/Seed #20001/i)).toBeInTheDocument();
     });
   });
 
-  it("toggles Warm Paper and Obsidian Dark theme cleanly", async () => {
+  it("toggles Warm Paper and Obsidian Dark theme and persists to localStorage", async () => {
     installFakeFetch();
     render(<App />);
+    await waitFor(() => {
+      expect(screen.getAllByText("v2-r89-flagship-w384l6").length).toBeGreaterThan(0);
+    });
     const themeBtn = screen.getByRole("button", { name: /Warm Paper/i });
     fireEvent.click(themeBtn);
     expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(window.localStorage.getItem("jace-studio-theme")).toBe("dark");
     expect(screen.getByRole("button", { name: /Obsidian Dark/i })).toBeInTheDocument();
   });
 });

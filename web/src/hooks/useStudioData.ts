@@ -11,9 +11,12 @@ import {
   fetchRunDetail,
   fetchRuns,
   fetchWatchlist,
+  postFork,
 } from "@/lib/api";
 import type {
   CardMetadata,
+  ForkEdit,
+  ForkResponse,
   GameOverview,
   GameStepResponse,
   GameSummary,
@@ -24,18 +27,33 @@ import type {
   WatchlistItem,
 } from "@/lib/types";
 
+const THEME_STORAGE_KEY = "jace-studio-theme";
+
+export function loadSavedTheme(): ThemeMode {
+  try {
+    return window.localStorage.getItem(THEME_STORAGE_KEY) === "dark" ? "dark" : "light";
+  } catch {
+    return "light";
+  }
+}
+
 export function useThemeSync(theme: ThemeMode): void {
   useEffect(() => {
     document.documentElement.dataset.theme = theme === "dark" ? "dark" : "";
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // Ignore storage errors in private/restricted browsers.
+    }
   }, [theme]);
 }
 
-async function fetchTopRunDetails(list: RunSummary[]): Promise<Record<string, RunDetail>> {
+async function fetchRunDetailBatch(runIds: string[]): Promise<Record<string, RunDetail>> {
   const pairs = await Promise.all(
-    list.slice(0, 6).map(async (item) => {
+    runIds.map(async (id) => {
       try {
-        const detail = await fetchRunDetail(item.run_id);
-        return [item.run_id, detail] as const;
+        const detail = await fetchRunDetail(id);
+        return [id, detail] as const;
       } catch {
         return null;
       }
@@ -43,9 +61,7 @@ async function fetchTopRunDetails(list: RunSummary[]): Promise<Record<string, Ru
   );
   const map: Record<string, RunDetail> = {};
   for (const pair of pairs) {
-    if (pair !== null) {
-      map[pair[0]] = pair[1];
-    }
+    if (pair !== null) map[pair[0]] = pair[1];
   }
   return map;
 }
@@ -70,7 +86,11 @@ export function useRunsData(): {
     const currentTick = tick;
     void fetchRuns()
       .then(async (list) => {
-        const map = await fetchTopRunDetails(list);
+        const preferred = list
+          .filter((r) => r.latest_live_win !== null || r.latest_ema_win !== null)
+          .slice(0, 8)
+          .map((r) => r.run_id);
+        const map = await fetchRunDetailBatch(preferred);
         if (!active) return;
         setState({ loadedTick: currentTick, runs: list, details: map, error: null });
       })
@@ -91,6 +111,31 @@ export function useRunsData(): {
     error: state.error,
     reload: (): void => setTick((n) => n + 1),
   };
+}
+
+export function useExtraRunDetails(
+  runIds: string[],
+  existing: Record<string, RunDetail>,
+): Record<string, RunDetail> {
+  const [extra, setExtra] = useState<Record<string, RunDetail>>({});
+  const missing = runIds.filter((id) => !existing[id] && !extra[id]);
+  const missingKey = missing.join("|");
+
+  useEffect(() => {
+    if (!missingKey) return undefined;
+    let active = true;
+    const ids = missingKey.split("|");
+    void fetchRunDetailBatch(ids).then((fetched) => {
+      if (active && Object.keys(fetched).length > 0) {
+        setExtra((prev) => ({ ...prev, ...fetched }));
+      }
+    });
+    return (): void => {
+      active = false;
+    };
+  }, [missingKey]);
+
+  return { ...existing, ...extra };
 }
 
 export function useRunDetail(runId: string | null): RunDetail | null {
@@ -118,6 +163,15 @@ export function useRunDetail(runId: string | null): RunDetail | null {
   return loaded.detail;
 }
 
+export function useDebouncedValue(value: string, delayMs: number): string {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const id = window.setTimeout(() => setDebounced(value), delayMs);
+    return (): void => window.clearTimeout(id);
+  }, [value, delayMs]);
+  return debounced;
+}
+
 export function useGamesSearch(args: GamesSearchArgs): {
   games: GameSummary[];
   total: number;
@@ -125,8 +179,20 @@ export function useGamesSearch(args: GamesSearchArgs): {
   loading: boolean;
   error: string | null;
 } {
-  const { runId, setCode, card, result, search, sort, limit } = args;
-  const queryKey = JSON.stringify({ runId, setCode, card, result, search, sort, limit });
+  const { runId, setCode, card, result, colors, search, sort, limit, offset } = args;
+  const debouncedSearch = useDebouncedValue(search ?? "", 180);
+  const effectiveSearch = debouncedSearch === "" ? undefined : debouncedSearch;
+  const queryKey = JSON.stringify({
+    runId,
+    setCode,
+    card,
+    result,
+    colors,
+    effectiveSearch,
+    sort,
+    limit,
+    offset,
+  });
   const [state, setState] = useState<{
     key: string;
     games: GameSummary[];
@@ -137,7 +203,17 @@ export function useGamesSearch(args: GamesSearchArgs): {
 
   useEffect(() => {
     let active = true;
-    void fetchGames({ runId, setCode, card, result, search, sort, limit })
+    void fetchGames({
+      runId,
+      setCode,
+      card,
+      result,
+      colors,
+      search: effectiveSearch,
+      sort,
+      limit,
+      offset,
+    })
       .then((res) => {
         if (!active) return;
         setState({ key: queryKey, games: res.games, total: res.total, error: null });
@@ -150,7 +226,7 @@ export function useGamesSearch(args: GamesSearchArgs): {
     return (): void => {
       active = false;
     };
-  }, [queryKey, runId, setCode, card, result, search, sort, limit]);
+  }, [queryKey, runId, setCode, card, result, colors, effectiveSearch, sort, limit, offset]);
 
   useEffect(() => {
     let active = true;
@@ -177,31 +253,38 @@ export function useGameOverview(
   runId: string,
   iteration: number,
   gameIdx: number,
-): { overview: GameOverview | null; loading: boolean } {
+): { overview: GameOverview | null; loading: boolean; error: string | null } {
   const valid = runId !== "" && iteration >= 0 && gameIdx >= 0;
   const reqKey = valid ? `${runId}:${iteration}:${gameIdx}` : "";
-  const [state, setState] = useState<{ key: string; overview: GameOverview | null }>({
-    key: "",
-    overview: null,
-  });
+  const [state, setState] = useState<{
+    key: string;
+    overview: GameOverview | null;
+    error: string | null;
+  }>({ key: "", overview: null, error: null });
 
   useEffect(() => {
     if (!valid || !reqKey) return undefined;
     let active = true;
     void fetchGameOverview({ runId, iteration, gameIdx })
       .then((res) => {
-        if (active) setState({ key: reqKey, overview: res });
+        if (active) setState({ key: reqKey, overview: res, error: null });
       })
-      .catch(() => {
-        if (active) setState({ key: reqKey, overview: null });
+      .catch((err: unknown) => {
+        if (!active) return;
+        const message = err instanceof Error ? err.message : "Failed to load game overview";
+        setState({ key: reqKey, overview: null, error: message });
       });
     return (): void => {
       active = false;
     };
   }, [valid, reqKey, runId, iteration, gameIdx]);
 
-  if (!reqKey) return { overview: null, loading: false };
-  return { overview: state.key === reqKey ? state.overview : null, loading: state.key !== reqKey };
+  if (!reqKey) return { overview: null, loading: false, error: null };
+  return {
+    overview: state.key === reqKey ? state.overview : null,
+    loading: state.key !== reqKey,
+    error: state.key === reqKey ? state.error : null,
+  };
 }
 
 export interface StepFetchTarget {
@@ -251,13 +334,57 @@ export function useGameStepData(args: StepFetchTarget): {
   };
 }
 
+export function useForkEvaluation(
+  target: StepFetchTarget,
+  edits: ForkEdit[],
+  enabled: boolean,
+): { result: ForkResponse | null; busy: boolean; error: string | null } {
+  const { runId, iteration, gameIdx, step, pov, ckptA, ckptB } = target;
+  const editsJson = JSON.stringify(edits);
+  const activeKey =
+    enabled && edits.length > 0
+      ? `${runId}:${iteration}:${gameIdx}:${step}:${pov}:${ckptA ?? ""}:${ckptB ?? ""}:${editsJson}`
+      : "";
+  const [state, setState] = useState<{
+    key: string;
+    result: ForkResponse | null;
+    error: string | null;
+  }>({ key: "", result: null, error: null });
+
+  useEffect(() => {
+    if (!activeKey) return undefined;
+    let active = true;
+    void postFork({ runId, iteration, gameIdx, step, pov, ckptA, ckptB, edits })
+      .then((res) => {
+        if (active) setState({ key: activeKey, result: res, error: null });
+      })
+      .catch((err: unknown) => {
+        if (!active) return;
+        const message = err instanceof Error ? err.message : "Fork evaluation failed";
+        setState((prev) => ({ key: activeKey, result: prev.result, error: message }));
+      });
+    return (): void => {
+      active = false;
+    };
+  }, [activeKey, runId, iteration, gameIdx, step, pov, ckptA, ckptB, edits]);
+
+  if (!activeKey) return { result: null, busy: false, error: null };
+  return {
+    result: state.key === activeKey ? state.result : state.result,
+    busy: state.key !== activeKey,
+    error: state.key === activeKey ? state.error : null,
+  };
+}
+
 export function useWatchlistData(): {
   items: WatchlistItem[];
   setItems: React.Dispatch<React.SetStateAction<WatchlistItem[]>>;
   loading: boolean;
+  error: string | null;
 } {
   const [items, setItems] = useState<WatchlistItem[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -267,15 +394,17 @@ export function useWatchlistData(): {
         setItems(list);
         setLoaded(true);
       })
-      .catch(() => {
-        if (active) setLoaded(true);
+      .catch((err: unknown) => {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load watchlist");
+        setLoaded(true);
       });
     return (): void => {
       active = false;
     };
   }, []);
 
-  return { items, setItems, loading: !loaded };
+  return { items, setItems, loading: !loaded, error };
 }
 
 export function useCardMeta(name: string | null): CardMetadata | null {
@@ -306,11 +435,13 @@ export function useCardMeta(name: string | null): CardMetadata | null {
 export function useKeyboardShortcut(handler: (event: KeyboardEvent) => void): void {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target;
       const isField =
         target instanceof HTMLInputElement ||
         target instanceof HTMLTextAreaElement ||
-        target instanceof HTMLSelectElement;
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable);
       if (isField) return;
       handler(event);
     };

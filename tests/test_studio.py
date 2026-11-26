@@ -199,3 +199,64 @@ def test_replay_divergence_returns_warning_not_500(tmp_path: Path) -> None:
     assert step.status_code == 200
     assert step.json()["board"]["step"] == 4
     assert step.json()["replay_warning"] is not None
+
+
+def test_leg1_seat_swap_and_hero_pov_action_privacy_and_cr304_fork(tmp_path: Path) -> None:
+    runs_dir = _make_fixture_runs(tmp_path)
+    game_file = runs_dir / "v2-test" / "run-alpha" / "games" / "eval-iter-0100.jsonl"
+    rec = _record_small_game(seed=20002)
+    rec["context"] = {"players": ["heuristic", "agent"]}
+    games_list = rec["games"]
+    assert isinstance(games_list, list)
+    games_list[0]["end"]["winner"] = 1
+    games_list[0]["players"][0]["disclosure"] = "closed"
+    games_list[0]["players"][1]["disclosure"] = "closed"
+    game_file.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+
+    client = TestClient(create_app(StudioConfig(runs_dir=runs_dir, allow_scryfall_network=False)))
+    games = client.get("/api/games").json()["games"]
+    assert games[0]["hero_seat"] == 1
+    assert games[0]["result"] == "win"
+    reversed_colors = games[0]["hero_colors"][::-1]
+    assert client.get("/api/games", params={"colors": reversed_colors}).json()["total"] == 1
+
+    # Find an opponent-acting step (seat 0 acting while hero_seat is 1)
+    opp_step = next(
+        idx
+        for idx in range(25)
+        if not client.get(
+            "/api/game-step",
+            params={"run_id": "v2-test/run-alpha", "iteration": 100, "game_idx": 0, "step": idx, "pov": "hero"},
+        ).json()["board"]["actor_is_hero"]
+    )
+    masked = client.get(
+        "/api/game-step",
+        params={"run_id": "v2-test/run-alpha", "iteration": 100, "game_idx": 0, "step": opp_step, "pov": "hero"},
+    ).json()
+    assert masked["board"]["actions_hidden"] is True
+    assert masked["board"]["legal_actions"] == []
+    assert masked["evaluation"]["primary"]["probs"] == []
+
+    # CR 304.4: Instant/Sorcery cannot be forced onto battlefield in Fork mode
+    priority_step = next(
+        idx
+        for idx in range(25)
+        if client.get(
+            "/api/game-step",
+            params={"run_id": "v2-test/run-alpha", "iteration": 100, "game_idx": 0, "step": idx, "pov": "omniscient"},
+        ).json()["board"]["action_space_kind"]
+        == "PRIORITY"
+    )
+    fork_resp = client.post(
+        "/api/fork",
+        json={
+            "run_id": "v2-test/run-alpha",
+            "iteration": 100,
+            "game_idx": 0,
+            "step": priority_step,
+            "pov": "omniscient",
+            "edits": [{"op": "add_battlefield", "seat": 1, "card": "Sold Out"}],
+        },
+    )
+    assert fork_resp.status_code == 200
+    assert any("CR 304.4" in w for w in fork_resp.json()["warnings"])

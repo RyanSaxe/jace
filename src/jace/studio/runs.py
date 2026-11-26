@@ -92,7 +92,10 @@ def _read_config(run_dir: Path) -> dict[str, object]:
     cfg_path = run_dir / "config.json"
     if not cfg_path.exists():
         return {}
-    raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
     return raw if isinstance(raw, dict) else {}
 
 
@@ -110,7 +113,11 @@ def _parse_metric_line(raw_line: str) -> dict[str, object] | None:
 def _read_metrics(metrics_path: Path) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     train_rows: list[dict[str, object]] = []
     eval_rows: list[dict[str, object]] = []
-    with metrics_path.open("r", encoding="utf-8") as handle:
+    try:
+        handle = metrics_path.open("r", encoding="utf-8")
+    except OSError:
+        return train_rows, eval_rows
+    with handle:
         for raw_line in handle:
             item = _parse_metric_line(raw_line)
             if item is None:
@@ -164,8 +171,10 @@ def _downsample_train(rows: list[dict[str, object]], *, max_points: int = 240) -
 
 
 def _split_run_id(rel_path: Path) -> tuple[str, str, str]:
-    run_id = rel_path.as_posix()
     parts = rel_path.parts
+    if not parts:
+        return "root", "root", "root"
+    run_id = rel_path.as_posix()
     if len(parts) >= _MIN_NESTED_PARTS:
         return run_id, parts[0], "/".join(parts[1:])
     return run_id, parts[0], parts[0]

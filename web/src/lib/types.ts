@@ -64,6 +64,7 @@ export interface GameSummary {
   seed: number;
   result: string;
   winner_seat: number;
+  hero_seat: number;
   steps: number;
   turns: number;
   hero_name: string;
@@ -90,9 +91,12 @@ export interface GameOverview {
   iteration: number;
   game_idx: number;
   seed: number;
+  hero_seat?: number;
   winner: number | null;
   total_steps: number;
+  max_playable_step?: number;
   peak_step: number;
+  replay_warning?: string | null;
   players: Array<{ name: string; deck_size: number }>;
   timeline: TimelinePoint[];
 }
@@ -119,6 +123,9 @@ export interface PermanentState {
   plus1_counters: number;
   tapped: boolean;
   sick: boolean;
+  attacking?: boolean;
+  blocking?: boolean;
+  blocking_id?: number | null;
   mana_value: number;
 }
 
@@ -138,6 +145,9 @@ export interface LibrarySummaryRow {
 export interface PlayerState {
   seat: number;
   life: number;
+  is_active?: boolean;
+  mana_pool?: string;
+  open_lands?: number;
   zone_counts: ZoneCounts;
   lands: LandPile[];
   creatures: PermanentState[];
@@ -157,6 +167,7 @@ export interface StackItem {
   kind: string;
   source_permanent_id: number | null;
   controller_id: number;
+  controller_side?: "hero" | "opp";
 }
 
 export interface LegalAction {
@@ -166,6 +177,13 @@ export interface LegalAction {
   focus_ids: number[];
 }
 
+export interface RecentEvent {
+  step: number;
+  turn: number;
+  actor_side: "hero" | "opp";
+  text: string;
+}
+
 export interface BoardState {
   step: number;
   total_steps: number;
@@ -173,13 +191,19 @@ export interface BoardState {
   phase: string;
   step_name: string;
   action_space_kind: string;
+  hero_seat?: number;
   acting_seat: number;
+  actor_is_hero?: boolean;
+  active_is_hero?: boolean;
+  actions_hidden?: boolean;
   chosen_action: number | null;
   pov: PovMode;
   hero: PlayerState;
   opp: PlayerState;
   stack: StackItem[];
   legal_actions: LegalAction[];
+  recent_events?: RecentEvent[];
+  non_permanent_names?: string[];
 }
 
 export interface WdlEstimate {
@@ -202,11 +226,13 @@ export interface EvaluationPair {
     kl: number;
     argmax_changed: boolean;
   };
+  warnings?: string[];
 }
 
 export interface GameStepResponse {
   board: BoardState;
   evaluation: EvaluationPair;
+  replay_warning?: string | null;
 }
 
 export interface ForkEdit {
@@ -250,4 +276,14 @@ export interface GameTarget {
   game_idx: number;
   step: number;
   seed: number;
+}
+
+export interface GamesFilterState {
+  runId: string;
+  result: string;
+  colors: string;
+  card: string;
+  search: string;
+  sort: string;
+  page: number;
 }

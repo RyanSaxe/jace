@@ -1,4 +1,4 @@
-/** Top-level Jace Studio shell: 224 px Linear navigation rail, theme toggle, and full-lifecycle routing. */
+/** Top-level Jace Studio shell: 224 px Linear navigation rail, persisted theme, and full-lifecycle routing. */
 
 import { Activity, Bookmark, Layers, Menu, Moon, Sparkles, Sun, Swords, X } from "lucide-react";
 import { type ReactNode, useCallback, useState } from "react";
@@ -8,13 +8,14 @@ import { TabletopView } from "@/components/TabletopView";
 import { WatchlistView } from "@/components/WatchlistView";
 import { Badge } from "@/components/ui/Primitives";
 import {
+  loadSavedTheme,
   useKeyboardShortcut,
   useRunsData,
   useThemeSync,
   useWatchlistData,
 } from "@/hooks/useStudioData";
 import { addWatchlistItem, removeWatchlistItem } from "@/lib/api";
-import type { BoardState, GameTarget, NavTab, ThemeMode } from "@/lib/types";
+import type { BoardState, GameTarget, GamesFilterState, NavTab, ThemeMode } from "@/lib/types";
 
 const NAV_ITEMS: ReadonlyArray<{ id: NavTab; label: string; shortcut: string }> = [
   { id: "runs", label: "Runs", shortcut: "1" },
@@ -22,6 +23,16 @@ const NAV_ITEMS: ReadonlyArray<{ id: NavTab; label: string; shortcut: string }> 
   { id: "tabletop", label: "Tabletop", shortcut: "3" },
   { id: "watchlist", label: "Watchlist", shortcut: "4" },
 ];
+
+const INITIAL_GAMES_FILTERS: GamesFilterState = {
+  runId: "",
+  result: "",
+  colors: "",
+  card: "",
+  search: "",
+  sort: "steps_desc",
+  page: 0,
+};
 
 function NavIcon(props: { id: NavTab }): ReactNode {
   if (props.id === "runs") return <Activity className="w-4 h-4" />;
@@ -32,10 +43,11 @@ function NavIcon(props: { id: NavTab }): ReactNode {
 
 export function App(): ReactNode {
   const [tab, setTab] = useState<NavTab>("runs");
-  const [theme, setTheme] = useState<ThemeMode>("light");
+  const [theme, setTheme] = useState<ThemeMode>(loadSavedTheme);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [gamesRunFilter, setGamesRunFilter] = useState("");
+  const [gamesFilters, setGamesFilters] = useState<GamesFilterState>(INITIAL_GAMES_FILTERS);
   const [activeGame, setActiveGame] = useState<GameTarget | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useThemeSync(theme);
   const { runs, details, loading: runsLoading, error: runsError, reload } = useRunsData();
@@ -46,10 +58,17 @@ export function App(): ReactNode {
   } = useWatchlistData();
 
   const handleShortcut = useCallback((event: KeyboardEvent): void => {
-    if (event.key === "1") setTab("runs");
-    else if (event.key === "2") setTab("games");
-    else if (event.key === "3") setTab("tabletop");
-    else if (event.key === "4") setTab("watchlist");
+    if (event.key === "Escape") {
+      setMobileMenuOpen(false);
+    } else if (event.key === "1") {
+      setTab("runs");
+    } else if (event.key === "2") {
+      setTab("games");
+    } else if (event.key === "3") {
+      setTab("tabletop");
+    } else if (event.key === "4") {
+      setTab("watchlist");
+    }
   }, []);
   useKeyboardShortcut(handleShortcut);
 
@@ -59,7 +78,13 @@ export function App(): ReactNode {
     setMobileMenuOpen(false);
   };
 
-  const handlePinPosition = async (board: BoardState, target: GameTarget): Promise<void> => {
+  const handlePinPosition = async (args: {
+    board: BoardState;
+    target: GameTarget;
+    note?: string;
+  }): Promise<void> => {
+    const { board, target, note } = args;
+    setActionError(null);
     const created = await addWatchlistItem({
       run_id: target.run_id,
       iteration: target.iteration,
@@ -68,28 +93,47 @@ export function App(): ReactNode {
       turn: board.turn,
       seed: target.seed,
       label: `Turn ${board.turn} · ${board.action_space_kind}`,
-      note: `Hero ${board.hero.life} vs Opp ${board.opp.life} (${board.hero.zone_counts.battlefield + board.opp.zone_counts.battlefield} perms)`,
+      note:
+        note?.trim() ||
+        `Hero ${board.hero.life} vs Opp ${board.opp.life} (${board.hero.zone_counts.battlefield + board.opp.zone_counts.battlefield} perms)`,
     });
     setWatchlist((prev) => [created, ...prev]);
   };
 
   const handleRemoveWatchlist = (itemId: string): void => {
-    void removeWatchlistItem(itemId).then(() => {
-      setWatchlist((prev) => prev.filter((item) => item.id !== itemId));
-    });
+    setActionError(null);
+    void removeWatchlistItem(itemId)
+      .then(() => {
+        setWatchlist((prev) => prev.filter((item) => item.id !== itemId));
+      })
+      .catch((err: unknown) => {
+        setActionError(err instanceof Error ? err.message : "Failed to remove watchlist item");
+      });
   };
 
   const runningCount = runs.filter((r) => r.status === "running").length;
 
-  const sidebarContent = (
+  const renderSidebar = (isDrawer: boolean): ReactNode => (
     <div className="flex flex-col h-full justify-between p-3">
       <div className="flex flex-col gap-4">
-        <div className="flex items-center justify-between px-1">
-          <div className="flex items-center gap-2 font-semibold text-[13.5px] tracking-tight">
+        <div className="flex items-center justify-between gap-2 px-1">
+          <h1 className="flex items-center gap-2 font-semibold text-[13.5px] tracking-tight m-0">
             <span className="w-2.5 h-2.5 rounded-[3px] bg-[var(--accent)]" />
             <span>Jace Studio</span>
+          </h1>
+          <div className="flex items-center gap-1.5">
+            {runningCount > 0 ? <Badge tone="win">{runningCount} live</Badge> : null}
+            {isDrawer ? (
+              <button
+                type="button"
+                onClick={(): void => setMobileMenuOpen(false)}
+                aria-label="Close navigation"
+                className="w-9 h-9 rounded-md flex items-center justify-center text-[var(--text-2)] hover:bg-[var(--surface-2)] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            ) : null}
           </div>
-          {runningCount > 0 ? <Badge tone="win">{runningCount} live</Badge> : null}
         </div>
 
         <nav className="flex flex-col gap-0.5" aria-label="Primary navigation">
@@ -102,11 +146,12 @@ export function App(): ReactNode {
               <button
                 key={item.id}
                 type="button"
+                aria-current={active ? "page" : undefined}
                 onClick={(): void => {
                   setTab(item.id);
                   setMobileMenuOpen(false);
                 }}
-                className={`flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs font-medium cursor-pointer transition-colors ${
+                className={`flex items-center justify-between rounded-md px-2.5 py-2 lg:py-1.5 text-xs font-medium cursor-pointer transition-colors ${
                   active
                     ? "bg-[var(--accent-soft)] text-[var(--accent)] font-semibold"
                     : "text-[var(--text-2)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]"
@@ -115,12 +160,13 @@ export function App(): ReactNode {
                 <span className="flex items-center gap-2">
                   <NavIcon id={item.id} />
                   {item.label}
+                  {item.id === "watchlist" && watchlist.length > 0 ? (
+                    <Badge tone="accent">{watchlist.length}</Badge>
+                  ) : null}
                 </span>
-                <span className="tabular text-[10px] text-[var(--text-3)]">
-                  {item.id === "watchlist" && watchlist.length > 0
-                    ? watchlist.length
-                    : item.shortcut}
-                </span>
+                <kbd className="tabular text-[10px] text-[var(--text-3)] font-sans">
+                  {item.shortcut}
+                </kbd>
               </button>
             );
           })}
@@ -165,24 +211,19 @@ export function App(): ReactNode {
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-[var(--bg)] text-[var(--text)]">
-      {/* Desktop 224 px fixed left rail */}
-      <aside className="hidden md:flex w-[224px] shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface)]">
-        {sidebarContent}
+      {/* Desktop 224 px fixed left rail (collapsed below lg so tablet gets full width) */}
+      <aside
+        aria-label="Sidebar navigation"
+        className="hidden lg:flex w-[224px] shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface)]"
+      >
+        {renderSidebar(false)}
       </aside>
 
-      {/* Mobile slide-over nav */}
+      {/* Tablet / Mobile slide-over nav */}
       {mobileMenuOpen ? (
-        <div className="fixed inset-0 z-50 flex md:hidden">
-          <div className="w-[240px] bg-[var(--surface)] border-r border-[var(--border)] shadow-xl relative">
-            <button
-              type="button"
-              onClick={(): void => setMobileMenuOpen(false)}
-              aria-label="Close navigation"
-              className="absolute top-2.5 right-2.5 rounded p-1 text-[var(--text-2)]"
-            >
-              <X className="w-4 h-4" />
-            </button>
-            {sidebarContent}
+        <div className="fixed inset-0 z-50 flex lg:hidden">
+          <div className="w-[260px] bg-[var(--surface)] border-r border-[var(--border)] shadow-xl">
+            {renderSidebar(true)}
           </div>
           <button
             type="button"
@@ -194,12 +235,12 @@ export function App(): ReactNode {
       ) : null}
 
       <div className="flex-1 min-w-0 flex flex-col h-full overflow-hidden">
-        <header className="flex md:hidden items-center justify-between px-3 py-2 border-b border-[var(--border)] bg-[var(--surface)]">
+        <header className="flex lg:hidden items-center justify-between px-3 py-1.5 border-b border-[var(--border)] bg-[var(--surface)] shrink-0">
           <button
             type="button"
             onClick={(): void => setMobileMenuOpen(true)}
             aria-label="Open navigation"
-            className="rounded p-1 border border-[var(--border)]"
+            className="w-10 h-10 rounded-md flex items-center justify-center border border-[var(--border)] cursor-pointer"
           >
             <Menu className="w-4 h-4" />
           </button>
@@ -207,9 +248,9 @@ export function App(): ReactNode {
           <Badge tone="accent">{tab}</Badge>
         </header>
 
-        {runsError ? (
+        {runsError || actionError ? (
           <div className="mx-4 mt-3 rounded-md border border-[var(--loss)] bg-[var(--loss-soft)] p-2.5 text-xs text-[var(--loss)]">
-            Backend connection error: {runsError}
+            {runsError ? `Backend connection error: ${runsError}` : actionError}
           </div>
         ) : null}
 
@@ -221,7 +262,7 @@ export function App(): ReactNode {
               loading={runsLoading}
               onReload={reload}
               onBrowseGames={(runId): void => {
-                setGamesRunFilter(runId);
+                setGamesFilters({ ...INITIAL_GAMES_FILTERS, runId });
                 setTab("games");
               }}
             />
@@ -230,7 +271,8 @@ export function App(): ReactNode {
           {tab === "games" ? (
             <GamesExplorerView
               runs={runs}
-              initialRunId={gamesRunFilter}
+              filters={gamesFilters}
+              onChangeFilters={setGamesFilters}
               onOpenTabletop={openTabletop}
             />
           ) : null}
@@ -238,6 +280,7 @@ export function App(): ReactNode {
           {tab === "tabletop" ? (
             <TabletopView
               target={activeGame}
+              watchlist={watchlist}
               onChangeStep={(step): void =>
                 setActiveGame((prev) => (prev ? { ...prev, step } : null))
               }
