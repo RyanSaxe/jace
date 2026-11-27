@@ -249,10 +249,11 @@ def test_save_and_load_weight_snapshot_bf16_and_buffer_dtypes(tmp_path: Path) ->
 
 
 def test_full_data_cli_flags_preflight_validation_and_smoke_gate(tmp_path: Path) -> None:
-    parsed = _parse_args(["--run-id", "smoke", "--no-dense-early-checkpoints", "--preflight"])
+    base_args = ["--runs-dir", str(tmp_path), "--decks-path", str(tmp_path / "decks.pt")]
+    parsed = _parse_args([*base_args, "--run-id", "smoke", "--no-dense-early-checkpoints", "--preflight"])
     assert parsed.dense_early_checkpoints is False
     assert parsed.preflight is True
-    assert _parse_args(["--run-id", "default-dense"]).dense_early_checkpoints is True
+    assert _parse_args([*base_args, "--run-id", "default-dense"]).dense_early_checkpoints is True
 
     assert (
         _collect_preflight_failures(

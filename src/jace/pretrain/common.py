@@ -69,7 +69,7 @@ def add_card_flags(parser: argparse.ArgumentParser) -> None:
 def add_run_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--data-dir", type=Path, required=True, help="where processed 17Lands tensors are cached")
     parser.add_argument("--run-dir", type=Path, required=True, help="folder containing run folders")
-    parser.add_argument("--set", dest="set_code", default="TLA", help="card set downloaded with `spells add`")
+    parser.add_argument("--set", dest="set_code", required=True, help="card set downloaded with `spells add`")
     parser.add_argument("--held-out-share", type=float, default=0.1, help="share of drafts kept out of training")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--jace-commit", default="unknown")

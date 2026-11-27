@@ -429,7 +429,7 @@ def play_adaptive_parallel(
     deterministic: bool = True,
     config: AdaptiveEvalConfig = _DEFAULT_ADAPTIVE_CONFIG,
 ) -> AdaptiveEvalResult:
-    """Run staged adaptive parallel mirrored evaluation over the 10 closed TLA decks.
+    """Run staged adaptive parallel mirrored evaluation over closed authored decks.
 
     Pre-generates `max(config.stages)` deterministic deals from `elemental_decks()` so
     every stage shares an identical, reproducible deal stream across experiments. Each

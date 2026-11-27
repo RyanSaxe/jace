@@ -46,7 +46,6 @@ __all__ = (
     "main",
 )
 
-_DEFAULT_RUNS_DIR = Path.home() / "Projects" / "MTG" / "jace-runs"
 _DEFAULT_WEB_DIST = Path(__file__).resolve().parents[3] / "web" / "dist"
 _TWO_PLAYERS = 2
 
@@ -546,19 +545,22 @@ def _register_fork_and_analysis_routes(
             branch_actions=req.branch_actions,
         )
         hide_actions = req.pov == "hero" and int(ctx.forked_obs.agent.player_index) != ctx.game.hero_seat
-        return run_action_playouts(
-            inference,
-            ctx.env,
-            obs=ctx.forked_obs,
-            run_id=req.run_id,
-            hero_seat=ctx.game.hero_seat,
-            model_ref=req.model_ref,
-            deals=req.deals,
-            batch_offset=req.batch_offset,
-            action_indices=req.action_indices,
-            seed=req.seed,
-            hide_actions=hide_actions,
-        )
+        try:
+            return run_action_playouts(
+                inference,
+                ctx.env,
+                obs=ctx.forked_obs,
+                run_id=req.run_id,
+                hero_seat=ctx.game.hero_seat,
+                model_ref=req.model_ref,
+                deals=req.deals,
+                batch_offset=req.batch_offset,
+                action_indices=req.action_indices,
+                seed=req.seed,
+                hide_actions=hide_actions,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/api/compare", summary="Compare two checkpoints across sampled playable decision states")
     def compare_models(req: CompareRequest) -> dict[str, object]:
@@ -730,7 +732,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--runs-dir",
         type=Path,
-        default=_DEFAULT_RUNS_DIR,
+        required=True,
         help="Root directory containing Jace training run folders (must exist).",
     )
     parser.add_argument("--host", default="127.0.0.1", help="Bind address for the HTTP server.")

@@ -285,6 +285,7 @@ def sample_human_decks(
     count: int,
     seed: int,
     allowed_cards: frozenset[str] | None = None,
+    prefix: str = "deck",
 ) -> list[tuple[str, managym.Deck]]:
     if count < 1:
         msg = f"count must be >= 1, got {count}"
@@ -297,7 +298,7 @@ def sample_human_decks(
     chosen = rng.choice(eligible, size=count, replace=replace)
     return [
         (
-            f"tla-{split}-{int(row_idx)}-{pos}",
+            f"{prefix}-{split}-{int(row_idx)}-{pos}",
             row_to_deck(decks_t[int(row_idx)], sbs_t[int(row_idx)], card_names=catalog.card_names),
         )
         for pos, row_idx in enumerate(chosen.tolist())

@@ -355,9 +355,13 @@ def test_decision_memory_gru_ipc_merge_update_step_and_eval() -> None:
     assert score.games == 2
 
 
-def test_train_full_data_cli_parses_manabot_lever_flags() -> None:
+def test_train_full_data_cli_parses_manabot_lever_flags(tmp_path: Path) -> None:
     cfg = _parse_args(
         [
+            "--runs-dir",
+            str(tmp_path),
+            "--decks-path",
+            str(tmp_path / "decks.pt"),
             "--run-id",
             "r69-levers",
             "--select",
@@ -382,7 +386,7 @@ def test_train_full_data_cli_parses_manabot_lever_flags() -> None:
     assert cfg.decision_memory == "gru"
 
 
-def test_manabot_026_speedup_flags_and_live_tokens_stream_norm_update() -> None:
+def test_manabot_026_speedup_flags_and_live_tokens_stream_norm_update(tmp_path: Path) -> None:
     assert resolve_precision("auto", device="cuda") == "bf16"
     assert resolve_precision("auto", device="cuda:0") == "bf16"
     assert resolve_precision("auto", device="mps") == "float32"
@@ -394,6 +398,10 @@ def test_manabot_026_speedup_flags_and_live_tokens_stream_norm_update() -> None:
 
     cfg = _parse_args(
         [
+            "--runs-dir",
+            str(tmp_path),
+            "--decks-path",
+            str(tmp_path / "decks.pt"),
             "--run-id",
             "r82-speedups",
             "--stream-norm",

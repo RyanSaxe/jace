@@ -1,11 +1,11 @@
-"""Full-data 17Lands TLA self-play training loop with dense snapshots, preflight, and resume.
+"""Full-data human-deck self-play training loop with dense snapshots, preflight, and resume.
 
-Trains Jace v2's `ActorCritic` across all 91,359 human Limited decks in `decks.pt` using
+Trains Jace's `ActorCritic` across all human Limited decks in `decks.pt` using
 sharded multi-process CPU or in-process GPU/native collection, auto-resolved CUDA
 precision (`bf16`) and live-token attention, optional `stream_norm`/`focus_film`,
 AlphaStar-style even-odds snapshot matching, batch-to-batch gradient-agreement logging,
 compact `bf16` dense early weight snapshots, atomic checkpoint resume, a `< 60s`
-`--preflight` smoke gate, and fast 8-worker mirrored evaluations strictly on the 10,137
+`--preflight` smoke gate, and fast multi-worker mirrored evaluations strictly on
 unseen held-out human decks.
 """
 
@@ -564,12 +564,12 @@ def _run_training_session(cfg: FullDataConfig) -> _TrainingSession:
 
 
 def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
-    """Train Jace v2 across all 17Lands TLA human decks with held-out evaluation and resume.
+    """Train Jace across human Limited decks in `cfg.decks_path` with held-out evaluation and resume.
 
-    Loads `cfg.decks_path` (`decks.pt`), runs sharded 8-worker self-play over the 91,359
-    training decks, evaluates every `cfg.eval_every` updates on 200 mirrored games drawn
-    strictly from the 10,137 unseen held-out human decks, writes dense `bf16` weight
-    snapshots, and saves atomic resume state.
+    Loads `cfg.decks_path` (`decks.pt`), runs self-play over the training split,
+    evaluates every `cfg.eval_every` updates on mirrored games drawn strictly
+    from the unseen held-out split, writes dense `bf16` weight snapshots, and
+    saves atomic resume state.
     """
     return _run_training_session(cfg).layout
 
@@ -763,11 +763,11 @@ def run_preflight(cfg: FullDataConfig) -> PreflightReport:
 
 
 def _parse_args(argv: Sequence[str] | None) -> FullDataConfig:
-    parser = argparse.ArgumentParser(description="Train Jace v2 across all 17Lands TLA human decks.")
-    parser.add_argument("--runs-dir", type=Path, default=Path("../jace-runs"))
-    parser.add_argument("--experiment", default="v2-full-data")
+    parser = argparse.ArgumentParser(description="Train Jace self-play across a human Limited deck catalog.")
+    parser.add_argument("--runs-dir", type=Path, required=True)
+    parser.add_argument("--experiment", default="full-data")
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--decks-path", type=Path, default=Path("../jace-runs/data/decks.pt"))
+    parser.add_argument("--decks-path", type=Path, required=True)
     parser.add_argument("--updates", type=int, default=1800)
     parser.add_argument("--num-envs", type=int, default=64)
     parser.add_argument("--steps-per-env", type=int, default=64)
