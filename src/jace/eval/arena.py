@@ -2,9 +2,9 @@
 
 Records mirrored paired-deal matches under `<runs-dir>/arena/ledger.jsonl` with
 exclusive POSIX file locking and fsync, fits shift-invariant joint Bradley-Terry MLE
-ratings per format with any selectable anchor player, backfills the verified 16,800-game
-historical TLA head-to-head ladder idempotently, and exposes a CLI for running matches,
-printing leaderboards, backfilling history, and building local reports.
+ratings per format with any selectable anchor player, imports external JSONL match
+summaries idempotently via `import_match_summaries`, and exposes a CLI for running
+matches, printing leaderboards, importing summaries, and building local reports.
 """
 
 from __future__ import annotations
@@ -26,17 +26,19 @@ import numpy as np
 
 from jace.collect.decks import elemental_decks, load_human_deck_catalog
 from jace.eval.deals import Deal, build_deals, build_human_deals, wilson_interval
-from jace.eval.parallel import PlayerSpec, play_deals_parallel, summarize_paired_deals
+from jace.eval.parallel import PairedDealResult, PlayerSpec, play_deals_parallel, summarize_paired_deals
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
+
+type DealRunner = Callable[[PlayerSpec, PlayerSpec, Sequence[Deal]], list[PairedDealResult]]
 
 __all__ = (
     "ArenaMatchRecord",
     "BradleyTerryRating",
     "SearchConfigSummary",
     "append_match_record",
-    "backfill_historical_matches",
+    "import_match_summaries",
     "ledger_path_for",
     "load_match_records",
     "main",
@@ -55,61 +57,8 @@ _BT_MAX_ITER = 60
 _BT_TOL = 1e-9
 _BT_MAX_STEP = 2.0
 _BT_DIFF_CLAMP = 20.0
-_HISTORICAL_DEALS = 200
-_HISTORICAL_SEED = 9901
 _MIN_BOOT_SAMPLES = 2
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
-
-# Verified 400-game mirrored H2H matches from seed 9901 totaling 16,800 games.
-# Each entry records model A, model B, wins for A, losses for A, and draws.
-_HISTORICAL_MATCHES: tuple[tuple[str, str, int, int, int], ...] = (
-    # Wave 1 (u460 -> u610)
-    ("Arm1-u610", "heuristic", 321, 79, 0),
-    ("Arm1-u610", "Base-u460", 227, 173, 0),
-    ("Arm1-u610", "Arm3-u610", 191, 209, 0),
-    ("Arm3-u610", "Base-u460", 232, 168, 0),
-    ("Arm3-u610", "Flagship-u800", 183, 217, 0),
-    ("Arm2-u600", "heuristic", 327, 73, 0),
-    ("Arm2-u600", "Base-u460", 237, 163, 0),
-    ("Arm2-u600", "Arm3-u610", 206, 194, 0),
-    ("Arm2-u600", "Arm1-u610", 206, 194, 0),
-    # Flagship scaling ladder
-    ("Flagship-u995", "Flagship-u800", 202, 198, 0),
-    ("Flagship-u1145", "Flagship-u995", 216, 184, 0),
-    ("Flagship-u1145", "Flagship-u800", 217, 183, 0),
-    ("Flagship-u1145", "Arm2-u600", 240, 160, 0),
-    ("Flagship-u1800", "heuristic", 345, 55, 0),
-    ("Flagship-u1800", "Flagship-u1145", 222, 178, 0),
-    ("Flagship-u2000", "heuristic", 353, 47, 0),
-    ("Flagship-u2000", "Flagship-u1800", 213, 187, 0),
-    ("Flagship-u2000", "Arm7B-u1145", 218, 182, 0),
-    ("Flagship-u2000", "Flagship-u1145", 226, 174, 0),
-    # Wave 2 controlled sweep (u995 -> u1145)
-    ("Arm4-u1145", "heuristic", 346, 54, 0),
-    ("Arm4-u1145", "Flagship-u995", 212, 188, 0),
-    ("Arm4-u1145", "Flagship-u1145", 192, 208, 0),
-    ("Arm5-u1130", "heuristic", 340, 60, 0),
-    ("Arm5-u1130", "Flagship-u995", 213, 187, 0),
-    ("Arm5-u1130", "Flagship-u1145", 199, 201, 0),
-    ("Arm6-u1145", "heuristic", 344, 56, 0),
-    ("Arm6-u1145", "Flagship-u995", 211, 189, 0),
-    ("Arm6-u1145", "Flagship-u1145", 185, 215, 0),
-    ("Arm7B-u1145", "heuristic", 354, 46, 0),
-    ("Arm7B-u1145", "Flagship-u995", 227, 172, 1),
-    ("Arm7B-u1145", "Flagship-u1145", 217, 183, 0),
-    ("Arm7B-u1145", "Flagship-u1800", 204, 196, 0),
-    ("Arm8-u1130", "heuristic", 351, 49, 0),
-    ("Arm8-u1130", "Flagship-u995", 210, 190, 0),
-    ("Arm8-u1130", "Flagship-u1145", 200, 200, 0),
-    ("Arm8-u1130", "Arm7B-u1145", 185, 215, 0),
-    ("Arm11-u1130", "heuristic", 350, 50, 0),
-    ("Arm11-u1130", "Flagship-u995", 223, 177, 0),
-    ("Arm11-u1130", "Flagship-u1145", 203, 197, 0),
-    ("Arm11-u1130", "Arm7B-u1145", 194, 206, 0),
-    # Stage 2B (u2000 -> u2230)
-    ("Stage2B-u2230", "heuristic", 358, 42, 0),
-    ("Stage2B-u2230", "Flagship-u2000", 206, 194, 0),
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -565,12 +514,15 @@ def resolve_player_spec(spec: str, *, runs_dir: Path | None = None) -> PlayerSpe
     return _resolve_single_path(cleaned, runs_dir=runs_dir)
 
 
+def _resolve_arena_decks_path(runs_dir: Path, decks_path: Path | None) -> Path | None:
+    if decks_path is not None:
+        return decks_path
+    default_decks = runs_dir / "data" / "decks.pt"
+    return default_decks if default_decks.exists() else None
+
+
 def _build_arena_deals(runs_dir: Path, *, deals: int, seed: int, decks_path: Path | None) -> list[Deal]:
-    resolved_decks = decks_path
-    if resolved_decks is None:
-        default_decks = runs_dir / "data" / "decks.pt"
-        if default_decks.exists():
-            resolved_decks = default_decks
+    resolved_decks = _resolve_arena_decks_path(runs_dir, decks_path)
     if resolved_decks is not None:
         catalog = load_human_deck_catalog(resolved_decks)
         return build_human_deals(catalog, split="held_out", count=deals, seed=seed, decklists="closed")
@@ -628,22 +580,29 @@ def run_arena_match(
     search_config_b: SearchConfigSummary | None = None,
     model_a_spec: PlayerSpec | None = None,
     model_b_spec: PlayerSpec | None = None,
+    deal_runner: DealRunner | None = None,
 ) -> ArenaMatchRecord:
-    if (search_config_a is not None and model_a_spec is None) or (search_config_b is not None and model_b_spec is None):
-        msg = "Search execution is not wired into arena match yet; omit --search-worlds or pass an explicit PlayerSpec."
-        raise ValueError(msg)
     spec_a = model_a_spec if model_a_spec is not None else resolve_player_spec(model_a, runs_dir=runs_dir)
     spec_b = model_b_spec if model_b_spec is not None else resolve_player_spec(model_b, runs_dir=runs_dir)
     deal_list = _build_arena_deals(runs_dir, deals=deals, seed=seed, decks_path=decks_path)
-    deal_results = play_deals_parallel(
-        spec_a,
-        spec_b,
-        deals=deal_list,
-        num_workers=num_workers,
-        seed=seed,
-        deterministic=deterministic,
-        max_actions=max_actions,
-    )
+    if deal_runner is not None:
+        deal_results = deal_runner(spec_a, spec_b, deal_list)
+    elif search_config_a is not None or search_config_b is not None:
+        msg = (
+            "search-enabled Arena matches require a deal_runner; "
+            "use jace.forks.arena.run_search_arena_match or `python -m jace.forks.arena match`"
+        )
+        raise ValueError(msg)
+    else:
+        deal_results = play_deals_parallel(
+            spec_a,
+            spec_b,
+            deals=deal_list,
+            num_workers=num_workers,
+            seed=seed,
+            deterministic=deterministic,
+            max_actions=max_actions,
+        )
     summary = summarize_paired_deals(deal_results)
     total_dec_a = sum(item.decisions_a for item in deal_results)
     total_dec_b = sum(item.decisions_b for item in deal_results)
@@ -651,8 +610,8 @@ def run_arena_match(
     ms_b = sum(item.decision_ms_b for item in deal_results) / total_dec_b if total_dec_b > 0 else 0.0
     now = datetime.now(UTC)
     timestamp_utc = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    slug_a = _SLUG_RE.sub("-", model_a.lower()).strip("-") or "player"
-    slug_b = _SLUG_RE.sub("-", model_b.lower()).strip("-") or "player"
+    slug_a = _SLUG_RE.sub("-", player_id_for(model_a, search_config_a).lower()).strip("-") or "player"
+    slug_b = _SLUG_RE.sub("-", player_id_for(model_b, search_config_b).lower()).strip("-") or "player"
     match_id = f"{now.strftime('%Y%m%dT%H%M%SZ')}-{slug_a}-vs-{slug_b}-s{seed}-d{deals}"
     record = ArenaMatchRecord(
         match_id=match_id,
@@ -683,9 +642,14 @@ def run_arena_match(
     return record
 
 
-def _historical_record(index: int, match: tuple[str, str, int, int, int], *, format_id: str) -> ArenaMatchRecord:
-    model_a, model_b, wins_a, losses_a, draws = match
+def _record_from_summary_row(index: int, raw: dict[str, object], *, format_id: str) -> ArenaMatchRecord:
+    model_a, model_b = str(raw["model_a"]), str(raw["model_b"])
+    wins_a, losses_a = _req_int(raw, "wins_a"), _req_int(raw, "losses_a")
+    draws = _req_int(raw, "draws") if "draws" in raw else 0
     total_games = wins_a + losses_a + draws
+    if total_games <= 0:
+        msg = f"match summary row {index} must have positive total games"
+        raise ValueError(msg)
     score_a = wins_a + 0.5 * draws
     win_rate = score_a / total_games
     ci_low, ci_high = wilson_interval(score_a, total_games)
@@ -693,41 +657,50 @@ def _historical_record(index: int, match: tuple[str, str, int, int, int], *, for
     slug_fmt = _SLUG_RE.sub("-", format_id.lower()).strip("-") or "format"
     slug_a = _SLUG_RE.sub("-", model_a.lower()).strip("-") or "player"
     slug_b = _SLUG_RE.sub("-", model_b.lower()).strip("-") or "player"
-    match_id = f"hist-{slug_fmt}-{index:02d}-{slug_a}-vs-{slug_b}"
-    timestamp = f"2026-04-01T00:{index:02d}:00Z"
+    match_id = str(raw.get("match_id") or f"import-{slug_fmt}-{index:03d}-{slug_a}-vs-{slug_b}")
+    timestamp = str(raw.get("timestamp_utc") or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    deals = _req_int(raw, "deals") if "deals" in raw else max(1, total_games // 2)
+    seed = _req_int(raw, "seed") if "seed" in raw else 0
     return ArenaMatchRecord(
         match_id=match_id,
         timestamp_utc=timestamp,
-        format_id=format_id,
+        format_id=str(raw.get("format_id") or format_id),
         model_a=model_a,
         model_b=model_b,
-        search_config_a=None,
-        search_config_b=None,
-        deals=_HISTORICAL_DEALS,
-        seed=_HISTORICAL_SEED,
+        search_config_a=_decode_search_config(raw.get("search_config_a")),
+        search_config_b=_decode_search_config(raw.get("search_config_b")),
+        deals=deals,
+        seed=seed,
         wins_a=wins_a,
         losses_a=losses_a,
         draws=draws,
-        sweeps_a=0,
-        sweeps_b=0,
-        splits=0,
+        sweeps_a=_req_int(raw, "sweeps_a") if "sweeps_a" in raw else 0,
+        sweeps_b=_req_int(raw, "sweeps_b") if "sweeps_b" in raw else 0,
+        splits=_req_int(raw, "splits") if "splits" in raw else 0,
         win_rate_a=win_rate,
         ci95_low=ci_low,
         ci95_high=ci_high,
         los_a=paired_los(win_rate, binom_se),
-        ms_per_decision_a=0.0,
-        ms_per_decision_b=0.0,
-        manabot_version="0.2.6",
-        git_sha="r103-historical",
+        ms_per_decision_a=_req_float(raw, "ms_per_decision_a") if "ms_per_decision_a" in raw else 0.0,
+        ms_per_decision_b=_req_float(raw, "ms_per_decision_b") if "ms_per_decision_b" in raw else 0.0,
+        manabot_version=str(raw.get("manabot_version") or _manabot_version()),
+        git_sha=str(raw.get("git_sha") or _git_sha()),
     )
 
 
-def backfill_historical_matches(runs_dir: Path, *, format_id: str = "tla-limited-0.2.6") -> int:
-    path = ledger_path_for(runs_dir)
+def import_match_summaries(runs_dir: Path, *, input_path: Path, format_id: str) -> int:
+    ledger = ledger_path_for(runs_dir)
     added = 0
-    for idx, match in enumerate(_HISTORICAL_MATCHES):
-        record = _historical_record(idx, match, format_id=format_id)
-        if append_match_record(path, record, dedupe_by_match_id=True):
+    for idx, line in enumerate(input_path.read_text(encoding="utf-8").splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        raw = json.loads(stripped)
+        if not isinstance(raw, dict):
+            msg = f"expected JSON object on line {idx + 1} of {input_path}"
+            raise TypeError(msg)
+        record = _record_from_summary_row(idx, raw, format_id=format_id)
+        if append_match_record(ledger, record, dedupe_by_match_id=True):
             added += 1
     return added
 
@@ -749,32 +722,18 @@ def _format_leaderboard_table(ratings: Sequence[BradleyTerryRating], *, format_i
     return "".join(rows)
 
 
-def _parse_search_configs(args: argparse.Namespace) -> list[SearchConfigSummary | None]:
-    if args.no_search or not args.search_worlds:
-        return [None]
-    belief_id = "prior-only" if args.belief_prior_only else args.belief_id
-    worlds_list = [int(part.strip()) for part in str(args.search_worlds).split(",") if part.strip()]
-    return [SearchConfigSummary(worlds=worlds, horizon=args.horizon, belief_id=belief_id) for worlds in worlds_list]
-
-
 def _cmd_match(args: argparse.Namespace) -> int:
-    configs = _parse_search_configs(args)
-    records = [
-        run_arena_match(
-            Path(args.runs_dir),
-            format_id=args.format_id,
-            model_a=args.model_a,
-            model_b=args.model_b,
-            deals=args.deals,
-            seed=args.seed,
-            num_workers=args.num_workers,
-            decks_path=Path(args.decks_path) if args.decks_path else None,
-            search_config_a=cfg,
-        )
-        for cfg in configs
-    ]
-    payload = [asdict(rec) for rec in records] if len(records) > 1 else asdict(records[0])
-    sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+    record = run_arena_match(
+        Path(args.runs_dir),
+        format_id=args.format_id,
+        model_a=args.model_a,
+        model_b=args.model_b,
+        deals=args.deals,
+        seed=args.seed,
+        num_workers=args.num_workers,
+        decks_path=Path(args.decks_path) if args.decks_path else None,
+    )
+    sys.stdout.write(json.dumps(asdict(record), indent=2) + "\n")
     return 0
 
 
@@ -794,9 +753,9 @@ def _cmd_leaderboard(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_backfill(args: argparse.Namespace) -> int:
+def _cmd_import(args: argparse.Namespace) -> int:
     runs_dir = Path(args.runs_dir)
-    added = backfill_historical_matches(runs_dir, format_id=args.format_id)
+    added = import_match_summaries(runs_dir, input_path=Path(args.input_path), format_id=args.format_id)
     total = len(load_match_records(ledger_path_for(runs_dir), format_id=args.format_id))
     sys.stdout.write(
         json.dumps({"format_id": args.format_id, "added": added, "total_in_format": total}, indent=2) + "\n"
@@ -830,11 +789,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p_match.add_argument("--seed", type=int, default=9901)
     p_match.add_argument("--num-workers", type=int, default=8)
     p_match.add_argument("--decks-path", default=None)
-    p_match.add_argument("--search-worlds", default=None)
-    p_match.add_argument("--horizon", type=int, default=None)
-    p_match.add_argument("--belief-id", default=None)
-    p_match.add_argument("--no-search", action="store_true")
-    p_match.add_argument("--belief-prior-only", action="store_true")
 
     p_lb = sub.add_parser("leaderboard", help="Compute joint Bradley-Terry ratings for a format")
     p_lb.add_argument("--runs-dir", required=True)
@@ -844,9 +798,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_lb.add_argument("--bootstrap-samples", type=int, default=400)
     p_lb.add_argument("--json", dest="as_json", action="store_true")
 
-    p_bf = sub.add_parser("backfill", help="Idempotently import verified 16,800-game historical matches")
-    p_bf.add_argument("--runs-dir", required=True)
-    p_bf.add_argument("--format", dest="format_id", default="tla-limited-0.2.6")
+    p_imp = sub.add_parser("import", help="Idempotently import external JSONL match summaries into ledger.jsonl")
+    p_imp.add_argument("--runs-dir", required=True)
+    p_imp.add_argument("--format", dest="format_id", required=True)
+    p_imp.add_argument("--input", dest="input_path", required=True)
 
     p_rep = sub.add_parser("report", help="Generate <runs-dir>/report/report.html, report.md, and figures")
     p_rep.add_argument("--runs-dir", required=True)
@@ -860,7 +815,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     dispatch = {
         "match": _cmd_match,
         "leaderboard": _cmd_leaderboard,
-        "backfill": _cmd_backfill,
+        "import": _cmd_import,
         "report": _cmd_report,
     }
     return dispatch[args.command](args)

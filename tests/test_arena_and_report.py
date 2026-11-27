@@ -7,7 +7,7 @@ from jace.eval.arena import (
     ArenaMatchRecord,
     SearchConfigSummary,
     append_match_record,
-    backfill_historical_matches,
+    import_match_summaries,
     ledger_path_for,
     load_match_records,
     paired_los,
@@ -81,14 +81,28 @@ def test_locked_append_and_reload_round_trip(tmp_path: Path) -> None:
     assert filtered == [rec_a]
 
 
-def test_idempotent_backfill_reproduces_historical_ratings_and_anchor_invariance(tmp_path: Path) -> None:
-    first_added = backfill_historical_matches(tmp_path, format_id="tla-limited-0.2.6")
-    second_added = backfill_historical_matches(tmp_path, format_id="tla-limited-0.2.6")
-    assert first_added == 42
+def _write_synthetic_matches_jsonl(path: Path) -> None:
+    rows = [
+        {"match_id": "m-a-h", "model_a": "model-a-u500", "model_b": "heuristic", "wins_a": 320, "losses_a": 80},
+        {"match_id": "m-b-h", "model_a": "model-b-u1000", "model_b": "heuristic", "wins_a": 350, "losses_a": 50},
+        {"match_id": "m-b-a", "model_a": "model-b-u1000", "model_b": "model-a-u500", "wins_a": 240, "losses_a": 160},
+        {"match_id": "m-c-h", "model_a": "model-c-u2000", "model_b": "heuristic", "wins_a": 360, "losses_a": 40},
+        {"match_id": "m-c-b", "model_a": "model-c-u2000", "model_b": "model-b-u1000", "wins_a": 220, "losses_a": 180},
+    ]
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+
+def test_idempotent_import_and_bradley_terry_anchor_invariance(tmp_path: Path) -> None:
+    src = tmp_path / "external_matches.jsonl"
+    _write_synthetic_matches_jsonl(src)
+
+    first_added = import_match_summaries(tmp_path, input_path=src, format_id="tla-limited-0.2.6")
+    second_added = import_match_summaries(tmp_path, input_path=src, format_id="tla-limited-0.2.6")
+    assert first_added == 5
     assert second_added == 0
 
     records = load_match_records(ledger_path_for(tmp_path), format_id="tla-limited-0.2.6")
-    assert sum(r.wins_a + r.losses_a + r.draws for r in records) == 16_800
+    assert sum(r.wins_a + r.losses_a + r.draws for r in records) == 2_000
 
     ratings_h = solve_bradley_terry(records, format_id="tla-limited-0.2.6", bootstrap_samples=400)
     by_id_h = {item.player_id: item for item in ratings_h}
@@ -97,33 +111,30 @@ def test_idempotent_backfill_reproduces_historical_ratings_and_anchor_invariance
     assert by_id_h["heuristic"].ci95_low == pytest.approx(1500.0)
     assert by_id_h["heuristic"].ci95_high == pytest.approx(1500.0)
     assert (
-        by_id_h["Stage2B-u2230"].elo
-        > by_id_h["Flagship-u2000"].elo
-        > by_id_h["Arm7B-u1145"].elo
+        by_id_h["model-c-u2000"].elo
+        > by_id_h["model-b-u1000"].elo
+        > by_id_h["model-a-u500"].elo
         > by_id_h["heuristic"].elo
     )
-    assert by_id_h["Stage2B-u2230"].elo == pytest.approx(1876.3, abs=0.5)
-    assert by_id_h["Flagship-u2000"].elo == pytest.approx(1867.4, abs=0.5)
-    assert by_id_h["Arm7B-u1145"].elo == pytest.approx(1845.6, abs=0.5)
-    assert by_id_h["Stage2B-u2230"].vs_anchor_wr == pytest.approx(358 / 400)
+    assert by_id_h["model-c-u2000"].vs_anchor_wr == pytest.approx(360 / 400)
 
     # Switching anchor shifts every rating by the exact same constant and tightens CIs near the anchor.
-    ratings_f = solve_bradley_terry(
+    ratings_b = solve_bradley_terry(
         records,
         format_id="tla-limited-0.2.6",
-        anchor_player="Flagship-u2000",
+        anchor_player="model-b-u1000",
         bootstrap_samples=400,
     )
-    by_id_f = {item.player_id: item for item in ratings_f}
-    expected_shift = 1500.0 - by_id_h["Flagship-u2000"].elo
+    by_id_b = {item.player_id: item for item in ratings_b}
+    expected_shift = 1500.0 - by_id_h["model-b-u1000"].elo
     for pid, r_h in by_id_h.items():
-        assert by_id_f[pid].elo - r_h.elo == pytest.approx(expected_shift, abs=1e-4)
-    assert by_id_f["Flagship-u2000"].ci95_low == pytest.approx(1500.0)
-    assert by_id_f["Flagship-u2000"].ci95_high == pytest.approx(1500.0)
-    # Stage2B played directly against Flagship-u2000, so its CI tightens when anchored on Flagship-u2000.
-    width_h = by_id_h["Stage2B-u2230"].ci95_high - by_id_h["Stage2B-u2230"].ci95_low
-    width_f = by_id_f["Stage2B-u2230"].ci95_high - by_id_f["Stage2B-u2230"].ci95_low
-    assert width_f < width_h
+        assert by_id_b[pid].elo - r_h.elo == pytest.approx(expected_shift, abs=1e-4)
+    assert by_id_b["model-b-u1000"].ci95_low == pytest.approx(1500.0)
+    assert by_id_b["model-b-u1000"].ci95_high == pytest.approx(1500.0)
+    # model-c played directly against model-b with a closer win rate, so its CI tightens when anchored on model-b.
+    width_h = by_id_h["model-c-u2000"].ci95_high - by_id_h["model-c-u2000"].ci95_low
+    width_b = by_id_b["model-c-u2000"].ci95_high - by_id_b["model-c-u2000"].ci95_low
+    assert width_b < width_h
 
 
 def test_default_anchor_falls_back_to_earliest_player_without_heuristic() -> None:
@@ -186,13 +197,15 @@ def test_parallel_timing_and_arena_match_integration(tmp_path: Path) -> None:
 
 
 def test_discover_early_forecast_and_generate_local_report(tmp_path: Path) -> None:
-    backfill_historical_matches(tmp_path, format_id="tla-limited-0.2.6")
+    src = tmp_path / "external_matches.jsonl"
+    _write_synthetic_matches_jsonl(src)
+    import_match_summaries(tmp_path, input_path=src, format_id="tla-limited-0.2.6")
     # Add one timed search record so Elo-vs-ms frontier figure is also rendered.
     append_match_record(
         ledger_path_for(tmp_path),
         _sample_record(
             match_id="m-search-16w",
-            model_a="Flagship-u2000",
+            model_a="model-b-u1000",
             model_b="heuristic",
             wins_a=180,
             losses_a=20,
@@ -233,8 +246,8 @@ def test_discover_early_forecast_and_generate_local_report(tmp_path: Path) -> No
     assert html_path == report_dir / "report.html"
     assert html_path.exists()
     assert (report_dir / "report.md").exists()
-    assert "Stage2B-u2230" in html_path.read_text(encoding="utf-8")
-    assert "Stage2B-u2230" in (report_dir / "report.md").read_text(encoding="utf-8")
+    assert "model-c-u2000" in html_path.read_text(encoding="utf-8")
+    assert "model-c-u2000" in (report_dir / "report.md").read_text(encoding="utf-8")
 
     for fig_name in ("elo_progression.png", "elo_vs_ms.png", "early_forecast.png", "puzzle_summary.png"):
         fig_path = report_dir / "figures" / fig_name
@@ -245,13 +258,13 @@ def test_discover_early_forecast_and_generate_local_report(tmp_path: Path) -> No
     assert arena_main(["leaderboard", "--runs-dir", str(tmp_path), "--format", "tla-limited-0.2.6"]) == 0
     assert arena_main(["report", "--runs-dir", str(tmp_path), "--format", "tla-limited-0.2.6"]) == 0
 
-    # Passing search_config without an explicit PlayerSpec must fail loudly instead of logging unsearched games.
-    with pytest.raises(ValueError, match="Search execution is not wired"):
+    # Search-enabled matches require passing a deal_runner from jace.forks.arena.
+    with pytest.raises(ValueError, match="deal_runner"):
         run_arena_match(
             tmp_path,
             format_id="tla-limited-0.2.6",
             model_a="heuristic",
             model_b="heuristic",
-            deals=2,
-            search_config_a=SearchConfigSummary(worlds=8, horizon=2, belief_id="prior-only"),
+            deals=1,
+            search_config_a=SearchConfigSummary(worlds=2, horizon=2, belief_id="prior-only"),
         )

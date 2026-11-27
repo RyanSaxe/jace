@@ -29,9 +29,10 @@ storage, and runnable CLIs. Imports flow downward only and are enforced by
 | Package / path | Owns | Engine imports |
 | --- | --- | --- |
 | `src/jace/train/` | Top-level gameplay self-play CLIs (`full_data`, `ten_decks`, `harness`) | Yes |
-| `src/jace/studio/` | Local evaluation workbench backend: FastAPI, DuckDB/Parquet index, `managym` replay, board serialization, playout/compare analysis, Arena/puzzle benchmarks, Scryfall cache, and Fork API (`app`, `runs`, `index`, `board`, `replay`, `inference`, `analysis`, `benchmarks`, `scryfall`) | Yes |
+| `src/jace/studio/` | Local evaluation workbench backend: FastAPI, DuckDB/Parquet index, `managym` replay, board serialization, playout/compare analysis, Arena/puzzle benchmarks, belief/search API, Scryfall cache, and Fork API (`app`, `runs`, `index`, `board`, `replay`, `inference`, `analysis`, `benchmarks`, `belief_api`, `scryfall`) | Yes |
 | `src/jace/pretrain/` | Supervised pretraining CLIs and helpers (`draft`, `decks`, `common`, `formats`, `schedules`, `supervised`, `deck_measures`) | No |
-| `src/jace/forks/` | Counterfactual fork collection, batched playouts, and horizon audits (`collect`, `batch`, `audit`) | Yes |
+| `src/jace/forks/` | Counterfactual fork collection, batched playouts, closed-decklist local search, search Arena sweeps, and horizon audits (`collect`, `batch`, `search`, `arena`, `audit`) | Yes |
+| `src/jace/belief/` | Pure-tensor closed-decklist opponent belief models (`FormatPrior`, `BayesianDeckPoolPrior`, `SetTransformerPrior`, `BeliefNet`, `project_belief_overrides`) and Turn-0 `MatchupPredictor` `V_0` (`types`, `prior`, `model`, `project`, `v0`) | No |
 | `src/jace/eval/` | Mirrored paired deals, parallel adaptive judging, Bradley-Terry Arena ledger, local report, tactical puzzles, forensics, and probe diffs (`deals`, `parallel`, `arena`, `report`, `puzzles`, `forensics`, `diffs`) | Yes |
 | `src/jace/collect/` | v11 `ActorCritic` factory, deck/curriculum loading, and in-process / multi-process collectors (`agent`, `decks`, `local`, `pool`) | Yes |
 | `src/jace/rl/` | Pure-tensor RL math (`credit`, `losses`, `select`, `schedules`, `ema`, `pool`, `prefetch`, `diagnostics`) and collection bridge (`loop`) | Only `loop.py` |

@@ -1,4 +1,4 @@
-/** Right 340px single-purpose Decision Analysis pane (zero tabs): cross-run model diff, win bars, ranked moves & Move Log. */
+/** Right 340px single-purpose Decision Analysis pane (zero tabs): cross-run model diff, Policy/Search switch, Turn-0 V0, win bars, ranked moves & Move Log. */
 
 import {
   ChevronDown,
@@ -9,9 +9,9 @@ import {
   LayoutGrid,
   RotateCcw,
   Undo2,
-  X,
 } from "lucide-react";
 import { type ReactNode, useState } from "react";
+import { BeliefDockBody, type TabletopBeliefDockProps } from "@/components/belief";
 import { Button } from "@/components/ui/Primitives";
 import type {
   BoardState,
@@ -355,6 +355,7 @@ export interface TabletopDockProps {
   onSelectStep: (step: number) => void;
   onHoverActionFocus: (ids: number[]) => void;
   onOpenPolicyMatrix: () => void;
+  belief?: TabletopBeliefDockProps;
   className?: string;
 }
 
@@ -937,18 +938,27 @@ export function TabletopDock(props: TabletopDockProps): ReactNode {
         onResetFork={props.onResetFork}
       />
 
-      <RankedMovesList
+      <BeliefDockBody
         board={props.board}
         evaluation={props.evaluation}
-        baseEvaluation={props.baseEvaluation}
-        showCompare={showCompare}
-        showEditCompare={showEditCompare}
-        labelA={labelA}
-        labelB={labelB}
-        forkBusy={props.forkBusy}
-        branchDone={props.branchDone}
+        ctrl={props.belief}
+        disabled={props.forkBusy || props.branchDone}
         onBranchAction={props.onBranchAction}
-        onHoverFocus={props.onHoverActionFocus}
+        policyFallback={
+          <RankedMovesList
+            board={props.board}
+            evaluation={props.evaluation}
+            baseEvaluation={props.baseEvaluation}
+            showCompare={showCompare}
+            showEditCompare={showEditCompare}
+            labelA={labelA}
+            labelB={labelB}
+            forkBusy={props.forkBusy}
+            branchDone={props.branchDone}
+            onBranchAction={props.onBranchAction}
+            onHoverFocus={props.onHoverActionFocus}
+          />
+        }
       />
 
       <CollapsibleMoveLog
@@ -957,42 +967,5 @@ export function TabletopDock(props: TabletopDockProps): ReactNode {
         onSelectStep={props.onSelectStep}
       />
     </aside>
-  );
-}
-
-export function MobilePolicySheet(props: {
-  open: boolean;
-  onClose: () => void;
-  dockProps: TabletopDockProps;
-}): ReactNode {
-  if (!props.open) return null;
-  return (
-    <div className="fixed inset-0 z-40 flex flex-col justify-end lg:hidden">
-      <button
-        type="button"
-        aria-label="Dismiss policy sheet"
-        onClick={props.onClose}
-        className="flex-1 bg-black/45 border-0"
-      />
-      <div className="h-[74dvh] max-h-[620px] rounded-t-[14px] border-t border-[var(--border-strong)] bg-[var(--surface)] shadow-[var(--shadow-lg)] flex flex-col overflow-hidden">
-        <div className="flex items-center justify-between px-3 py-1.5 border-b border-[var(--border)] shrink-0">
-          <span className="text-[11px] font-bold text-[var(--text-2)]">Decision Analysis</span>
-          <button
-            type="button"
-            onClick={props.onClose}
-            aria-label="Close policy sheet"
-            className="p-1 rounded text-[var(--text-2)] hover:bg-[var(--surface-2)] cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-        <div className="flex-1 min-h-0 overflow-hidden">
-          <TabletopDock
-            {...props.dockProps}
-            className="w-full h-full flex flex-col min-h-0 overflow-hidden bg-[var(--surface)]"
-          />
-        </div>
-      </div>
-    </div>
   );
 }
