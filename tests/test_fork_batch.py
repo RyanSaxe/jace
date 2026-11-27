@@ -16,7 +16,7 @@ from jace.collect.agent import build_agent
 from jace.collect.decks import elemental_decks
 from jace.eval.deals import build_deals
 from jace.forks.audit import audit_horizon_correlation, build_batched_fork_aux_loss, parse_fork_kinds
-from jace.forks.batch import BatchedForkCollectorPool, BatchedForkConfig, _safe_clone, _safe_step
+from jace.forks.batch import BatchedForkCollectorPool, BatchedForkConfig, safe_clone, safe_step
 
 
 def test_batched_fork_pool_collects_examples_value_samples_and_backprops() -> None:
@@ -89,11 +89,11 @@ def test_safe_step_and_clone_isolate_native_panic_exception() -> None:
             raise PanicException(msg)
 
     env = PanickingEnv()
-    obs, is_done, is_failed = _safe_step(env, 0)
+    obs, is_done, is_failed = safe_step(env, 0)
     assert obs is None
     assert is_done is True
     assert is_failed is True
-    assert _safe_clone(env) is None
+    assert safe_clone(env) is None
 
 
 def test_parse_fork_kinds_handles_all_and_csv() -> None:

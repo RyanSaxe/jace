@@ -19,19 +19,19 @@ import torch
 from manabot.backends.torch.arrays import on_device
 
 from jace.forks.batch import (
+    ActiveBranch,
     BatchedForkCollectorPool,
     BatchedForkConfig,
     BatchedForkResult,
     ContinuationValueSample,
-    _ActiveBranch,
-    _assemble_results,
-    _batched_eval,
-    _harvest_roots_from_deal,
-    _HarvestedRoot,
-    _hero_win_prob,
-    _safe_step,
-    _spawn_all_branches,
-    _terminal_score,
+    HarvestedRoot,
+    assemble_results,
+    batched_eval,
+    harvest_roots_from_deal,
+    hero_win_prob,
+    safe_step,
+    spawn_all_branches,
+    terminal_score,
 )
 from jace.forks.collect import ForkStats, concat_observation_batches
 from jace.rl.losses import categorical_value_loss, fork_pairwise_loss, policy_log_probs
@@ -177,7 +177,7 @@ def build_batched_fork_aux_loss(
 
 
 def _step_and_record_horizons(
-    branches: Sequence[_ActiveBranch],
+    branches: Sequence[ActiveBranch],
     *,
     scope: PolicyInference,
     obs_space: ObservationSpace,
@@ -189,7 +189,7 @@ def _step_and_record_horizons(
         active = [branch for branch in branches if not branch.done and branch.obs is not None]
         if not active:
             break
-        probs_batch, vals_batch, _ = _batched_eval(
+        probs_batch, vals_batch, _ = batched_eval(
             scope,
             obs_space=obs_space,
             observations=[b.obs for b in active if b.obs is not None],
@@ -199,11 +199,11 @@ def _step_and_record_horizons(
                 branch.done, branch.failed = True, True
                 continue
             if branch.steps in horizon_set:
-                snapshots[(branch.fork_idx, branch.pair_idx, branch.arm_idx, branch.steps)] = _hero_win_prob(
+                snapshots[(branch.fork_idx, branch.pair_idx, branch.arm_idx, branch.steps)] = hero_win_prob(
                     branch.env, hero_idx=branch.hero_idx, active_value=val
                 )
             action = branch.rng.choices(range(len(probs)), weights=probs, k=1)[0]
-            next_obs, is_done, is_failed = _safe_step(branch.env, action)
+            next_obs, is_done, is_failed = safe_step(branch.env, action)
             branch.obs = next_obs
             branch.done = is_done
             branch.failed = is_failed
@@ -212,9 +212,9 @@ def _step_and_record_horizons(
 
 
 def _summarize_one_horizon(
-    roots: Sequence[_HarvestedRoot],
+    roots: Sequence[HarvestedRoot],
     *,
-    grouped: Mapping[tuple[int, int, int], _ActiveBranch],
+    grouped: Mapping[tuple[int, int, int], ActiveBranch],
     snapshots: Mapping[tuple[int, int, int, int], float],
     horizon: int,
     playouts_per_action: int,
@@ -229,8 +229,8 @@ def _summarize_one_horizon(
             b0, b1 = grouped[(fork_idx, pair_idx, 0)], grouped[(fork_idx, pair_idx, 1)]
             if b0.failed or b1.failed:
                 continue
-            f0 = _terminal_score(b0.env, hero_idx=root.hero_idx, leaf_value=None)
-            f1 = _terminal_score(b1.env, hero_idx=root.hero_idx, leaf_value=None)
+            f0 = terminal_score(b0.env, hero_idx=root.hero_idx, leaf_value=None)
+            f1 = terminal_score(b1.env, hero_idx=root.hero_idx, leaf_value=None)
             v0 = snapshots.get((fork_idx, pair_idx, 0, horizon), f0)
             v1 = snapshots.get((fork_idx, pair_idx, 1, horizon), f1)
             v_diffs.append(v1 - v0)
@@ -284,7 +284,7 @@ def audit_horizon_correlation(
     )
     rng = random.Random(seed)
     allowed = None if decision_kinds is None else frozenset(decision_kinds)
-    roots: list[_HarvestedRoot] = []
+    roots: list[HarvestedRoot] = []
     ordered_horizons = sorted(set(horizons))
 
     agent.eval()
@@ -293,7 +293,7 @@ def audit_horizon_correlation(
             if len(roots) >= max_forks:
                 break
             roots.extend(
-                _harvest_roots_from_deal(
+                harvest_roots_from_deal(
                     deal,
                     scope=scope,
                     obs_space=obs_space,
@@ -304,7 +304,7 @@ def audit_horizon_correlation(
                     base_seed=seed * 100_003 + deal_idx * 1009,
                 )
             )
-        branches = _spawn_all_branches(roots, config=cfg)
+        branches = spawn_all_branches(roots, config=cfg)
         snapshots = _step_and_record_horizons(
             branches,
             scope=scope,
@@ -313,7 +313,7 @@ def audit_horizon_correlation(
             max_steps=cfg.max_steps,
         )
 
-    full_result = _assemble_results(roots, branches, playouts_per_action=playouts_per_action)
+    full_result = assemble_results(roots, branches, playouts_per_action=playouts_per_action)
     grouped = {(b.fork_idx, b.pair_idx, b.arm_idx): b for b in branches}
     return [
         _summarize_one_horizon(

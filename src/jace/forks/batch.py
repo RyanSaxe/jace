@@ -3,8 +3,11 @@
 Eliminates the small-batch bottleneck of per-fork rollouts by harvesting cloned decision
 roots across each worker's deals first and stepping every active branch across all forks
 in one wide batched forward pass per ply. Optionally captures on-policy terminal WDL
-value targets from continuation states (Cobbe et al., 2020) and supports truncated
-value-bootstrapped horizons (Sokota et al., 2025; Schrittwieser et al., 2019).
+value targets from continuation states (Cobbe et al., 2020), supports truncated
+value-bootstrapped horizons (Sokota et al., 2025; Schrittwieser et al., 2019), and
+exports shared batched evaluation and safe-stepping helpers (`batched_eval`,
+`engine_error_types`, `safe_clone`, `safe_step`, `hero_win_prob`, `terminal_score`,
+and root/branch harvesting primitives) for `jace.forks.search`, `arena`, and `audit`.
 """
 
 from __future__ import annotations
@@ -35,10 +38,21 @@ if TYPE_CHECKING:
     from manabot.env.observation import ObservationSpace
 
 __all__ = (
+    "ActiveBranch",
     "BatchedForkCollectorPool",
     "BatchedForkConfig",
     "BatchedForkResult",
     "ContinuationValueSample",
+    "HarvestedRoot",
+    "assemble_results",
+    "batched_eval",
+    "engine_error_types",
+    "harvest_roots_from_deal",
+    "hero_win_prob",
+    "safe_clone",
+    "safe_step",
+    "spawn_all_branches",
+    "terminal_score",
 )
 
 _ACTION_SPACE_NAMES = {int(member): member.name.lower() for member in ActionSpaceEnum}
@@ -86,7 +100,7 @@ class BatchedForkResult:
 
 
 @dataclass(slots=True)
-class _HarvestedRoot:
+class HarvestedRoot:
     env: managym.Env
     encoded_obs: managym.ObservationBatch
     hero_idx: int
@@ -99,7 +113,7 @@ class _HarvestedRoot:
 
 
 @dataclass(slots=True)
-class _ActiveBranch:
+class ActiveBranch:
     fork_idx: int
     pair_idx: int
     arm_idx: int
@@ -132,7 +146,7 @@ def _init_batch_worker(init_spec: tuple[int, int, DecisionMemoryKind, Path | Non
     _BATCH_WORKER.decks = None if human_decks_path is not None else elemental_decks()
 
 
-def _engine_error_types() -> tuple[type[BaseException], ...]:
+def engine_error_types() -> tuple[type[BaseException], ...]:
     panic_types = tuple(cls for cls in BaseException.__subclasses__() if cls.__name__ == "PanicException")
     return (*panic_types, managym.ObservationCapacity, RuntimeError, ValueError, KeyError, IndexError)
 
@@ -143,25 +157,25 @@ class _ForkEnv(Protocol):
     def clone_env(self) -> managym.Env: ...
 
 
-def _safe_step(env: _ForkEnv, action: int) -> tuple[managym.Observation | None, bool, bool]:
+def safe_step(env: _ForkEnv, action: int) -> tuple[managym.Observation | None, bool, bool]:
     try:
         obs, _, terminated, truncated, _ = env.step(action)
-    except _engine_error_types():
+    except engine_error_types():
         return None, True, True
     return obs, bool(terminated or truncated or env.is_game_over()), False
 
 
-def _safe_clone(env: _ForkEnv) -> managym.Env | None:
+def safe_clone(env: _ForkEnv) -> managym.Env | None:
     try:
         return env.clone_env()
-    except _engine_error_types():
+    except engine_error_types():
         return None
 
 
 def _safe_encode_one(obs: managym.Observation, *, obs_space: ObservationSpace) -> managym.ObservationBatch | None:
     try:
         return managym.encode_observation_batch([obs], obs_space.layout, obs_space.config.action_overflow)
-    except _engine_error_types():
+    except engine_error_types():
         return None
 
 
@@ -170,12 +184,12 @@ def _safe_eval_one(
 ) -> tuple[tuple[float, ...], float]:
     try:
         probs, val = evaluate_observation(scope, obs_space, obs)
-    except _engine_error_types():
+    except engine_error_types():
         return (), 0.0
     return probs, float(val)
 
 
-def _batched_eval(
+def batched_eval(
     scope: PolicyInference,
     *,
     obs_space: ObservationSpace,
@@ -214,13 +228,13 @@ def _batched_eval(
     return probs_out, vals_out, enc_out
 
 
-def _hero_win_prob(env: managym.Env, *, hero_idx: int, active_value: float) -> float:
+def hero_win_prob(env: managym.Env, *, hero_idx: int, active_value: float) -> float:
     seat = env.current_agent_index()
     signed = active_value if seat is None or int(seat) == hero_idx else -active_value
     return float(min(1.0, max(0.0, 0.5 * (signed + 1.0))))
 
 
-def _terminal_score(env: managym.Env, *, hero_idx: int, leaf_value: float | None) -> float:
+def terminal_score(env: managym.Env, *, hero_idx: int, leaf_value: float | None) -> float:
     if leaf_value is not None and not env.is_game_over():
         return leaf_value
     winner = env.winner_index()
@@ -239,7 +253,7 @@ def _maybe_harvest_root(
     sample_prob: float,
     rng: random.Random,
     base_seed: int,
-) -> _HarvestedRoot | None:
+) -> HarvestedRoot | None:
     kind = _ACTION_SPACE_NAMES.get(int(obs.action_space.action_space_type), "unknown")
     eligible = _MIN_BRANCH_ACTIONS <= len(probs) <= obs_space.config.max_actions and (
         allowed is None or kind in allowed
@@ -247,13 +261,13 @@ def _maybe_harvest_root(
     if not eligible or rng.random() >= sample_prob:
         return None
     hero_idx = env.current_agent_index()
-    cloned = _safe_clone(env) if hero_idx is not None else None
+    cloned = safe_clone(env) if hero_idx is not None else None
     encoded = _safe_encode_one(obs, obs_space=obs_space) if cloned is not None else None
     if hero_idx is None or cloned is None or encoded is None:
         return None
     ranked = sorted(range(len(probs)), key=probs.__getitem__, reverse=True)
     a0, a1 = ranked[0], ranked[1]
-    return _HarvestedRoot(
+    return HarvestedRoot(
         cloned,
         encoded,
         int(hero_idx),
@@ -269,12 +283,12 @@ def _maybe_harvest_root(
 def _safe_reset(env: managym.Env, deal: Deal) -> managym.Observation | None:
     try:
         obs, _ = env.reset(deal.game_setup())
-    except _engine_error_types():
+    except engine_error_types():
         return None
     return obs
 
 
-def _harvest_roots_from_deal(
+def harvest_roots_from_deal(
     deal: Deal,
     *,
     scope: PolicyInference,
@@ -284,11 +298,11 @@ def _harvest_roots_from_deal(
     config: BatchedForkConfig,
     rng: random.Random,
     base_seed: int,
-) -> list[_HarvestedRoot]:
+) -> list[HarvestedRoot]:
     use_memory = obs_space.config.max_decision_records > 0
     env = managym.Env(seed=deal.seed, skip_trivial=True, decision_memory=use_memory)
     obs = _safe_reset(env, deal)
-    roots: list[_HarvestedRoot] = []
+    roots: list[HarvestedRoot] = []
     for step_idx in range(config.max_steps):
         if obs is None or env.is_game_over() or len(roots) >= remaining:
             break
@@ -308,26 +322,26 @@ def _harvest_roots_from_deal(
         if root is not None:
             roots.append(root)
         action = rng.choices(range(len(probs)), weights=probs, k=1)[0]
-        next_obs, is_done, is_failed = _safe_step(env, action)
+        next_obs, is_done, is_failed = safe_step(env, action)
         obs = None if is_done or is_failed else next_obs
     return roots
 
 
-def _spawn_all_branches(roots: Sequence[_HarvestedRoot], *, config: BatchedForkConfig) -> list[_ActiveBranch]:
-    branches: list[_ActiveBranch] = []
+def spawn_all_branches(roots: Sequence[HarvestedRoot], *, config: BatchedForkConfig) -> list[ActiveBranch]:
+    branches: list[ActiveBranch] = []
     want_samples = config.value_samples_per_fork > 0 and config.rollout_horizon is None
     for fork_idx, root in enumerate(roots):
         for pair_idx in range(config.playouts_per_action):
             pair_seed = root.base_seed + pair_idx * 9973
             for arm_idx, root_action in enumerate(root.action_pair):
-                clone = _safe_clone(root.env)
+                clone = safe_clone(root.env)
                 if clone is None:
                     next_obs, is_done, is_failed = None, True, True
                     clone = root.env
                 else:
-                    next_obs, is_done, is_failed = _safe_step(clone, root_action)
+                    next_obs, is_done, is_failed = safe_step(clone, root_action)
                 branches.append(
-                    _ActiveBranch(
+                    ActiveBranch(
                         fork_idx,
                         pair_idx,
                         arm_idx,
@@ -344,7 +358,7 @@ def _spawn_all_branches(roots: Sequence[_HarvestedRoot], *, config: BatchedForkC
 
 
 def _maybe_record_value_sample(
-    branch: _ActiveBranch, *, encoded: managym.ObservationBatch | None, cap_per_branch: int
+    branch: ActiveBranch, *, encoded: managym.ObservationBatch | None, cap_per_branch: int
 ) -> None:
     if branch.sampled_obs is None or encoded is None or cap_per_branch <= 0:
         return
@@ -358,7 +372,7 @@ def _maybe_record_value_sample(
 
 
 def _step_all_branches(
-    branches: Sequence[_ActiveBranch],
+    branches: Sequence[ActiveBranch],
     *,
     scope: PolicyInference,
     obs_space: ObservationSpace,
@@ -371,7 +385,7 @@ def _step_all_branches(
         active = [branch for branch in branches if not branch.done and branch.obs is not None]
         if not active:
             break
-        probs_batch, vals_batch, enc_batch = _batched_eval(
+        probs_batch, vals_batch, enc_batch = batched_eval(
             scope, obs_space=obs_space, observations=[b.obs for b in active if b.obs is not None]
         )
         for branch, probs, val, encoded in zip(active, probs_batch, vals_batch, enc_batch, strict=True):
@@ -379,17 +393,17 @@ def _step_all_branches(
                 branch.done, branch.failed = True, True
                 continue
             if horizon is not None and branch.steps >= horizon:
-                branch.leaf_value = _hero_win_prob(branch.env, hero_idx=branch.hero_idx, active_value=val)
+                branch.leaf_value = hero_win_prob(branch.env, hero_idx=branch.hero_idx, active_value=val)
                 branch.done = True
                 continue
             _maybe_record_value_sample(branch, encoded=encoded, cap_per_branch=cap_per_branch)
             action = branch.rng.choices(range(len(probs)), weights=probs, k=1)[0]
-            next_obs, is_done, is_failed = _safe_step(branch.env, action)
+            next_obs, is_done, is_failed = safe_step(branch.env, action)
             branch.obs, branch.done, branch.failed = next_obs, is_done, is_failed
             branch.steps += 1
 
 
-def _collect_value_samples(branches: Sequence[_ActiveBranch]) -> list[ContinuationValueSample]:
+def _collect_value_samples(branches: Sequence[ActiveBranch]) -> list[ContinuationValueSample]:
     samples: list[ContinuationValueSample] = []
     for branch in branches:
         if branch.failed or branch.sampled_obs is None or not branch.env.is_game_over():
@@ -401,16 +415,16 @@ def _collect_value_samples(branches: Sequence[_ActiveBranch]) -> list[Continuati
     return samples
 
 
-def _assemble_results(
-    roots: Sequence[_HarvestedRoot], branches: Sequence[_ActiveBranch], *, playouts_per_action: int
+def assemble_results(
+    roots: Sequence[HarvestedRoot], branches: Sequence[ActiveBranch], *, playouts_per_action: int
 ) -> BatchedForkResult:
     grouped = {(branch.fork_idx, branch.pair_idx, branch.arm_idx): branch for branch in branches}
     examples: list[ForkExample] = []
     for fork_idx, root in enumerate(roots):
         valid = [
             (
-                _terminal_score(b0.env, hero_idx=root.hero_idx, leaf_value=b0.leaf_value),
-                _terminal_score(b1.env, hero_idx=root.hero_idx, leaf_value=b1.leaf_value),
+                terminal_score(b0.env, hero_idx=root.hero_idx, leaf_value=b0.leaf_value),
+                terminal_score(b1.env, hero_idx=root.hero_idx, leaf_value=b1.leaf_value),
             )
             for pair_idx in range(playouts_per_action)
             for b0, b1 in ((grouped[(fork_idx, pair_idx, 0)], grouped[(fork_idx, pair_idx, 1)]),)
@@ -451,13 +465,13 @@ def _batch_worker_task(args: tuple[dict[str, np.ndarray], int, BatchedForkConfig
     else:
         deals = build_deals(_BATCH_WORKER.decks or elemental_decks(), count=deal_count, seed=seed, decklists="closed")
     rng, allowed = random.Random(seed), (None if config.decision_kinds is None else frozenset(config.decision_kinds))
-    roots: list[_HarvestedRoot] = []
+    roots: list[HarvestedRoot] = []
     with agent.inference_scope() as scope:
         for deal_idx, deal in enumerate(deals):
             if len(roots) >= target_forks:
                 break
             roots.extend(
-                _harvest_roots_from_deal(
+                harvest_roots_from_deal(
                     deal,
                     scope=scope,
                     obs_space=obs_space,
@@ -468,9 +482,9 @@ def _batch_worker_task(args: tuple[dict[str, np.ndarray], int, BatchedForkConfig
                     base_seed=seed * 100_003 + deal_idx * 1009,
                 )
             )
-        branches = _spawn_all_branches(roots, config=config)
+        branches = spawn_all_branches(roots, config=config)
         _step_all_branches(branches, scope=scope, obs_space=obs_space, config=config)
-    return _assemble_results(roots, branches, playouts_per_action=config.playouts_per_action)
+    return assemble_results(roots, branches, playouts_per_action=config.playouts_per_action)
 
 
 class BatchedForkCollectorPool:
