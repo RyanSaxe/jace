@@ -132,7 +132,10 @@ class SearchPlayer:
 def fit_arena_format_prior(
     *, format_id: str, decks_path: Path | None = None, deals: Sequence[Deal] = ()
 ) -> FormatPrior:
-    if decks_path is not None and decks_path.exists():
+    if decks_path is not None:
+        if not decks_path.exists():
+            msg = f"decks catalog not found: {decks_path}"
+            raise FileNotFoundError(msg)
         cat = load_human_deck_catalog(decks_path)
         return fit_format_prior(format_id, cat.card_names, cat.train_decks)
     decks: list[Mapping[str, int]] = (

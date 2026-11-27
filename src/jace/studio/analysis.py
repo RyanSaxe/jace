@@ -251,18 +251,15 @@ def _execute_playout_branches(
     max_plies: int,
     step_errors: tuple[type[BaseException], ...],
 ) -> tuple[str, str | None]:
-    use_model = bool(model_ref) and model_ref != "heuristic" and engine.can_load_checkpoint(run_id, model_ref)
-    if use_model:
-        return _step_branches_model(
-            branches, engine=engine, run_id=run_id, model_ref=model_ref, max_plies=max_plies, step_errors=step_errors
-        )
-    _step_branches_heuristic(branches, max_plies=max_plies, step_errors=step_errors)
-    warning = (
-        f"Checkpoint '{model_ref}' not found; fell back to Heuristic."
-        if model_ref and model_ref != "heuristic"
-        else None
+    if not model_ref or model_ref == "heuristic":
+        _step_branches_heuristic(branches, max_plies=max_plies, step_errors=step_errors)
+        return "cpu", None
+    if not engine.can_load_checkpoint(run_id, model_ref):
+        msg = f"checkpoint not found: {model_ref}"
+        raise FileNotFoundError(msg)
+    return _step_branches_model(
+        branches, engine=engine, run_id=run_id, model_ref=model_ref, max_plies=max_plies, step_errors=step_errors
     )
-    return "cpu", warning
 
 
 def run_action_playouts(

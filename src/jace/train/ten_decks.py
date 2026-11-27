@@ -1,4 +1,4 @@
-"""Train a Jace v2 self-play agent on the 10-deck TLA lab with Academy-native artifacts.
+"""Train a Jace self-play agent on the authored 10-deck lab with Academy-native artifacts.
 
 Wires `jace.rl`, `jace.collect`, `jace.eval`, `jace.forks`, and `jace.storage.gameplay`
 over the ten closed-decklist `elemental-world-v2` decks using upstream `manabot` v11
@@ -268,7 +268,7 @@ def _open_pools(
 
 
 def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
-    """Run the 10-deck TLA self-play lab and persist all Academy-native artifacts.
+    """Run the authored 10-deck self-play lab and persist all Academy-native artifacts.
 
     Evaluates update 0 before training, runs `cfg.updates` self-play updates on the ten
     closed-decklist decks (optionally mixing frozen historical snapshots), and evaluates
@@ -422,9 +422,9 @@ def run_ten_deck_lab(cfg: LabConfig) -> RunLayout:
 
 
 def _parse_args(argv: Sequence[str] | None) -> LabConfig:
-    parser = argparse.ArgumentParser(description="Train Jace v2 on the 10-deck TLA self-play lab.")
-    parser.add_argument("--runs-dir", type=Path, default=Path("../jace-runs"))
-    parser.add_argument("--experiment", default="v2-ten-deck-lab")
+    parser = argparse.ArgumentParser(description="Train Jace on the authored 10-deck self-play lab.")
+    parser.add_argument("--runs-dir", type=Path, required=True)
+    parser.add_argument("--experiment", default="ten-deck-lab")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--updates", type=int, default=150)
     parser.add_argument("--num-envs", type=int, default=32)

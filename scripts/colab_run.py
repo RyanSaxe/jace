@@ -55,7 +55,7 @@ GpuKind = Literal["T4", "L4", "G4", "A100", "H100"]
 
 GPU_CHOICES: tuple[GpuKind, ...] = ("T4", "L4", "G4", "A100", "H100")
 DEFAULT_REPO_URL = "https://github.com/RyanSaxe/jace.git"
-DEFAULT_EXPERIMENT = "v2-colab"
+DEFAULT_EXPERIMENT = "colab"
 DEFAULT_POLL_INTERVAL_S = 300
 DEFAULT_SYNC_INTERVAL_S = 900
 DEFAULT_STALL_TIMEOUT_S = 180

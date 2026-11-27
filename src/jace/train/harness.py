@@ -1,8 +1,8 @@
-"""Fast, directionally accurate experiment harness CLI for Jace v2.
+"""Fast, directionally accurate experiment harness CLI for Jace.
 
 Runs either a warm-start branch from a saved checkpoint (default for strategy, fork,
 and credit ideas) or a short from-scratch micro-run (for architecture changes) over
-all ten closed TLA decks, then judges the final checkpoint against a baseline using
+all closed authored decks, then judges the final checkpoint against a baseline using
 adaptive parallel mirrored evaluation (200 -> 400 -> 1,000 mirrored games across CPU
 workers) plus forensics gating. Also supports standalone `--eval-only` adaptive H2H
 scoring between any two checkpoints.
@@ -130,8 +130,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-only", action="store_true", help="Skip training and score two existing checkpoints.")
     parser.add_argument("--candidate", type=Path, default=None)
     parser.add_argument("--baseline", type=Path, default=None)
-    parser.add_argument("--runs-dir", type=Path, default=Path("../jace-runs"))
-    parser.add_argument("--experiment", default="v2-fast-harness")
+    parser.add_argument("--runs-dir", type=Path, required=True)
+    parser.add_argument("--experiment", default="fast-harness")
     parser.add_argument("--run-id", default="screen")
     parser.add_argument("--init-checkpoint", type=Path, default=None)
     parser.add_argument("--updates", type=int, default=25)
