@@ -3,7 +3,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "@/App";
-import { WatchlistView } from "@/components/WatchlistView";
+import { WatchlistView } from "@/components/watchlist";
 import type {
   ArenaLeaderboardResponse,
   ArenaMatchRow,

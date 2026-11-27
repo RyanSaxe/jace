@@ -3,12 +3,13 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  LandPilesRow,
+  PermanentsRow,
   type PlaymatController,
   TabletopPlaymat,
   TabletopTopBar,
-} from "@/components/TabletopOverlays";
-import { LandPilesRow, PermanentsRow } from "@/components/TabletopParts";
-import { TabletopView } from "@/components/TabletopView";
+  TabletopView,
+} from "@/components/tabletop";
 import type { BoardState, GameTarget, LandPile, PermanentState, PlayerState } from "@/lib/types";
 
 function setViewport(width: number, height: number): void {
