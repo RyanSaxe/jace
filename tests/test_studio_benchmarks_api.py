@@ -5,7 +5,7 @@ import managym
 import pytest
 from fastapi.testclient import TestClient
 
-import jace.studio.benchmarks as benchmarks_mod
+import jace.studio.benchmarks.promotion as promotion_mod
 from jace.eval.arena import ArenaMatchRecord, append_match_record, ledger_path_for
 from jace.eval.puzzles import PuzzleRecord, append_puzzle, puzzles_path
 from jace.studio import StudioConfig, create_app
@@ -450,7 +450,7 @@ def test_watchlist_promote_puzzle_gate_422_and_200(tmp_path: Path, monkeypatch: 
 
     # create_app builds BenchmarkService internally; stub CRN playouts for deterministic 200 gate coverage.
     # ast-grep-ignore: python.question-monkeypatch
-    monkeypatch.setattr(benchmarks_mod, "_run_paired_crn_outcomes", _strong_outcomes)
+    monkeypatch.setattr(promotion_mod, "_run_paired_crn_outcomes", _strong_outcomes)
     admitted = client.post(
         f"/api/watchlist/{item_id}/promote-puzzle",
         json={"format": "tla-limited-0.2.6", "playouts": 16, "min_margin": 0.15},

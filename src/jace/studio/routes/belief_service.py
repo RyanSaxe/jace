@@ -1,11 +1,9 @@
-"""FastAPI routes and service helpers for opponent belief inference, override projection, and search.
+"""Service helpers for Studio opponent belief inference, overrides, and local search.
 
-Exposes `POST /api/belief/infer`, `POST /api/belief/project`, and
-`POST /api/search/evaluate` on the Jace Studio FastAPI application. Loads a
-saved `FormatPrior` and optional `BeliefNet` from `<runs-dir>/belief/{format}/`
-when available, and otherwise builds a dynamic prior from the run's recorded
-decks and indexed card catalog. Reuses `InferenceEngine`'s thread-safe LRU
-checkpoint cache for search evaluation.
+Loads saved `FormatPrior` and optional `BeliefNet` artifacts from
+`<runs-dir>/belief/{format}/`, falls back to a dynamic prior built from
+recorded run decks and indexed cards, computes Turn-0 `V_0` keep/mulligan
+deltas, and executes checkpoint-backed or heuristic multi-world local search.
 """
 
 from __future__ import annotations
@@ -17,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import managym
 import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from managym.enums import ActionSpaceEnum
 from pydantic import BaseModel, Field
 
@@ -57,19 +55,26 @@ if TYPE_CHECKING:
     from jace.studio.inference import InferenceEngine
 
 __all__ = (
+    "DEFAULT_V0_EQUITY",
     "BeliefInferRequest",
     "BeliefOverrideModel",
     "BeliefProjectRequest",
     "SearchEvaluateRequest",
-    "register_belief_and_search_routes",
+    "compute_turn0_v0",
+    "execute_search",
+    "format_search_actions",
+    "load_step_belief",
+    "project_or_422",
+    "serialize_belief_cards",
+    "to_belief_override",
 )
 
+DEFAULT_V0_EQUITY = 0.5
 _FORMAT_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _BASIC_LANDS = frozenset({"Plains", "Island", "Swamp", "Mountain", "Forest"})
 _BASIC_LAND_LIMIT = 20.0
 _DEFAULT_COPY_LIMIT = 4.0
 _MAX_RUN_DECKS = 128
-_DEFAULT_V0_EQUITY = 0.5
 _Z_95 = 1.959963984540054
 
 
@@ -100,7 +105,7 @@ class SearchEvaluateRequest(BeliefInferRequest):
     override: BeliefOverrideModel | None = None
 
 
-def _to_belief_override(model: BeliefOverrideModel | None) -> BeliefOverride | None:
+def to_belief_override(model: BeliefOverrideModel | None) -> BeliefOverride | None:
     if model is None:
         return None
     return BeliefOverride(
@@ -187,7 +192,7 @@ def _replay_step_or_404(
     return game, env, obs
 
 
-def _compute_turn0_v0(
+def compute_turn0_v0(
     obs: managym.Observation,
     *,
     inference: InferenceEngine,
@@ -225,7 +230,7 @@ def _card_entry_sort_key(row: dict[str, object]) -> tuple[bool, float, float, st
     )
 
 
-def _serialize_belief_cards(
+def serialize_belief_cards(
     belief: BeliefState, *, revealed: torch.Tensor, override: BeliefOverride | None
 ) -> tuple[list[dict[str, object]], int, int, float]:
     pinned_map = override.pinned_in_hand if override is not None else {}
@@ -263,7 +268,7 @@ def _serialize_belief_cards(
     return cards, pinned_total, unedited_count, round(unedited_mass, 4)
 
 
-def _project_or_422(
+def project_or_422(
     belief: BeliefState, override: BeliefOverride, *, revealed: torch.Tensor, copy_limits: torch.Tensor | None
 ) -> BeliefState:
     try:
@@ -352,9 +357,7 @@ def _run_heuristic_search(
     )
 
 
-def _format_search_actions(
-    obs: managym.Observation, result: SearchResult, *, hero_seat: int
-) -> list[dict[str, object]]:
+def format_search_actions(obs: managym.Observation, result: SearchResult, *, hero_seat: int) -> list[dict[str, object]]:
     actions = serialize_legal_actions(obs, hero_seat=hero_seat)
     priors = [float(result.policy_priors[i]) if i < len(result.policy_priors) else 0.0 for i in range(len(actions))]
     values = [float(result.action_values[i]) if i < len(result.action_values) else 0.5 for i in range(len(actions))]
@@ -379,7 +382,7 @@ def _format_search_actions(
     return rows
 
 
-def _load_step_belief(
+def load_step_belief(
     req: BeliefInferRequest, *, runs_dir: Path, replays: ReplayService, index: StudioIndex
 ) -> tuple[RecordedGame, managym.Env, managym.Observation, FormatPrior, BeliefState, torch.Tensor, bool]:
     game, env, obs = _replay_step_or_404(replays, req)
@@ -393,7 +396,7 @@ def _load_step_belief(
     return game, env, obs, prior, belief, revealed, belief_net is not None
 
 
-def _execute_search(
+def execute_search(
     req: SearchEvaluateRequest,
     *,
     inference: InferenceEngine,
@@ -436,100 +439,3 @@ def _execute_search(
         )
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=404, detail=f"checkpoint not found: {req.ckpt_a} ({exc})") from exc
-
-
-def register_belief_and_search_routes(
-    app: FastAPI, *, runs_dir: Path, replays: ReplayService, inference: InferenceEngine, index: StudioIndex
-) -> None:
-    @app.post("/api/belief/infer", summary="Infer full-format opponent belief and Turn-0 V0 equity")
-    def belief_infer(req: BeliefInferRequest) -> dict[str, object]:
-        game, _, obs, _, belief, revealed, has_net = _load_step_belief(
-            req, runs_dir=runs_dir, replays=replays, index=index
-        )
-        acting_seat = int(obs.agent.player_index)
-        v0_equity = float(belief.matchup_equity) if belief.matchup_equity is not None else _DEFAULT_V0_EQUITY
-        v0_info = _compute_turn0_v0(obs, inference=inference, game=game, ckpt_a=None, v0_equity=v0_equity)
-        cards, pinned_total, unedited_count, unedited_mass = _serialize_belief_cards(
-            belief, revealed=revealed, override=None
-        )
-        return {
-            "card_names": list(belief.card_names),
-            "hand_probs": [round(float(x), 4) for x in belief.hand_probs.detach().cpu().tolist()],
-            "deck_copies": [round(float(x), 4) for x in belief.deck_copies.detach().cpu().tolist()],
-            "revealed_counts": [round(float(x)) for x in revealed.detach().cpu().tolist()],
-            "cards": cards,
-            "opp_hand_size": int(belief.opp_hand_size),
-            "opp_library_size": int(belief.opp_library_size),
-            "pinned_total": pinned_total,
-            "unedited_count": unedited_count,
-            "unedited_mass": unedited_mass,
-            "prior_backend": str(belief.prior_backend),
-            "has_belief_net": has_net,
-            "acting_seat": acting_seat,
-            "perspective": "hero" if acting_seat == game.hero_seat else "opponent",
-            "matchup_equity": round(v0_equity, 4),
-            "v0_equity": round(v0_equity, 4),
-            "v0": v0_info,
-        }
-
-    @app.post("/api/belief/project", summary="Project user counterfactual belief overrides onto legal distribution")
-    def belief_project(req: BeliefProjectRequest) -> dict[str, object]:
-        game, _, obs, prior, belief, revealed, has_net = _load_step_belief(
-            req, runs_dir=runs_dir, replays=replays, index=index
-        )
-        acting_seat = int(obs.agent.player_index)
-        override = _to_belief_override(req.override)
-        projected = (
-            _project_or_422(belief, override, revealed=revealed, copy_limits=prior.copy_limits)
-            if override is not None
-            else belief
-        )
-        cards, pinned_total, unedited_count, unedited_mass = _serialize_belief_cards(
-            projected, revealed=revealed, override=override
-        )
-        return {
-            "cards": cards,
-            "opp_hand_size": int(projected.opp_hand_size),
-            "opp_library_size": int(projected.opp_library_size),
-            "pinned_total": pinned_total,
-            "unedited_count": unedited_count,
-            "unedited_mass": unedited_mass,
-            "has_belief_net": has_net,
-            "acting_seat": acting_seat,
-            "perspective": "hero" if acting_seat == game.hero_seat else "opponent",
-        }
-
-    @app.post("/api/search/evaluate", summary="Run belief-conditioned multi-world local search on a step")
-    def search_evaluate(req: SearchEvaluateRequest) -> dict[str, object]:
-        game, env, obs, prior, belief, revealed, _ = _load_step_belief(
-            req, runs_dir=runs_dir, replays=replays, index=index
-        )
-        acting_seat = int(obs.agent.player_index)
-        override = _to_belief_override(req.override)
-        if override is not None:
-            belief = _project_or_422(belief, override, revealed=revealed, copy_limits=prior.copy_limits)
-        result = _execute_search(
-            req,
-            inference=inference,
-            env=env,
-            obs=obs,
-            belief=belief,
-            revealed=revealed,
-            copy_limits=prior.copy_limits,
-            override=override,
-        )
-        v0_equity = float(belief.matchup_equity) if belief.matchup_equity is not None else _DEFAULT_V0_EQUITY
-        v0_info = _compute_turn0_v0(obs, inference=inference, game=game, ckpt_a=req.ckpt_a, v0_equity=v0_equity)
-        return {
-            "chosen_action": int(result.chosen_action),
-            "actions": _format_search_actions(obs, result, hero_seat=acting_seat),
-            "worlds_sampled": int(result.worlds_sampled),
-            "rollout_horizon": int(result.rollout_horizon or req.horizon_plies),
-            "elapsed_ms": round(float(result.elapsed_ms), 1),
-            "opp_hand_size": int(belief.opp_hand_size),
-            "acting_seat": acting_seat,
-            "perspective": "hero" if acting_seat == game.hero_seat else "opponent",
-            "warnings": list(result.warnings),
-            "v0_equity": round(v0_equity, 4),
-            "v0": v0_info,
-        }
