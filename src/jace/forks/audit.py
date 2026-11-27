@@ -33,7 +33,7 @@ from jace.forks.batch import (
     _spawn_all_branches,
     _terminal_score,
 )
-from jace.forks.collect import ForkStats
+from jace.forks.collect import ForkStats, concat_observation_batches
 from jace.rl.losses import categorical_value_loss, fork_pairwise_loss, policy_log_probs
 from jace.storage.gameplay import RunLayout, append_metric
 
@@ -83,8 +83,8 @@ def _stage_value_reuse(
 ) -> Callable[[], torch.Tensor] | None:
     if not samples or weight <= 0.0:
         return None
-    stacked = {key: np.stack([item.encoded_obs[key] for item in samples], axis=0) for key in samples[0].encoded_obs}
-    prepared = on_device(agent.prepare(stacked), device)
+    batch_obs = concat_observation_batches([item.encoded_obs for item in samples])
+    prepared = on_device(agent.prepare(batch_obs), device)
     targets = torch.zeros((len(samples), _WDL_CLASSES), dtype=torch.float32, device=device)
     for idx, sample in enumerate(samples):
         targets[idx, sample.outcome_class] = 1.0
@@ -129,12 +129,12 @@ def build_batched_fork_aux_loss(
         stats = ForkStats(total, 0, 0, 0.0, mean_top_p, mean_alt_p, 0.0, 0.0, 0.0, collect_s, time.perf_counter() - t0)
         return value_term, stats
 
-    stacked = {key: np.stack([item.encoded_obs[key] for item in decisive], axis=0) for key in decisive[0].encoded_obs}
+    batch_obs = concat_observation_batches([item.encoded_obs for item in decisive])
     action_pairs = torch.tensor([item.action_pair for item in decisive], dtype=torch.long, device=device)
     pair_returns = torch.tensor([item.pair_returns for item in decisive], dtype=torch.float32, device=device)
     counts = [item.num_actions for item in decisive]
 
-    prepared = on_device(agent.prepare(stacked), device)
+    prepared = on_device(agent.prepare(batch_obs), device)
     agent.eval()
     with torch.no_grad():
         old_logits, _ = agent.forward_distribution(prepared)
@@ -195,6 +195,9 @@ def _step_and_record_horizons(
             observations=[b.obs for b in active if b.obs is not None],
         )
         for branch, probs, val in zip(active, probs_batch, vals_batch, strict=True):
+            if not probs:
+                branch.done, branch.failed = True, True
+                continue
             if branch.steps in horizon_set:
                 snapshots[(branch.fork_idx, branch.pair_idx, branch.arm_idx, branch.steps)] = _hero_win_prob(
                     branch.env, hero_idx=branch.hero_idx, active_value=val
@@ -399,6 +402,8 @@ def open_batched_fork_hook(
     learn_device: str,
     seed: int,
     decision_memory: DecisionMemoryKind = "none",
+    stream_norm: bool = False,
+    focus_film: bool = False,
     layout: RunLayout | None = None,
 ) -> PrepareAuxFn | None:
     if spec.forks_per_update <= 0:
@@ -416,6 +421,8 @@ def open_batched_fork_hook(
             hidden_dim=hidden_dim,
             attention_layers=attention_layers,
             decision_memory=decision_memory,
+            stream_norm=stream_norm,
+            focus_film=focus_film,
             num_workers=spec.fork_workers,
             human_decks_path=decks_path,
         )

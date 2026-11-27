@@ -253,6 +253,7 @@ def test_evaluate_full_data_logs_live_scores_only_when_ema_active(tmp_path: Path
         record_games=False,
     )
     assert "live_held_out_det" not in plain_payload
+    assert "ensemble_held_out_det" not in plain_payload
 
     ema_payload = _evaluate_full_data(
         agent,
@@ -270,8 +271,12 @@ def test_evaluate_full_data_logs_live_scores_only_when_ema_active(tmp_path: Path
         record_games=False,
     )
     assert "live_held_out_det" in ema_payload
+    assert "ensemble_held_out_det" in ema_payload
 
     rows = [json.loads(line) for line in layout.metrics_path.read_text().splitlines()]
     assert "live_held_out_det_win_rate" not in rows[0]
+    assert "ensemble_held_out_det_win_rate" not in rows[0]
     assert "live_held_out_det_win_rate" in rows[1]
+    assert "ensemble_held_out_det_win_rate" in rows[1]
     assert 0.0 <= rows[1]["live_held_out_det_win_rate"] <= 1.0
+    assert 0.0 <= rows[1]["ensemble_held_out_det_win_rate"] <= 1.0

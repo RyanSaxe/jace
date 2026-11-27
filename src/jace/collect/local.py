@@ -37,7 +37,7 @@ from jace.collect.decks import (
     needs_curriculum_refresh,
     top_card_pool,
 )
-from jace.rl.pool import SnapshotEntry, load_snapshot
+from jace.rl.pool import PrecisionKind, SnapshotEntry, load_snapshot
 
 if TYPE_CHECKING:
     import argparse
@@ -72,6 +72,13 @@ def add_full_data_rl_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--hidden-dim", type=int, default=160)
     parser.add_argument("--attention-layers", type=int, default=2)
     parser.add_argument("--decision-memory", choices=("none", "gru", "transformer"), default="none")
+    parser.add_argument("--stream-norm", action="store_true", default=False)
+    parser.add_argument("--no-stream-norm", dest="stream_norm", action="store_false")
+    parser.add_argument("--focus-film", action="store_true", default=False)
+    parser.add_argument("--no-focus-film", dest="focus_film", action="store_false")
+    parser.add_argument("--live-tokens", dest="live_tokens", action="store_true", default=None)
+    parser.add_argument("--no-live-tokens", dest="live_tokens", action="store_false")
+    parser.add_argument("--precision", choices=("auto", "float32", "tf32", "bf16"), default="auto")
     parser.add_argument("--lam-policy", type=float, default=0.5)
     parser.add_argument("--lam-value", type=float, default=0.8)
     parser.add_argument("--select", dest="select_kind", choices=("top25", "top50", "all"), default="top50")
@@ -106,6 +113,7 @@ class LocalCollectorConfig:
     num_envs: int
     steps_per_env: int
     collect_device: str
+    precision: PrecisionKind = "float32"
     native_workers: Literal[1, 2, 4] = 1
     seed: int = 1
     games_path: Path | None = None
@@ -185,7 +193,7 @@ class LocalShardedCollector:
             num_envs=self._cfg.num_envs,
             seed=seed,
             opponent_mode="self",
-            numerics=CollectionSession(device=self._cfg.collect_device, seed=seed),
+            numerics=CollectionSession(device=self._cfg.collect_device, seed=seed, precision=self._cfg.precision),
             learning_seats="both",
             batch_closure="complete-games",
             deck_source=self._deck_source,
@@ -220,7 +228,7 @@ class LocalShardedCollector:
             seed=seed,
             opponent_mode="learning",
             opponent_agent=self._opponent,
-            numerics=CollectionSession(device=self._cfg.collect_device, seed=seed),
+            numerics=CollectionSession(device=self._cfg.collect_device, seed=seed, precision=self._cfg.precision),
             learning_seats="both",
             matchup_curriculum=curriculum,
             batch_closure="complete-games",

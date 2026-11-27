@@ -3,10 +3,10 @@
 Clones live closed-decklist `managym.Env` game states across spawned CPU workers, forces
 the policy's top action against its runner-up alternative across `R` paired playouts
 sharing RNG streams (common random numbers, Schulman et al. 2015; Surio et al. 2026),
-steps all active branches in one batched policy forward pass per ply to true game
-termination (zero learned-judge bias), and updates the policy with bounded pairwise
-regularized cross-entropy (Grill et al. 2020; Anthony et al. 2017) plus a reverse-KL
-anchor to protect unrelated decisions.
+encodes observations through native ragged `managym.ObservationBatch` helpers, steps all
+active branches in one batched policy forward pass per ply to true game termination (zero
+learned-judge bias), and updates the policy with bounded pairwise regularized cross-entropy
+(Grill et al. 2020; Anthony et al. 2017) plus a reverse-KL anchor.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Self
 
 import managym
-import numpy as np
 import torch
 from manabot.backends.torch.arrays import on_device
 from manabot.backends.torch.bot import evaluate_observation
@@ -34,8 +33,10 @@ from jace.eval.deals import Deal, build_deals
 from jace.rl.losses import fork_pairwise_loss, policy_log_probs
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Sequence
     from multiprocessing.pool import Pool as ProcessPool
+
+    import numpy as np
 
 __all__ = (
     "ForkCollectorPool",
@@ -43,6 +44,7 @@ __all__ = (
     "ForkExample",
     "ForkStats",
     "build_fork_aux_loss",
+    "concat_observation_batches",
 )
 
 _ACTION_SPACE_NAMES = {int(member): member.name.lower() for member in ActionSpaceEnum}
@@ -76,7 +78,7 @@ class ForkConfig:
 
 @dataclass(frozen=True, slots=True)
 class ForkExample:
-    encoded_obs: dict[str, np.ndarray]
+    encoded_obs: managym.ObservationBatch
     action_pair: tuple[int, int]
     pair_returns: tuple[float, float]
     policy_pair_probs: tuple[float, float]
@@ -130,15 +132,25 @@ def _sample_action(probs: Sequence[float], rng: random.Random) -> int:
     return rng.choices(range(len(probs)), weights=probs, k=1)[0]
 
 
+def concat_observation_batches(batches: Sequence[managym.ObservationBatch]) -> managym.ObservationBatch:
+    if not batches:
+        msg = "batches must contain at least one ObservationBatch"
+        raise ValueError(msg)
+    if len(batches) == 1:
+        return batches[0]
+    coords = [(batch, row) for batch in batches for row in range(batch.batch_size)]
+    return batches[0].gather(coords)
+
+
 def _batched_probs(
     scope: PolicyInference,
     *,
     obs_space: ObservationSpace,
     observations: Sequence[managym.Observation],
 ) -> list[tuple[float, ...]]:
-    max_actions = obs_space.encoder.max_actions
+    max_actions = obs_space.config.max_actions
     batch_indices: list[int] = []
-    encoded_list: list[Mapping[str, np.ndarray]] = []
+    eligible_obs: list[managym.Observation] = []
     counts: list[int] = []
     results: list[tuple[float, ...] | None] = [None] * len(observations)
 
@@ -146,19 +158,16 @@ def _batched_probs(
         count = len(obs.action_space.actions)
         if count <= max_actions:
             batch_indices.append(idx)
-            encoded_list.append(obs_space.encode(obs))
+            eligible_obs.append(obs)
             counts.append(count)
         else:
             probs, _ = evaluate_observation(scope, obs_space, obs)
             results[idx] = probs
 
-    if encoded_list:
-        stacked = {
-            key: np.stack([np.asarray(item[key], dtype=np.float32) for item in encoded_list], axis=0)
-            for key in encoded_list[0]
-        }
+    if eligible_obs:
+        encoded = managym.encode_observation_batch(eligible_obs, obs_space.layout, obs_space.config.action_overflow)
         with torch.no_grad():
-            logits, _ = scope.agent(scope.prepare(stacked))
+            logits, _ = scope.agent(scope.prepare(encoded))
             probs_t = torch.softmax(logits, dim=-1).cpu()
         for row_idx, out_idx in enumerate(batch_indices):
             results[out_idx] = tuple(probs_t[row_idx, : counts[row_idx]].tolist())
@@ -259,7 +268,7 @@ def _fork_decision(
     if hero_idx is None:
         return None
     a0, a1 = _top_two_actions(probs)
-    encoded = {key: np.asarray(val, dtype=np.float32) for key, val in obs_space.encode(obs).items()}
+    encoded = managym.encode_observation_batch([obs], obs_space.layout, obs_space.config.action_overflow)
     q0, q1, valid_pairs = _rollout_paired_branches(
         env,
         hero_idx=int(hero_idx),
@@ -303,7 +312,7 @@ def _collect_from_deal(
             break
         probs, _ = evaluate_observation(scope, obs_space, obs)
         kind = _ACTION_SPACE_NAMES.get(int(obs.action_space.action_space_type), "unknown")
-        eligible = _MIN_BRANCH_ACTIONS <= len(probs) <= obs_space.encoder.max_actions and (
+        eligible = _MIN_BRANCH_ACTIONS <= len(probs) <= obs_space.config.max_actions and (
             allowed is None or kind in allowed
         )
         if eligible and rng.random() < config.sample_prob:
@@ -445,13 +454,13 @@ def build_fork_aux_loss(
         stats = ForkStats(total, 0, 0, 0.0, mean_top_p, mean_alt_p, 0.0, 0.0, 0.0, collect_s, time.perf_counter() - t0)
         return None, stats
 
-    stacked = {key: np.stack([item.encoded_obs[key] for item in decisive], axis=0) for key in decisive[0].encoded_obs}
+    batch_obs = concat_observation_batches([item.encoded_obs for item in decisive])
     action_pairs = torch.tensor([item.action_pair for item in decisive], dtype=torch.long, device=device)
     pair_returns = torch.tensor([item.pair_returns for item in decisive], dtype=torch.float32, device=device)
     counts = [item.num_actions for item in decisive]
 
     agent.to(device)
-    prepared = on_device(agent.prepare(stacked), device)
+    prepared = on_device(agent.prepare(batch_obs), device)
     agent.eval()
     with torch.no_grad():
         old_logits, _ = agent.forward_distribution(prepared)

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 import time
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Literal, Protocol
 
 import numpy as np
@@ -36,6 +36,7 @@ from jace.rl.diagnostics import GradientAgreementTracker, snapshot_win_rate
 from jace.rl.ema import EmaWeights, resolve_ema_weights
 from jace.rl.losses import LossFn, PolicyBatch
 from jace.rl.pool import (
+    PrecisionKind,
     SnapshotEntry,
     SnapshotPool,
     StepRecord,
@@ -91,15 +92,32 @@ class CollectFn(Protocol):
     ) -> RolloutBatch: ...
 
 
+def _apply_precision(precision: PrecisionKind, device: torch.device) -> None:
+    if device.type == "cuda" and precision in ("tf32", "bf16"):
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cudnn.allow_tf32 = True
+
+
+def _forward_autocast(precision: PrecisionKind, device: torch.device) -> AbstractContextManager[object]:
+    if precision == "bf16" and device.type in ("cuda", "mps"):
+        return torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+    return nullcontext()
+
+
 def _bootstrap_values(
-    agent: ActorCritic, rollout: AdmittedRollout, *, device: torch.device, chunk_size: int
+    agent: ActorCritic,
+    rollout: AdmittedRollout,
+    *,
+    device: torch.device,
+    chunk_size: int,
+    precision: PrecisionKind = "float32",
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     values: list[torch.Tensor] = []
     outcomes: list[torch.Tensor] = []
     was_training = agent.training
     agent.eval()
     try:
-        with torch.no_grad():
+        with torch.no_grad(), _forward_autocast(precision, device):
             for obs in rollout.next_observations(device, chunk_size):
                 _, raw_value = agent.forward_distribution(obs)
                 raw_value = raw_value.float()
@@ -232,7 +250,7 @@ def _collect_against_snapshot(
         seed=seed,
         opponent_mode="learning",
         opponent_agent=opponent,
-        numerics=CollectionSession(device=config.collect_device, seed=seed),
+        numerics=CollectionSession(device=config.collect_device, seed=seed, precision=config.precision),
         learning_seats="both",
         matchup_curriculum=curriculum,
         batch_closure="complete-games",
@@ -260,7 +278,7 @@ def _open_local_collector(
         num_envs=config.num_envs,
         seed=config.seed,
         opponent_mode="self",
-        numerics=CollectionSession(device=config.collect_device, seed=config.seed),
+        numerics=CollectionSession(device=config.collect_device, seed=config.seed, precision=config.precision),
         learning_seats="both",
         batch_closure="complete-games",
         deck_source=deck_source,
@@ -316,9 +334,12 @@ def update_step(
     once-per-epoch semantic catalog encoding.
     """
     device = torch.device(config.device)
+    _apply_precision(config.precision, device)
     agent.to(device)
     rollout = AdmittedRollout(agent, batch)
-    next_value, next_outcomes = _bootstrap_values(agent, rollout, device=device, chunk_size=config.minibatch_size)
+    next_value, next_outcomes = _bootstrap_values(
+        agent, rollout, device=device, chunk_size=config.minibatch_size, precision=config.precision
+    )
     targets = credit(_trajectory_from_batch(batch, next_value=next_value, next_outcomes=next_outcomes))
     raw_flat = targets.raw_advantages.reshape(-1)
     selected_mask = select(raw_flat).bool()
@@ -349,7 +370,9 @@ def update_step(
             rollout.minibatches(order, config.minibatch_size, device) as minibatches,
         ):
             for idx, obs_t, rows in minibatches:
-                logits, value_output = agent.forward_distribution(obs_t)
+                with _forward_autocast(config.precision, device):
+                    logits, value_output = agent.forward_distribution(obs_t)
+                logits, value_output = logits.float(), value_output.float()
                 ref = reference_distribution(rows.observation, config.reference)
                 policy_batch = PolicyBatch(
                     logits=logits,

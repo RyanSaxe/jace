@@ -254,3 +254,59 @@ def test_cli_dry_run_forwards_after_double_dash_and_executes_zero_commands(
     assert "uv run python -m jace.train.full_data" in output
     assert "--updates 25 --eval-every 5" in output
     assert " -- --updates" not in output
+
+
+def test_stall_watchdog_restarts_with_shifted_seed_and_stops_on_exhaustion(tmp_path: Path) -> None:
+    decks = _make_decks(tmp_path)
+    clock_val = [0.0]
+
+    def fake_clock() -> float:
+        clock_val[0] += 100.0
+        return clock_val[0]
+
+    # First tick establishes LINES=10; second tick stays at LINES=10 past stall_timeout_s=50 -> restarts with seed 1005;
+    # third tick finishes cleanly.
+    recover_runner = _RecordingRunner(
+        exec_responses=[
+            CommandResult(0, "ALIVE=True EXIT= PID=42 LINES=10 GPU=[1000 MiB, 97887 MiB, 0 %] LAST={}\n"),
+            CommandResult(0, "ALIVE=True EXIT= PID=42 LINES=10 GPU=[1000 MiB, 97887 MiB, 0 %] LAST={}\n"),
+            CommandResult(0, "ALIVE=False EXIT=0 PID=99 LINES=12 GPU=[0 MiB, 97887 MiB, 0 %] LAST={}\n"),
+        ]
+    )
+    recover_cfg = ColabRunConfig(
+        session="stall-recover",
+        decks_path=decks,
+        backup_dir=tmp_path / "backup-recover",
+        run_id="r-rec",
+        poll_interval_s=0,
+        sync_interval_s=0,
+        stall_timeout_s=50,
+        max_stall_restarts=2,
+        extra_args=("--seed", "5"),
+    )
+    assert run_colab_training(recover_cfg, runner=recover_runner, clock=fake_clock) == 0
+    ssh_cmds = [cmd[-1] for cmd, _, _, _ in recover_runner.calls if cmd[4] == "ssh"]
+    assert len(ssh_cmds) == 2
+    assert "/content/jace/.venv/bin/python" in ssh_cmds[1]
+    assert "--resume" in ssh_cmds[1]
+    assert "--seed 1005" in ssh_cmds[1]
+
+    # Exhausting max_stall_restarts=0 stops the VM and returns exit code 124
+    exhaust_runner = _RecordingRunner(
+        exec_responses=[
+            CommandResult(0, "ALIVE=True EXIT= PID=42 LINES=10 GPU=[1000 MiB, 97887 MiB, 0 %] LAST={}\n"),
+            CommandResult(0, "ALIVE=True EXIT= PID=42 LINES=10 GPU=[1000 MiB, 97887 MiB, 0 %] LAST={}\n"),
+        ]
+    )
+    exhaust_cfg = ColabRunConfig(
+        session="stall-exhaust",
+        decks_path=decks,
+        backup_dir=tmp_path / "backup-exhaust",
+        run_id="r-exh",
+        poll_interval_s=0,
+        sync_interval_s=0,
+        stall_timeout_s=50,
+        max_stall_restarts=0,
+    )
+    assert run_colab_training(exhaust_cfg, runner=exhaust_runner, clock=fake_clock) == 124
+    assert exhaust_runner.subcommands()[-2:] == ["stop", "usage"]

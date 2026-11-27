@@ -52,12 +52,14 @@ from a `.safetensors` checkpoint.
 
 `scripts/colab_run.py` provisions a Colab VM via
 `uvx --from google-colab-cli colab`, uploads `decks.pt` and resume files
-(chunked and SHA-256 verified over 48 MiB), bootstraps Rust and `uv` over SSH,
-and launches `jace.train.full_data` under `nohup`. A tunnel-free `colab exec`
-loop polls every 5 minutes (avoiding the 3-hour idle timeout), syncs
-`metrics.jsonl`, `config.json`, and `checkpoints/resume-state.pt` every
-`--sync-interval-s`, and stops the VM unless `--keep-vm` is set. Arguments after
-`--` forward to `jace.train.full_data`.
+(chunked and SHA-256 verified over 48 MiB), bootstraps `uv` over SSH, and
+launches `jace.train.full_data` under `nohup`. On CUDA runtimes,
+`jace.train.full_data` defaults `--precision auto` to `bf16` and enables
+`--live-tokens` automatically (with `--stream-norm` and `--focus-film` available
+as architecture flags). A tunnel-free `colab exec` loop polls every 5 minutes
+(avoiding the 3-hour idle timeout), syncs `metrics.jsonl`, `config.json`, and
+`checkpoints/resume-state.pt` every `--sync-interval-s`, and stops the VM unless
+`--keep-vm` is set. Arguments after `--` forward to `jace.train.full_data`.
 
 ```sh
 # Dry-run: inspect commands and bootstrap script (drop --dry-run to launch)

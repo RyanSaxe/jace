@@ -1,7 +1,8 @@
 """Full-data 17Lands TLA self-play training loop with held-out parallel eval and resume.
 
-Trains Jace v2's width-160 `ActorCritic` across all 91,359 human Limited decks in
-`decks.pt` using sharded multi-process CPU collection and GPU/CPU updates. Supports
+Trains Jace v2's `ActorCritic` across all 91,359 human Limited decks in `decks.pt` using
+sharded multi-process CPU or in-process GPU/native collection, auto-resolved CUDA
+precision (`bf16`) and live-token attention, optional `stream_norm`/`focus_film`,
 AlphaStar-style even-odds snapshot matching, batch-to-batch gradient-agreement logging,
 atomic checkpoint resume, and fast 8-worker mirrored evaluations strictly on the 10,137
 unseen held-out human decks.
@@ -40,6 +41,7 @@ from jace.eval import (
     capture_probes,
     diff_checkpoints,
     evaluate_agent_parallel,
+    evaluate_ensemble_parallel,
     paired_score_metrics,
     play_deals_parallel,
     run_forensics,
@@ -49,6 +51,7 @@ from jace.forks.audit import BatchedForkSpec, add_fork_cli_args, open_batched_fo
 from jace.modules import default_device_name
 from jace.rl import (
     EmaWeights,
+    PrecisionKind,
     SnapshotPool,
     StepRecord,
     TrainConfig,
@@ -73,9 +76,22 @@ if TYPE_CHECKING:
     from manabot.backends.torch.policy import ActorCritic
     from manabot.env.observation import ObservationSpace
 
-__all__ = ("FullDataConfig", "main", "run_full_data_training")
+__all__ = ("FullDataConfig", "main", "resolve_live_tokens", "resolve_precision", "run_full_data_training")
 
 _RESUME_FILENAME = "resume-state.pt"
+type PrecisionChoice = Literal["auto", "float32", "tf32", "bf16"]
+
+
+def resolve_precision(precision: PrecisionChoice, *, device: str) -> PrecisionKind:
+    if precision == "auto":
+        return "bf16" if device.startswith("cuda") else "float32"
+    return precision
+
+
+def resolve_live_tokens(*, live_tokens: bool | None, device: str) -> bool:
+    if live_tokens is None:
+        return device.startswith("cuda")
+    return live_tokens
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +110,10 @@ class FullDataConfig:
     hidden_dim: int = 160
     attention_layers: int = 2
     decision_memory: DecisionMemoryKind = "none"
+    stream_norm: bool = False
+    focus_film: bool = False
+    live_tokens: bool | None = None
+    precision: PrecisionChoice = "auto"
     lam_policy: float = 0.5
     lam_value: float = 0.8
     select_kind: str = "top50"
@@ -123,6 +143,7 @@ class FullDataConfig:
     collect_device: str = "cpu"
     learn_device: str = field(default_factory=default_device_name)
     eval_every: int = 40
+    resume_save_every: int = 25
     eval_deals: int = 100
     forensics_deals: int = 20
     probe_count: int = 64
@@ -197,12 +218,22 @@ def _evaluate_full_data(
         "academy": academy_commands(layout, iteration=iteration),
     }
     live_metrics: dict[str, object] = {}
+    ensemble_metrics: dict[str, object] = {}
     if ema_weights is not None:
         live_det = evaluate_agent_parallel(
             agent, obs_space=obs_space, deals=held_out_deals, num_workers=cfg.eval_workers, seed=eval_seed
         )
+        ensemble_det = evaluate_ensemble_parallel(
+            (agent, eval_agent),
+            obs_space=obs_space,
+            deals=held_out_deals,
+            num_workers=cfg.eval_workers,
+            seed=eval_seed,
+        )
         payload["live_held_out_det"] = asdict(live_det)
+        payload["ensemble_held_out_det"] = asdict(ensemble_det)
         live_metrics = paired_score_metrics(live_det, prefix="live_held_out_det")
+        ensemble_metrics = paired_score_metrics(ensemble_det, prefix="ensemble_held_out_det")
     save_forensics(layout, iteration=iteration, report=payload)
     append_metric(
         layout,
@@ -211,6 +242,7 @@ def _evaluate_full_data(
             "update": iteration,
             **paired_score_metrics(paired_det, prefix="held_out_det"),
             **live_metrics,
+            **ensemble_metrics,
             "win_rate_vs_heuristic": round(report.win_rate, 4),
             "attack_rate": round(report.attack_rate, 4),
             "heuristic_attack_rate": round(report.heuristic_attack_rate, 4),
@@ -240,6 +272,9 @@ def _open_or_create_layout(cfg: FullDataConfig, *, catalog: HumanDeckCatalog, pa
         "unique_cards": len(catalog.card_names),
         "decklists": "closed",
         "policy_input_version": 11,
+        "resolved_precision": resolve_precision(cfg.precision, device=cfg.learn_device),
+        "resolved_collect_precision": resolve_precision(cfg.precision, device=cfg.collect_device),
+        "resolved_live_tokens": resolve_live_tokens(live_tokens=cfg.live_tokens, device=cfg.learn_device),
         "params": params,
     }
     return create_run(runs_dir=cfg.runs_dir, experiment=cfg.experiment, run_id=cfg.run_id, config=run_config)
@@ -290,12 +325,17 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
     reference_source = build_human_deck_source(
         catalog, count=min(cfg.shard_size, 64), seed=cfg.seed, allowed_cards=allowed_cards
     )
+    learn_precision = resolve_precision(cfg.precision, device=cfg.learn_device)
+    collect_precision = resolve_precision(cfg.precision, device=cfg.collect_device)
+    use_live_tokens = resolve_live_tokens(live_tokens=cfg.live_tokens, device=cfg.learn_device)
     agent, obs_space = build_agent(
         hidden_dim=cfg.hidden_dim,
         attention_layers=cfg.attention_layers,
         decision_memory=cfg.decision_memory,
+        stream_norm=cfg.stream_norm,
+        focus_film=cfg.focus_film,
         bucketed_shapes=True,
-        live_tokens=False,
+        live_tokens=use_live_tokens,
     )
     layout = _open_or_create_layout(cfg, catalog=catalog, params=sum(p.numel() for p in agent.parameters()))
     optimizer = torch.optim.Adam(agent.parameters(), lr=cfg.learning_rate)
@@ -348,6 +388,15 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
         append_train_metric(layout, record)
         if record.update % cfg.eval_every == 0 or record.update == cfg.updates:
             run_eval(iteration=record.update, record_games=True)
+        elif cfg.resume_save_every > 0 and record.update % cfg.resume_save_every == 0:
+            save_resume_state(
+                layout,
+                iteration=record.update,
+                optimizer=optimizer,
+                snapshot_pool=pool,
+                agent=agent,
+                ema=ema_weights,
+            )
 
     train_cfg = TrainConfig(
         updates=cfg.updates,
@@ -355,6 +404,7 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
         steps_per_env=cfg.steps_per_env,
         seed=cfg.seed,
         collect_device=cfg.collect_device,
+        precision=collect_precision,
         native_workers=cfg.native_workers,
         async_collect=cfg.async_collect,
         update=UpdateConfig(
@@ -364,6 +414,7 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
             normalize_advantages=False,
             filter_scope=cfg.filter_scope,
             device=cfg.learn_device,
+            precision=learn_precision,
         ),
         games_path=layout.train_games_path(),
         record_fraction=cfg.record_train_fraction,
@@ -386,6 +437,8 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
                         hidden_dim=cfg.hidden_dim,
                         attention_layers=cfg.attention_layers,
                         decision_memory=cfg.decision_memory,
+                        stream_norm=cfg.stream_norm,
+                        focus_film=cfg.focus_film,
                         seed=cfg.seed,
                         games_path=layout.train_games_path(),
                         record_fraction=cfg.record_train_fraction,
@@ -407,6 +460,7 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
                         num_envs=cfg.num_envs,
                         steps_per_env=cfg.steps_per_env,
                         collect_device=cfg.collect_device,
+                        precision=collect_precision,
                         native_workers=cfg.native_workers,
                         seed=cfg.seed,
                         games_path=layout.train_games_path(),
@@ -431,6 +485,8 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
             hidden_dim=cfg.hidden_dim,
             attention_layers=cfg.attention_layers,
             decision_memory=cfg.decision_memory,
+            stream_norm=cfg.stream_norm,
+            focus_film=cfg.focus_film,
             decks_path=cfg.decks_path,
             learn_device=cfg.learn_device,
             seed=cfg.seed + 50_000,
@@ -472,6 +528,7 @@ def _parse_args(argv: Sequence[str] | None) -> FullDataConfig:
     parser.add_argument("--collect-device", default="cpu")
     parser.add_argument("--learn-device", default=default_device_name())
     parser.add_argument("--eval-every", type=int, default=40)
+    parser.add_argument("--resume-save-every", type=int, default=25)
     parser.add_argument("--eval-deals", type=int, default=100)
     parser.add_argument("--forensics-deals", type=int, default=20)
     parser.add_argument("--probe-count", type=int, default=64)

@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, Self
 
 import managym
-import numpy as np
 import torch
 from manabot.backends.torch.bot import evaluate_observation
 from managym.enums import ActionSpaceEnum
@@ -24,13 +23,14 @@ from managym.enums import ActionSpaceEnum
 from jace.collect.agent import DecisionMemoryKind, build_agent
 from jace.collect.decks import elemental_decks, load_human_deck_catalog
 from jace.eval.deals import Deal, build_deals, build_human_deals
-from jace.forks.collect import ForkExample
+from jace.forks.collect import ForkExample, concat_observation_batches
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from multiprocessing.pool import Pool as ProcessPool
     from pathlib import Path
 
+    import numpy as np
     from manabot.backends.torch.policy import ActorCritic, PolicyInference
     from manabot.env.observation import ObservationSpace
 
@@ -75,7 +75,7 @@ class BatchedForkConfig:
 
 @dataclass(frozen=True, slots=True)
 class ContinuationValueSample:
-    encoded_obs: dict[str, np.ndarray]
+    encoded_obs: managym.ObservationBatch
     outcome_class: int
 
 
@@ -88,7 +88,7 @@ class BatchedForkResult:
 @dataclass(slots=True)
 class _HarvestedRoot:
     env: managym.Env
-    encoded_obs: dict[str, np.ndarray]
+    encoded_obs: managym.ObservationBatch
     hero_idx: int
     action_pair: tuple[int, int]
     policy_pair_probs: tuple[float, float]
@@ -111,17 +111,19 @@ class _ActiveBranch:
     failed: bool = False
     steps: int = 0
     leaf_value: float | None = None
-    sampled_obs: list[tuple[dict[str, np.ndarray], int]] | None = None
+    sampled_obs: list[tuple[managym.ObservationBatch, int]] | None = None
 
 
-def _init_batch_worker(init_spec: tuple[int, int, DecisionMemoryKind, Path | None]) -> None:
-    hidden_dim, attention_layers, decision_memory, human_decks_path = init_spec
+def _init_batch_worker(init_spec: tuple[int, int, DecisionMemoryKind, Path | None, bool, bool]) -> None:
+    hidden_dim, attention_layers, decision_memory, human_decks_path, stream_norm, focus_film = init_spec
     logging.getLogger("manabot").setLevel(logging.WARNING)
     torch.set_num_threads(1)
     agent, obs_space = build_agent(
         hidden_dim=hidden_dim,
         attention_layers=attention_layers,
         decision_memory=decision_memory,
+        stream_norm=stream_norm,
+        focus_film=focus_film,
         bucketed_shapes=True,
         live_tokens=False,
     )
@@ -132,7 +134,7 @@ def _init_batch_worker(init_spec: tuple[int, int, DecisionMemoryKind, Path | Non
 
 def _engine_error_types() -> tuple[type[BaseException], ...]:
     panic_types = tuple(cls for cls in BaseException.__subclasses__() if cls.__name__ == "PanicException")
-    return (*panic_types, RuntimeError, ValueError, KeyError, IndexError)
+    return (*panic_types, managym.ObservationCapacity, RuntimeError, ValueError, KeyError, IndexError)
 
 
 class _ForkEnv(Protocol):
@@ -156,43 +158,60 @@ def _safe_clone(env: _ForkEnv) -> managym.Env | None:
         return None
 
 
+def _safe_encode_one(obs: managym.Observation, *, obs_space: ObservationSpace) -> managym.ObservationBatch | None:
+    try:
+        return managym.encode_observation_batch([obs], obs_space.layout, obs_space.config.action_overflow)
+    except _engine_error_types():
+        return None
+
+
+def _safe_eval_one(
+    scope: PolicyInference, obs: managym.Observation, *, obs_space: ObservationSpace
+) -> tuple[tuple[float, ...], float]:
+    try:
+        probs, val = evaluate_observation(scope, obs_space, obs)
+    except _engine_error_types():
+        return (), 0.0
+    return probs, float(val)
+
+
 def _batched_eval(
     scope: PolicyInference,
     *,
     obs_space: ObservationSpace,
     observations: Sequence[managym.Observation],
-) -> tuple[list[tuple[float, ...]], list[float], list[dict[str, np.ndarray] | None]]:
-    max_actions = obs_space.encoder.max_actions
+) -> tuple[list[tuple[float, ...]], list[float], list[managym.ObservationBatch | None]]:
+    max_actions = obs_space.config.max_actions
     batch_indices: list[int] = []
-    encoded_list: list[dict[str, np.ndarray]] = []
+    encoded_list: list[managym.ObservationBatch] = []
     counts: list[int] = []
-    probs_out: list[tuple[float, ...] | None] = [None] * len(observations)
+    probs_out: list[tuple[float, ...]] = [()] * len(observations)
     vals_out: list[float] = [0.0] * len(observations)
-    enc_out: list[dict[str, np.ndarray] | None] = [None] * len(observations)
+    enc_out: list[managym.ObservationBatch | None] = [None] * len(observations)
 
     for idx, obs in enumerate(observations):
         count = len(obs.action_space.actions)
         if count <= max_actions:
-            encoded = {key: np.asarray(val, dtype=np.float32) for key, val in obs_space.encode(obs).items()}
-            batch_indices.append(idx)
-            encoded_list.append(encoded)
-            enc_out[idx] = encoded
-            counts.append(count)
+            encoded = _safe_encode_one(obs, obs_space=obs_space)
+            if encoded is not None:
+                batch_indices.append(idx)
+                encoded_list.append(encoded)
+                enc_out[idx] = encoded
+                counts.append(count)
         else:
-            probs, val = evaluate_observation(scope, obs_space, obs)
-            probs_out[idx], vals_out[idx] = probs, float(val)
+            probs_out[idx], vals_out[idx] = _safe_eval_one(scope, obs, obs_space=obs_space)
 
     if encoded_list:
-        stacked = {key: np.stack([item[key] for item in encoded_list], axis=0) for key in encoded_list[0]}
+        batch_obs = concat_observation_batches(encoded_list)
         with torch.no_grad():
-            logits, raw_val = scope.agent(scope.prepare(stacked))
+            logits, raw_val = scope.agent(scope.prepare(batch_obs))
             probs_t = torch.softmax(logits, dim=-1).cpu()
             scalars = raw_val.float().reshape(-1).cpu().tolist()
         for row_idx, out_idx in enumerate(batch_indices):
             probs_out[out_idx] = tuple(probs_t[row_idx, : counts[row_idx]].tolist())
             vals_out[out_idx] = float(scalars[row_idx])
 
-    return [item for item in probs_out if item is not None], vals_out, enc_out
+    return probs_out, vals_out, enc_out
 
 
 def _hero_win_prob(env: managym.Env, *, hero_idx: int, active_value: float) -> float:
@@ -222,18 +241,18 @@ def _maybe_harvest_root(
     base_seed: int,
 ) -> _HarvestedRoot | None:
     kind = _ACTION_SPACE_NAMES.get(int(obs.action_space.action_space_type), "unknown")
-    eligible = _MIN_BRANCH_ACTIONS <= len(probs) <= obs_space.encoder.max_actions and (
+    eligible = _MIN_BRANCH_ACTIONS <= len(probs) <= obs_space.config.max_actions and (
         allowed is None or kind in allowed
     )
     if not eligible or rng.random() >= sample_prob:
         return None
     hero_idx = env.current_agent_index()
     cloned = _safe_clone(env) if hero_idx is not None else None
-    if hero_idx is None or cloned is None:
+    encoded = _safe_encode_one(obs, obs_space=obs_space) if cloned is not None else None
+    if hero_idx is None or cloned is None or encoded is None:
         return None
     ranked = sorted(range(len(probs)), key=probs.__getitem__, reverse=True)
     a0, a1 = ranked[0], ranked[1]
-    encoded = {key: np.asarray(val, dtype=np.float32) for key, val in obs_space.encode(obs).items()}
     return _HarvestedRoot(
         cloned,
         encoded,
@@ -247,6 +266,14 @@ def _maybe_harvest_root(
     )
 
 
+def _safe_reset(env: managym.Env, deal: Deal) -> managym.Observation | None:
+    try:
+        obs, _ = env.reset(deal.game_setup())
+    except _engine_error_types():
+        return None
+    return obs
+
+
 def _harvest_roots_from_deal(
     deal: Deal,
     *,
@@ -258,17 +285,16 @@ def _harvest_roots_from_deal(
     rng: random.Random,
     base_seed: int,
 ) -> list[_HarvestedRoot]:
-    use_memory = obs_space.encoder.config.max_decision_records > 0
+    use_memory = obs_space.config.max_decision_records > 0
     env = managym.Env(seed=deal.seed, skip_trivial=True, decision_memory=use_memory)
-    try:
-        obs, _ = env.reset(deal.game_setup())
-    except _engine_error_types():
-        return []
+    obs = _safe_reset(env, deal)
     roots: list[_HarvestedRoot] = []
     for step_idx in range(config.max_steps):
-        if env.is_game_over() or len(roots) >= remaining:
+        if obs is None or env.is_game_over() or len(roots) >= remaining:
             break
-        probs, _ = evaluate_observation(scope, obs_space, obs)
+        probs, _ = _safe_eval_one(scope, obs, obs_space=obs_space)
+        if not probs:
+            break
         root = _maybe_harvest_root(
             env,
             obs,
@@ -283,9 +309,7 @@ def _harvest_roots_from_deal(
             roots.append(root)
         action = rng.choices(range(len(probs)), weights=probs, k=1)[0]
         next_obs, is_done, is_failed = _safe_step(env, action)
-        if is_done or is_failed or next_obs is None:
-            break
-        obs = next_obs
+        obs = None if is_done or is_failed else next_obs
     return roots
 
 
@@ -320,7 +344,7 @@ def _spawn_all_branches(roots: Sequence[_HarvestedRoot], *, config: BatchedForkC
 
 
 def _maybe_record_value_sample(
-    branch: _ActiveBranch, *, encoded: dict[str, np.ndarray] | None, cap_per_branch: int
+    branch: _ActiveBranch, *, encoded: managym.ObservationBatch | None, cap_per_branch: int
 ) -> None:
     if branch.sampled_obs is None or encoded is None or cap_per_branch <= 0:
         return
@@ -351,6 +375,9 @@ def _step_all_branches(
             scope, obs_space=obs_space, observations=[b.obs for b in active if b.obs is not None]
         )
         for branch, probs, val, encoded in zip(active, probs_batch, vals_batch, enc_batch, strict=True):
+            if not probs:
+                branch.done, branch.failed = True, True
+                continue
             if horizon is not None and branch.steps >= horizon:
                 branch.leaf_value = _hero_win_prob(branch.env, hero_idx=branch.hero_idx, active_value=val)
                 branch.done = True
@@ -450,6 +477,8 @@ class BatchedForkCollectorPool:
     _hidden_dim: int
     _attention_layers: int
     _decision_memory: DecisionMemoryKind
+    _stream_norm: bool
+    _focus_film: bool
     _num_workers: int
     _human_decks_path: Path | None
     _pool: ProcessPool | None
@@ -460,15 +489,27 @@ class BatchedForkCollectorPool:
         hidden_dim: int,
         attention_layers: int,
         decision_memory: DecisionMemoryKind = "none",
+        stream_norm: bool = False,
+        focus_film: bool = False,
         num_workers: int = 8,
         human_decks_path: Path | None = None,
     ) -> None:
         self._hidden_dim, self._attention_layers = hidden_dim, attention_layers
         self._decision_memory, self._num_workers = decision_memory, max(1, num_workers)
+        self._stream_norm, self._focus_film = stream_norm, focus_film
         self._human_decks_path, self._pool = human_decks_path, None
 
     def __enter__(self) -> Self:
-        initargs = ((self._hidden_dim, self._attention_layers, self._decision_memory, self._human_decks_path),)
+        initargs = (
+            (
+                self._hidden_dim,
+                self._attention_layers,
+                self._decision_memory,
+                self._human_decks_path,
+                self._stream_norm,
+                self._focus_film,
+            ),
+        )
         self._pool = mp.get_context("spawn").Pool(self._num_workers, initializer=_init_batch_worker, initargs=initargs)
         return self
 

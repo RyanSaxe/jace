@@ -37,7 +37,6 @@ from manabot.training.state.game_errors import GameAttempt, GameErrorPolicy, Gam
 from jace.collect.agent import (
     DecisionMemoryKind,
     build_agent,
-    merge_rollout_batches,
     pack_batch_for_ipc,
     unpack_batch_from_ipc,
 )
@@ -65,7 +64,6 @@ if TYPE_CHECKING:
 __all__ = (
     "MultiProcessCollector",
     "WorkerPoolConfig",
-    "merge_rollout_batches",
 )
 
 _MIN_CROSS_BALANCED_ENVS = 4
@@ -101,6 +99,8 @@ class WorkerPoolConfig:
     hidden_dim: int
     attention_layers: int
     decision_memory: DecisionMemoryKind = "none"
+    stream_norm: bool = False
+    focus_film: bool = False
     seed: int = 1
     games_path: Path | None = None
     record_fraction: float = 0.0
@@ -136,6 +136,8 @@ def _build_worker_agent(cfg: WorkerPoolConfig) -> tuple[ActorCritic, Observation
         hidden_dim=cfg.hidden_dim,
         attention_layers=cfg.attention_layers,
         decision_memory=cfg.decision_memory,
+        stream_norm=cfg.stream_norm,
+        focus_film=cfg.focus_film,
         bucketed_shapes=True,
         live_tokens=False,
     )
@@ -425,7 +427,7 @@ class MultiProcessCollector:
             item = self._get_result()
             if isinstance(item[0], int):
                 ordered[item[0]] = unpack_batch_from_ipc(item[1], item[2])
-        return merge_rollout_batches([ordered[rank] for rank in sorted(ordered)])
+        return RolloutBatch.concatenate([ordered[rank] for rank in sorted(ordered)])
 
     def close(self) -> None:
         if self._closed:

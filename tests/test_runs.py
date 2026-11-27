@@ -87,7 +87,7 @@ def test_saved_policy_checkpoint_reloads_and_registers_in_academy(tmp_path: Path
 
     reloaded, reloaded_space = load_checkpoint(str(checkpoint_path))
     assert reloaded.config.value_kind == "categorical_wdl"
-    assert reloaded_space.encoder.config.policy_input_version == 11
+    assert reloaded_space.config.policy_input_version == 11
 
     spec = PolicySpec.read(spec_path)
     registry = PolicyRegistry()
