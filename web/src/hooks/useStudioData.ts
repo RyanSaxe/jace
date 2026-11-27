@@ -1,8 +1,9 @@
-/** Custom React hooks owning all external-system synchronization (API fetches, theme DOM, keyboard). */
+/** Custom React hooks owning external-system synchronization (API fetches, URL hash, theme, abort cleanup, keyboard). */
 
-import { useEffect, useState } from "react";
+import { type RefObject, useEffect, useRef, useState } from "react";
 import {
   type GamesSearchArgs,
+  fetchAllCheckpoints,
   fetchCardCatalog,
   fetchCardMetadata,
   fetchGameFacets,
@@ -10,7 +11,7 @@ import {
   fetchGameStep,
   fetchGames,
   fetchRunDetail,
-  fetchRuns,
+  fetchRunsCatalog,
   fetchWatchlist,
   postFork,
 } from "@/lib/api";
@@ -22,6 +23,7 @@ import type {
   GameOverview,
   GameStepResponse,
   GameSummary,
+  GlobalCheckpointOption,
   PovMode,
   RunDetail,
   RunSummary,
@@ -60,6 +62,44 @@ export function useThemeSync(theme: ThemeMode): void {
   }, [theme]);
 }
 
+export function useAbortOnUnmount(abortRef: RefObject<AbortController | null>): void {
+  useEffect(
+    () => (): void => {
+      abortRef.current?.abort();
+      abortRef.current = null;
+    },
+    [abortRef],
+  );
+}
+
+export function useResetOnKey(key: string, onReset: () => void): void {
+  const prevKeyRef = useRef(key);
+  const onResetRef = useRef(onReset);
+  useEffect(() => {
+    onResetRef.current = onReset;
+  });
+  useEffect(() => {
+    if (prevKeyRef.current !== key) {
+      prevKeyRef.current = key;
+      onResetRef.current();
+    }
+  }, [key]);
+}
+
+export function useUrlHashSync(nextHash: string, onHashChange?: () => void): void {
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.location.hash !== nextHash) {
+      window.history.replaceState(null, "", nextHash);
+    }
+  }, [nextHash]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !onHashChange) return undefined;
+    window.addEventListener("hashchange", onHashChange);
+    return (): void => window.removeEventListener("hashchange", onHashChange);
+  }, [onHashChange]);
+}
+
 async function fetchRunDetailBatch(runIds: string[]): Promise<Record<string, RunDetail>> {
   const pairs = await Promise.all(
     runIds.map(async (id) => {
@@ -80,6 +120,10 @@ async function fetchRunDetailBatch(runIds: string[]): Promise<Record<string, Run
 
 export function useRunsData(): {
   runs: RunSummary[];
+  experiments: string[];
+  evalMetricKeys: string[];
+  trainMetricKeys: string[];
+  checkpoints: GlobalCheckpointOption[];
   details: Record<string, RunDetail>;
   loading: boolean;
   error: string | null;
@@ -89,22 +133,42 @@ export function useRunsData(): {
   const [state, setState] = useState<{
     loadedTick: number;
     runs: RunSummary[];
+    experiments: string[];
+    evalMetricKeys: string[];
+    trainMetricKeys: string[];
+    checkpoints: GlobalCheckpointOption[];
     details: Record<string, RunDetail>;
     error: string | null;
-  }>({ loadedTick: -1, runs: [], details: {}, error: null });
+  }>({
+    loadedTick: -1,
+    runs: [],
+    experiments: [],
+    evalMetricKeys: [],
+    trainMetricKeys: [],
+    checkpoints: [],
+    details: {},
+    error: null,
+  });
 
   useEffect(() => {
     let active = true;
     const currentTick = tick;
-    void fetchRuns()
-      .then(async (list) => {
-        const preferred = list
-          .filter((r) => r.latest_live_win !== null || r.latest_ema_win !== null)
-          .slice(0, 8)
-          .map((r) => r.run_id);
+    void Promise.all([fetchRunsCatalog(), fetchAllCheckpoints().catch(() => [])])
+      .then(async ([catalog, ckpts]) => {
+        const list = catalog.runs;
+        const preferred = list.slice(0, 8).map((r) => r.run_id);
         const map = await fetchRunDetailBatch(preferred);
         if (!active) return;
-        setState({ loadedTick: currentTick, runs: list, details: map, error: null });
+        setState({
+          loadedTick: currentTick,
+          runs: list,
+          experiments: catalog.experiments,
+          evalMetricKeys: catalog.eval_metric_keys,
+          trainMetricKeys: catalog.train_metric_keys,
+          checkpoints: ckpts,
+          details: map,
+          error: null,
+        });
       })
       .catch((err: unknown) => {
         if (!active) return;
@@ -118,6 +182,10 @@ export function useRunsData(): {
 
   return {
     runs: state.runs,
+    experiments: state.experiments,
+    evalMetricKeys: state.evalMetricKeys,
+    trainMetricKeys: state.trainMetricKeys,
+    checkpoints: state.checkpoints,
     details: state.details,
     loading: state.loadedTick !== tick,
     error: state.error,

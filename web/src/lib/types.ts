@@ -1,13 +1,23 @@
-/** Domain TypeScript interfaces mirroring the Jace Studio FastAPI JSON contracts. */
+/** Domain TypeScript interfaces mirroring the generalized Jace Studio FastAPI JSON contracts. */
 
 export type ThemeMode = "light" | "dark";
-export type NavTab = "runs" | "games" | "tabletop" | "watchlist";
+export type NavTab = "runs" | "games" | "compare" | "tabletop" | "watchlist";
 export type PovMode = "hero" | "omniscient";
 
 export interface CheckpointInfo {
   iteration: number;
   name: string;
   path: string;
+  size_bytes: number;
+}
+
+export interface GlobalCheckpointOption {
+  ref: string;
+  run_id: string;
+  run_name: string;
+  experiment: string;
+  checkpoint: string;
+  iteration: number;
   size_bytes: number;
 }
 
@@ -24,11 +34,26 @@ export interface RunSummary {
   latest_ensemble_win: number | null;
   peak_live_win: number | null;
   peak_ema_win: number | null;
+  peak_ensemble_win?: number | null;
   hidden_dim: number | null;
   attention_layers: number | null;
   eval_files: number;
   checkpoints: number[];
   updated_at: number;
+  playable_games?: number;
+  legacy_games?: number;
+  latest_metrics?: Record<string, number>;
+  best_metrics?: Record<string, number>;
+  eval_metric_keys?: string[];
+  train_metric_keys?: string[];
+  config_tags?: Record<string, unknown>;
+}
+
+export interface RunsCatalogResponse {
+  runs: RunSummary[];
+  experiments: string[];
+  eval_metric_keys: string[];
+  train_metric_keys: string[];
 }
 
 export interface MetricPoint {
@@ -43,6 +68,8 @@ export interface RunDetail {
   train_points: MetricPoint[];
   checkpoints: CheckpointInfo[];
   eval_iterations: number[];
+  eval_metric_keys?: string[];
+  train_metric_keys?: string[];
 }
 
 export interface GameSummary {
@@ -119,6 +146,7 @@ export interface LandPile {
 export interface PermanentState {
   id: number;
   name: string;
+  copy_index?: number | null;
   is_land: boolean;
   is_creature: boolean;
   is_artifact: boolean;
@@ -244,11 +272,20 @@ export interface GameStepResponse {
   nearest_priority_step?: number | null;
 }
 
+export type ForkEditOp =
+  | "set_life"
+  | "clear_hand"
+  | "add_hand_card"
+  | "remove_hand_card"
+  | "swap_hand_card"
+  | "add_battlefield";
+
 export interface ForkEdit {
-  op: "set_life" | "clear_hand" | "add_hand_card" | "add_battlefield";
+  op: ForkEditOp;
   seat: 0 | 1;
   value?: number;
   card?: string;
+  replacement_card?: string;
   after_branch?: number;
 }
 
@@ -270,6 +307,91 @@ export interface ForkResponse {
   nearest_priority_step?: number | null;
 }
 
+export interface PolicyMatrixColumn {
+  ref: string;
+  label: string;
+  probs: number[];
+  wdl: WdlEstimate;
+  top_action_index: number | null;
+  warning?: string | null;
+}
+
+export interface PolicyMatrixResponse {
+  legal_actions: LegalAction[];
+  columns: PolicyMatrixColumn[];
+}
+
+export interface ActionPlayoutResult {
+  action_index: number;
+  label: string;
+  deals_done: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  win_rate: number;
+  ci_low: number;
+  ci_high: number;
+}
+
+export interface PlayoutBatchResponse {
+  model_ref: string;
+  device: string;
+  deals_done: number;
+  batch_offset: number;
+  elapsed_ms: number;
+  results: ActionPlayoutResult[];
+}
+
+export interface CompareDecisionKindStat {
+  kind: string;
+  count: number;
+  changed: number;
+  change_rate: number;
+  mean_tv: number;
+}
+
+export interface ComparePositionRow {
+  run_id: string;
+  iteration: number;
+  game_idx: number;
+  seed: number;
+  step: number;
+  turn: number;
+  decision_kind: string;
+  actor_side: "hero" | "opp";
+  move_changed: boolean;
+  tv: number;
+  kl: number;
+  top_action_a: string;
+  top_prob_a: number;
+  top_action_b: string;
+  top_prob_b: number;
+  win_a: number;
+  win_b: number;
+  win_delta: number;
+  hero_life: number;
+  opp_life: number;
+  key_cards: string[];
+  legal_actions: LegalAction[];
+  probs_a: number[];
+  probs_b: number[];
+}
+
+export interface CompareResponse {
+  ckpt_a: string;
+  ckpt_b: string;
+  sampled_positions: number;
+  moves_changed: number;
+  change_rate: number;
+  mean_tv: number;
+  mean_kl: number;
+  mean_win_delta: number;
+  device: string;
+  warnings: string[];
+  by_decision_kind: CompareDecisionKindStat[];
+  positions: ComparePositionRow[];
+}
+
 export interface WatchlistItem {
   id: string;
   run_id: string;
@@ -280,6 +402,9 @@ export interface WatchlistItem {
   seed: number;
   label: string;
   note: string;
+  tag?: string;
+  summary?: string;
+  key_cards?: string[];
 }
 
 export interface CardMetadata {
@@ -297,6 +422,14 @@ export interface GameTarget {
   game_idx: number;
   step: number;
   seed: number;
+  ckpt_a?: string;
+  ckpt_b?: string;
+}
+
+export interface CompareTarget {
+  ckptA: string;
+  ckptB: string;
+  runId?: string;
 }
 
 export interface GamesFilterState {

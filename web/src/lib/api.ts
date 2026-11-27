@@ -1,16 +1,21 @@
-/** Typed HTTP client for the Jace Studio FastAPI backend without type assertions. */
+/** Typed HTTP client for the generalized Jace Studio FastAPI backend without type assertions. */
 
 import type {
   CardMetadata,
+  CompareResponse,
   ForkEdit,
   ForkResponse,
   GameFacets,
   GameOverview,
   GameStepResponse,
   GameSummary,
+  GlobalCheckpointOption,
+  PlayoutBatchResponse,
+  PolicyMatrixResponse,
   PovMode,
   RunDetail,
   RunSummary,
+  RunsCatalogResponse,
   WatchlistItem,
 } from "@/lib/types";
 
@@ -34,8 +39,12 @@ async function fetchJson<T>(
   return data;
 }
 
-function isRunsEnvelope(data: unknown): data is { runs: RunSummary[] } {
+function isRunsEnvelope(data: unknown): data is RunsCatalogResponse {
   return isRecord(data) && Array.isArray(data.runs);
+}
+
+function isCheckpointsEnvelope(data: unknown): data is { checkpoints: GlobalCheckpointOption[] } {
+  return isRecord(data) && Array.isArray(data.checkpoints);
 }
 
 function isRunDetail(data: unknown): data is RunDetail {
@@ -62,6 +71,18 @@ function isForkResponse(data: unknown): data is ForkResponse {
   return isRecord(data) && isRecord(data.board) && isRecord(data.fork_evaluation);
 }
 
+function isPolicyMatrixResponse(data: unknown): data is PolicyMatrixResponse {
+  return isRecord(data) && Array.isArray(data.legal_actions) && Array.isArray(data.columns);
+}
+
+function isPlayoutBatchResponse(data: unknown): data is PlayoutBatchResponse {
+  return isRecord(data) && Array.isArray(data.results) && typeof data.deals_done === "number";
+}
+
+function isCompareResponse(data: unknown): data is CompareResponse {
+  return isRecord(data) && Array.isArray(data.positions) && Array.isArray(data.by_decision_kind);
+}
+
 function isWatchlistEnvelope(data: unknown): data is { items: WatchlistItem[] } {
   return isRecord(data) && Array.isArray(data.items);
 }
@@ -82,9 +103,24 @@ export function cardImageUrl(name: string): string {
   return `/api/cards/${encodeURIComponent(name)}/image`;
 }
 
-export async function fetchRuns(): Promise<RunSummary[]> {
+export async function fetchRunsCatalog(): Promise<RunsCatalogResponse> {
   const env = await fetchJson("/api/runs", isRunsEnvelope);
-  return env.runs;
+  return {
+    runs: env.runs,
+    experiments: Array.isArray(env.experiments) ? env.experiments : [],
+    eval_metric_keys: Array.isArray(env.eval_metric_keys) ? env.eval_metric_keys : [],
+    train_metric_keys: Array.isArray(env.train_metric_keys) ? env.train_metric_keys : [],
+  };
+}
+
+export async function fetchRuns(): Promise<RunSummary[]> {
+  const catalog = await fetchRunsCatalog();
+  return catalog.runs;
+}
+
+export async function fetchAllCheckpoints(): Promise<GlobalCheckpointOption[]> {
+  const env = await fetchJson("/api/checkpoints", isCheckpointsEnvelope);
+  return env.checkpoints;
 }
 
 export async function fetchRunDetail(runId: string): Promise<RunDetail> {
@@ -206,6 +242,96 @@ export async function postFork(args: {
   });
 }
 
+export async function postPolicyMatrix(args: {
+  runId: string;
+  iteration: number;
+  gameIdx: number;
+  step: number;
+  pov: PovMode;
+  edits?: ForkEdit[];
+  branchActions?: number[];
+  models: string[];
+}): Promise<PolicyMatrixResponse> {
+  return fetchJson("/api/matrix", isPolicyMatrixResponse, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      run_id: args.runId,
+      iteration: args.iteration,
+      game_idx: args.gameIdx,
+      step: args.step,
+      pov: args.pov,
+      edits: args.edits ?? [],
+      branch_actions: args.branchActions ?? [],
+      models: args.models,
+    }),
+  });
+}
+
+export async function postPlayoutBatch(
+  args: {
+    runId: string;
+    iteration: number;
+    gameIdx: number;
+    step: number;
+    pov: PovMode;
+    edits?: ForkEdit[];
+    branchActions?: number[];
+    modelRef: string;
+    deals: number;
+    batchOffset?: number;
+    actionIndices?: number[];
+    seed?: number;
+  },
+  signal?: AbortSignal,
+): Promise<PlayoutBatchResponse> {
+  return fetchJson("/api/playout", isPlayoutBatchResponse, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal,
+    body: JSON.stringify({
+      run_id: args.runId,
+      iteration: args.iteration,
+      game_idx: args.gameIdx,
+      step: args.step,
+      pov: args.pov,
+      edits: args.edits ?? [],
+      branch_actions: args.branchActions ?? [],
+      model_ref: args.modelRef,
+      deals: args.deals,
+      batch_offset: args.batchOffset ?? 0,
+      action_indices: args.actionIndices ?? null,
+      seed: args.seed ?? 42,
+    }),
+  });
+}
+
+export async function postCompareModels(
+  args: {
+    ckptA: string;
+    ckptB: string;
+    sampleCount: number;
+    runId?: string;
+    decisionKind?: string;
+    seed?: number;
+  },
+  signal?: AbortSignal,
+): Promise<CompareResponse> {
+  return fetchJson("/api/compare", isCompareResponse, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal,
+    body: JSON.stringify({
+      ckpt_a: args.ckptA,
+      ckpt_b: args.ckptB,
+      sample_count: args.sampleCount,
+      run_id: args.runId || null,
+      decision_kind: args.decisionKind || null,
+      seed: args.seed ?? 42,
+    }),
+  });
+}
+
 export async function fetchWatchlist(): Promise<WatchlistItem[]> {
   const env = await fetchJson("/api/watchlist", isWatchlistEnvelope);
   return env.items;
@@ -217,6 +343,22 @@ export async function addWatchlistItem(payload: Omit<WatchlistItem, "id">): Prom
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+  return env.item;
+}
+
+export async function updateWatchlistItem(
+  itemId: string,
+  patch: { label?: string; note?: string; tag?: string },
+): Promise<WatchlistItem> {
+  const env = await fetchJson(
+    `/api/watchlist/${encodeURIComponent(itemId)}`,
+    isWatchlistItemEnvelope,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
   return env.item;
 }
 

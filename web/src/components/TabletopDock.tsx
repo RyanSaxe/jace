@@ -1,493 +1,645 @@
-/** Right inspector dock for Tabletop: live checkpoint diff, any-step Fork/Branch lab, legal actions & Watchlist. */
+/** Right 340px single-purpose Decision Analysis pane (zero tabs): cross-run model diff, win bars, ranked moves & Move Log. */
 
 import {
-  Bookmark,
+  ChevronDown,
+  ChevronUp,
   EyeOff,
   FastForward,
   GitBranch,
+  LayoutGrid,
   RotateCcw,
-  Search,
   Undo2,
   X,
 } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { Button } from "@/components/ui/Primitives";
-import { cardImageUrl } from "@/lib/api";
-import type { BoardState, BranchStepEvent, EvaluationPair, ForkEdit } from "@/lib/types";
+import type {
+  BoardState,
+  BranchStepEvent,
+  EvaluationPair,
+  ForkEdit,
+  ForkResponse,
+  GameOverview,
+  GlobalCheckpointOption,
+  LegalAction,
+  RecentEvent,
+  RunDetail,
+  TimelinePoint,
+} from "@/lib/types";
 
-const BASIC_LANDS = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"]);
-
-function deckCardPoolForFork(args: {
-  board: BoardState;
-  seatSide: "hero" | "opp";
-  zone: "add_battlefield" | "add_hand_card";
-  filterText: string;
-}): string[] {
-  const { board, seatSide, zone, filterText } = args;
-  const player = seatSide === "hero" ? board.hero : board.opp;
-  const nonPerms = new Set(board.non_permanent_names ?? []);
-  const needle = filterText.trim().toLowerCase();
-  const deckRaw = [...player.library_summary.map((row) => row.name), ...player.graveyard];
-  return [...new Set(deckRaw)]
-    .filter((name) => {
-      if (BASIC_LANDS.has(name) || name === "Unknown") return false;
-      if (zone === "add_battlefield" && nonPerms.has(name)) return false;
-      return needle === "" || name.toLowerCase().includes(needle);
-    })
-    .slice(0, 12);
+export interface CheckpointGroup {
+  runId: string;
+  label: string;
+  options: GlobalCheckpointOption[];
 }
 
-function describeForkEdit(edit: ForkEdit, heroSeat: number): string {
+export function groupCheckpointsByRun(
+  checkpoints: GlobalCheckpointOption[],
+  currentRunId: string,
+): CheckpointGroup[] {
+  const byRun = new Map<string, CheckpointGroup>();
+  for (const opt of checkpoints) {
+    const existing = byRun.get(opt.run_id);
+    if (existing) {
+      existing.options.push(opt);
+    } else {
+      const tag = opt.run_id === currentRunId ? `${opt.run_name} (this game)` : opt.run_name;
+      byRun.set(opt.run_id, { runId: opt.run_id, label: tag, options: [opt] });
+    }
+  }
+  const groups = [...byRun.values()];
+  for (const group of groups) {
+    group.options.sort((a, b) => b.iteration - a.iteration);
+  }
+  return groups.toSorted((a, b) => {
+    if (a.runId === currentRunId) return -1;
+    if (b.runId === currentRunId) return 1;
+    return a.label.localeCompare(b.label);
+  });
+}
+
+export function formatCheckpointShort(
+  ref: string,
+  checkpoints: GlobalCheckpointOption[],
+  currentRunId: string,
+): string {
+  if (ref === "heuristic") return "Heuristic";
+  if (ref === "none" || ref === "same" || ref === "") return "None";
+  const match = checkpoints.find((c) => c.ref === ref || c.checkpoint === ref);
+  if (match) {
+    const iterLabel = match.iteration >= 0 ? `u${match.iteration}` : match.checkpoint;
+    return match.run_id === currentRunId ? iterLabel : `${match.run_name} · ${iterLabel}`;
+  }
+  const parts = ref.split("::");
+  return parts[parts.length - 1] ?? ref;
+}
+
+function pickPrimaryDefault(
+  sameRun: GlobalCheckpointOption[],
+  all: GlobalCheckpointOption[],
+  gameIteration: number,
+): string {
+  const exact = sameRun.find((c) => c.iteration === gameIteration);
+  if (exact) return exact.ref;
+  const latestRun = sameRun[sameRun.length - 1];
+  if (latestRun) return latestRun.ref;
+  return all[0]?.ref ?? "heuristic";
+}
+
+function pickSecondaryDefault(sameRun: GlobalCheckpointOption[], primaryRef: string): string {
+  const idx = sameRun.findIndex((c) => c.ref === primaryRef);
+  if (idx > 0) return sameRun[idx - 1]?.ref ?? "none";
+  if (sameRun.length > 1) return sameRun[0]?.ref ?? "none";
+  return "none";
+}
+
+export function resolveDefaultCheckpoints(args: {
+  checkpoints: GlobalCheckpointOption[];
+  runId: string;
+  gameIteration: number;
+  initialA?: string;
+  initialB?: string;
+  ckptA: string | null;
+  ckptB: string | null;
+}): { effectiveA: string; effectiveB: string } {
+  const sameRun = args.checkpoints
+    .filter((c) => c.run_id === args.runId)
+    .toSorted((a, b) => a.iteration - b.iteration);
+  const defaultA =
+    args.initialA ?? pickPrimaryDefault(sameRun, args.checkpoints, args.gameIteration);
+  const defaultB = args.initialB ?? pickSecondaryDefault(sameRun, defaultA);
+  return { effectiveA: args.ckptA ?? defaultA, effectiveB: args.ckptB ?? defaultB };
+}
+
+export function buildInitialMatrixModels(args: {
+  effectiveA: string;
+  effectiveB: string;
+  checkpoints: GlobalCheckpointOption[];
+  runId: string;
+}): string[] {
+  const picked: string[] = [];
+  const candidates = [
+    args.effectiveA,
+    args.effectiveB,
+    ...args.checkpoints
+      .filter((c) => c.run_id === args.runId)
+      .toSorted((a, b) => b.iteration - a.iteration)
+      .map((c) => c.ref),
+  ];
+  for (const ref of candidates) {
+    if (picked.length >= 4) break;
+    if (ref && ref !== "none" && ref !== "same" && !picked.includes(ref)) picked.push(ref);
+  }
+  return picked.length > 0 ? picked : ["heuristic"];
+}
+
+export function topLegalActionIndex(board: BoardState, evaluation: EvaluationPair): number | null {
+  const probs = evaluation.primary.probs;
+  const actions = board.legal_actions;
+  if (actions.length === 0 || probs.length === 0) return null;
+  let bestIdx = 0;
+  let bestProb = probs[0] ?? -1;
+  for (let i = 1; i < actions.length; i += 1) {
+    const p = probs[i] ?? -1;
+    if (p > bestProb) {
+      bestProb = p;
+      bestIdx = i;
+    }
+  }
+  return actions[bestIdx]?.index ?? null;
+}
+
+export function describeForkEdit(edit: ForkEdit, heroSeat: number): string {
   const who = edit.seat === heroSeat ? "Hero" : "Opp";
+  const card = edit.card ?? "";
   if (edit.op === "set_life") return `${who} life = ${edit.value ?? "?"}`;
-  if (edit.op === "add_battlefield") return `${who} +Board: ${edit.card ?? ""}`;
-  if (edit.op === "add_hand_card") return `${who} +Hand: ${edit.card ?? ""}`;
+  if (edit.op === "remove_hand_card") return `${who} −Hand: ${card}`;
+  if (edit.op === "swap_hand_card") return `${who} Swap: ${card} → ${edit.replacement_card ?? ""}`;
+  if (edit.op === "add_battlefield") return `${who} +Board: ${card}`;
+  if (edit.op === "add_hand_card") return `${who} +Hand: ${card}`;
   return `${who} clear hand`;
 }
 
-function resolveTargetSeat(targetSide: "hero" | "opp", heroSeat: number): 0 | 1 {
-  const heroNum: 0 | 1 = heroSeat === 1 ? 1 : 0;
-  const oppNum: 0 | 1 = heroNum === 1 ? 0 : 1;
-  return targetSide === "hero" ? heroNum : oppNum;
+export function extractBoardKeyCards(board: BoardState): string[] {
+  const names = [
+    ...board.stack.map((item) => item.card_name),
+    ...board.hero.creatures.map((p) => p.name),
+    ...board.opp.creatures.map((p) => p.name),
+    ...board.hero.other_permanents.map((p) => p.name),
+    ...board.hero.hand,
+  ];
+  return [...new Set(names.filter((name) => name.length > 0))].slice(0, 4);
 }
 
-const SIDE_OPTIONS: ReadonlyArray<{ value: "hero" | "opp"; label: string }> = [
-  { value: "hero", label: "Hero" },
-  { value: "opp", label: "Opp" },
-];
+export function defaultPinLabel(board: BoardState): string {
+  const stepText = (board.step_name || board.action_space_kind).replace(/([a-z])([A-Z])/g, "$1 $2");
+  const topStack = board.stack[0]?.card_name;
+  return topStack
+    ? `T${board.turn} ${stepText} · ${topStack}`
+    : `T${board.turn} ${stepText} · ${board.hero.life} vs ${board.opp.life}`;
+}
 
-const ZONE_OPTIONS: ReadonlyArray<{ value: "add_battlefield" | "add_hand_card"; label: string }> = [
-  { value: "add_battlefield", label: "+ Board" },
-  { value: "add_hand_card", label: "+ Hand" },
-];
-
-function ForkBoardEditor(props: {
+export function updateLifeForkEdits(args: {
+  edits: ForkEdit[];
   board: BoardState;
-  heroSeat: number;
+  seat: 0 | 1;
+  delta: number;
+  afterBranch: number;
+}): ForkEdit[] {
+  const isSame = (e: ForkEdit): boolean =>
+    e.op === "set_life" && e.seat === args.seat && (e.after_branch ?? 0) === args.afterBranch;
+  const existing = args.edits.find(isSame);
+  const visible =
+    args.seat === (args.board.hero_seat === 1 ? 1 : 0) ? args.board.hero.life : args.board.opp.life;
+  const baseLife = typeof existing?.value === "number" ? existing.value : visible;
+  const nextLife = Math.max(1, Math.min(99, baseLife + args.delta));
+  if (nextLife === baseLife) return args.edits;
+  return [
+    ...args.edits.filter((e) => !isSame(e)),
+    { op: "set_life", seat: args.seat, value: nextLife, after_branch: args.afterBranch },
+  ];
+}
+
+export interface ReadyPayload {
+  board: BoardState;
+  evaluation: EvaluationPair;
+  base: EvaluationPair;
+  branchEvents: BranchStepEvent[];
+  branchDone: boolean;
   nearestPriorityStep: number | null;
-  onJumpToStep: (step: number) => void;
-  onAddEdit: (edit: ForkEdit) => void;
-}): ReactNode {
-  const [targetZone, setTargetZone] = useState<"add_battlefield" | "add_hand_card">(
-    "add_battlefield",
-  );
-  const [targetSide, setTargetSide] = useState<"hero" | "opp">("hero");
-  const [cardFilter, setCardFilter] = useState("");
-  const isPriority = props.board.action_space_kind === "PRIORITY";
+}
 
-  if (!isPriority) {
-    return (
-      <div className="rounded-md border border-[var(--border)] bg-[var(--bg)] p-2 flex flex-col gap-1.5 text-[10.5px] text-[var(--text-2)]">
-        <span>
-          Life &amp; card injections apply on <strong>Priority</strong> steps (current:{" "}
-          <span className="tabular">{props.board.action_space_kind}</span>). Action branching works
-          right here—click any legal action below.
-        </span>
-        {props.nearestPriorityStep === null ? null : (
-          <Button
-            size="sm"
-            onClick={(): void => props.onJumpToStep(props.nearestPriorityStep ?? 0)}
-          >
-            Jump to Priority step #{props.nearestPriorityStep}
-          </Button>
-        )}
-      </div>
-    );
+export function resolveActivePayload(
+  hasMutations: boolean,
+  data: {
+    board: BoardState;
+    evaluation: EvaluationPair;
+    nearest_priority_step?: number | null;
+  } | null,
+  forkResult: ForkResponse | null,
+): ReadyPayload | null {
+  if (hasMutations && forkResult !== null) {
+    return {
+      board: forkResult.board,
+      evaluation: forkResult.fork_evaluation,
+      base: forkResult.base_evaluation,
+      branchEvents: forkResult.branch_events ?? [],
+      branchDone: Boolean(forkResult.branch_done),
+      nearestPriorityStep: forkResult.nearest_priority_step ?? data?.nearest_priority_step ?? null,
+    };
   }
+  if (data === null) return null;
+  return {
+    board: data.board,
+    evaluation: data.evaluation,
+    base: data.evaluation,
+    branchEvents: [],
+    branchDone: false,
+    nearestPriorityStep: data.nearest_priority_step ?? null,
+  };
+}
 
-  const seatNum = resolveTargetSeat(targetSide, props.heroSeat);
-  const deckCards = deckCardPoolForFork({
-    board: props.board,
-    seatSide: targetSide,
-    zone: targetZone,
-    filterText: cardFilter,
-  });
-  const oppHidden = targetSide === "opp" && props.board.opp.library_hidden;
+export function resolveOverviewInfo(
+  overview: GameOverview | null,
+  stepWarn: string | null | undefined,
+): {
+  timeline: TimelinePoint[];
+  evalSource?: string;
+  maxPlayableStep: number;
+  turningPointStep?: number;
+  replayWarning: string | null;
+} {
+  if (!overview) {
+    return {
+      timeline: [],
+      evalSource: undefined,
+      maxPlayableStep: 0,
+      turningPointStep: undefined,
+      replayWarning: stepWarn ?? null,
+    };
+  }
+  return {
+    timeline: overview.timeline,
+    evalSource: overview.eval_source,
+    maxPlayableStep: overview.max_playable_step ?? Math.max(0, overview.total_steps - 1),
+    turningPointStep: overview.turning_point_step,
+    replayWarning: stepWarn ?? overview.replay_warning ?? null,
+  };
+}
 
+export function mergeCheckpoints(
+  globalList: GlobalCheckpointOption[],
+  runDetail: RunDetail | null,
+  runId: string,
+): GlobalCheckpointOption[] {
+  if (globalList.length > 0) return globalList;
+  const runName = runDetail?.summary.name ?? runId.split("/").pop() ?? runId;
+  const experiment = runDetail?.summary.experiment ?? runName;
+  return (runDetail?.checkpoints ?? []).map((c) => ({
+    ref: `${runId}::${c.name}`,
+    run_id: runId,
+    run_name: runName,
+    experiment,
+    checkpoint: c.name,
+    iteration: c.iteration,
+    size_bytes: c.size_bytes,
+  }));
+}
+
+export function CheckpointSelect(props: {
+  value: string;
+  onChange: (value: string) => void;
+  checkpoints: GlobalCheckpointOption[];
+  currentRunId: string;
+  ariaLabel: string;
+  includeNone?: boolean;
+  noneLabel?: string;
+  excludeRefs?: ReadonlySet<string>;
+  className?: string;
+}): ReactNode {
+  const groups = groupCheckpointsByRun(props.checkpoints, props.currentRunId);
+  const exclude = props.excludeRefs;
   return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex items-center justify-between gap-1">
-        <div className="inline-flex rounded border border-[var(--border)] bg-[var(--bg)] p-0.5 text-[9.5px] font-semibold">
-          {SIDE_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              type="button"
-              onClick={(): void => setTargetSide(opt.value)}
-              className={`px-1.5 py-0.5 rounded-sm cursor-pointer ${
-                targetSide === opt.value
-                  ? "bg-[var(--fork-soft)] text-[var(--fork)]"
-                  : "text-[var(--text-3)]"
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-        <div className="inline-flex rounded border border-[var(--border)] bg-[var(--bg)] p-0.5 text-[9.5px] font-semibold">
-          {ZONE_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              type="button"
-              onClick={(): void => setTargetZone(opt.value)}
-              className={`px-1.5 py-0.5 rounded-sm cursor-pointer ${
-                targetZone === opt.value
-                  ? "bg-[var(--fork-soft)] text-[var(--fork)]"
-                  : "text-[var(--text-3)]"
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-      </div>
+    <select
+      value={props.value}
+      onChange={(e): void => props.onChange(e.target.value)}
+      aria-label={props.ariaLabel}
+      className={
+        props.className ??
+        "h-7 rounded-md border border-[var(--border)] bg-[var(--surface-2)] px-1.5 text-[11px] font-semibold tabular min-w-0"
+      }
+    >
+      {props.includeNone ? (
+        <option value="none">{props.noneLabel ?? "None (single)"}</option>
+      ) : null}
+      {exclude?.has("heuristic") ? null : <option value="heuristic">Heuristic</option>}
+      {groups.map((group) => {
+        const visible = exclude
+          ? group.options.filter((opt) => !exclude.has(opt.ref))
+          : group.options;
+        if (visible.length === 0) return null;
+        return (
+          <optgroup key={group.runId} label={group.label}>
+            {visible.map((opt) => (
+              <option key={opt.ref} value={opt.ref}>
+                {opt.iteration >= 0 ? `u${opt.iteration} · ${opt.checkpoint}` : opt.checkpoint}
+              </option>
+            ))}
+          </optgroup>
+        );
+      })}
+    </select>
+  );
+}
 
-      <div className="relative">
-        <Search className="w-3 h-3 absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-3)]" />
-        <input
-          type="search"
-          value={cardFilter}
-          onChange={(e): void => setCardFilter(e.target.value)}
-          placeholder="Search player's deck cards…"
-          aria-label="Filter fork cards"
-          className="w-full h-6 rounded border border-[var(--border)] bg-[var(--bg)] pl-6 pr-2 text-[10.5px]"
+export interface TabletopDockProps {
+  runId: string;
+  board: BoardState;
+  evaluation: EvaluationPair;
+  baseEvaluation: EvaluationPair;
+  checkpoints: GlobalCheckpointOption[];
+  ckptA: string;
+  ckptB: string;
+  onChangeCkptA: (v: string) => void;
+  onChangeCkptB: (v: string) => void;
+  forkBusy: boolean;
+  forkEdits: ForkEdit[];
+  branchEvents: BranchStepEvent[];
+  branchDone: boolean;
+  forkWarnings: string[];
+  forkError: string | null;
+  onBranchAction: (actionIdx: number) => void;
+  onStepModelTopMove: () => void;
+  onPopBranchAction: () => void;
+  onResetFork: () => void;
+  onSelectStep: (step: number) => void;
+  onHoverActionFocus: (ids: number[]) => void;
+  onOpenPolicyMatrix: () => void;
+  className?: string;
+}
+
+function formatSignedPct(delta: number): string {
+  return delta > 0 ? `+${delta}%` : `${delta}%`;
+}
+
+function deltaToneClass(delta: number): string {
+  if (delta > 0) return "text-[var(--win)] font-semibold";
+  if (delta < 0) return "text-[var(--loss)] font-semibold";
+  return "text-[var(--text-3)]";
+}
+
+function WinEstimateBar(props: {
+  label: string;
+  winPct: number;
+  barColor: string;
+  delta?: number;
+}): ReactNode {
+  const showDelta = props.delta !== undefined && props.delta !== 0;
+  const barWidth = `${Math.max(2, props.winPct)}%`;
+  return (
+    <div className="flex flex-col gap-0.5">
+      <div className="flex items-center justify-between gap-2 text-[10.5px]">
+        <span className="font-semibold text-[var(--text-2)] truncate">{props.label}</span>
+        <span className="tabular flex items-center gap-1.5 shrink-0">
+          <strong className="text-[var(--text)]">{props.winPct}%</strong>
+          {showDelta ? (
+            <span className={deltaToneClass(props.delta ?? 0)}>
+              {formatSignedPct(props.delta ?? 0)}
+            </span>
+          ) : null}
+        </span>
+      </div>
+      <div className="h-[7px] rounded-full bg-[var(--surface-2)] overflow-hidden">
+        <div
+          className="h-full rounded-full transition-all duration-200"
+          style={{ width: barWidth, background: props.barColor }}
         />
       </div>
-
-      {deckCards.length === 0 ? (
-        <div className="text-[10px] text-[var(--text-3)] italic">
-          {oppHidden
-            ? "Switch to Omniscient to inspect and inject cards from Opponent's library."
-            : "No matching cards in this player's library or graveyard."}
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 gap-1">
-          {deckCards.map((cardName) => (
-            <button
-              key={cardName}
-              type="button"
-              onClick={(e): void => {
-                e.currentTarget.blur();
-                props.onAddEdit({ op: targetZone, seat: seatNum, card: cardName });
-              }}
-              className="flex items-center gap-1.5 rounded border border-[var(--border)] bg-[var(--bg)] p-1 text-left text-[10px] font-medium hover:border-[var(--fork)] hover:bg-[var(--fork-soft)] cursor-pointer min-w-0 overflow-hidden"
-            >
-              <img
-                src={cardImageUrl(cardName)}
-                alt={cardName}
-                className="w-[18px] h-[25px] rounded-[2px] object-cover shrink-0"
-              />
-              <span className="truncate">{cardName}</span>
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
 
-function formatForkSummary(editCount: number, branchCount: number): string {
-  const parts: string[] = [];
-  if (editCount > 0) parts.push(`${editCount} edit${editCount === 1 ? "" : "s"}`);
-  if (branchCount > 0) parts.push(`+${branchCount} branched`);
-  return parts.length > 0 ? parts.join(" · ") : "0 edits";
-}
-
-function ForkShiftSummary(props: {
-  editCount: number;
-  branchCount: number;
+function WinEstimateSection(props: {
+  labelA: string;
+  labelB: string;
+  showCompare: boolean;
+  showEditShift: boolean;
   evaluation: EvaluationPair;
   baseEvaluation: EvaluationPair;
-  showCompareDelta: boolean;
+  forkBusy: boolean;
 }): ReactNode {
-  const baseA = Math.round(props.baseEvaluation.primary.wdl.win * 100);
   const curA = Math.round(props.evaluation.primary.wdl.win * 100);
-  const deltaA = curA - baseA;
-  const baseB = Math.round(props.baseEvaluation.compare.wdl.win * 100);
   const curB = Math.round(props.evaluation.compare.wdl.win * 100);
-  const deltaB = curB - baseB;
+  const baseA = Math.round(props.baseEvaluation.primary.wdl.win * 100);
+  const drawPct = Math.round(props.evaluation.primary.wdl.draw * 100);
+
+  if (props.showEditShift) {
+    return (
+      <div className="px-3 py-2.5 border-b border-[var(--border)] bg-[var(--fork-soft)]/30 flex flex-col gap-1.5">
+        <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[var(--fork)]">
+          <span>Hero Win Estimate · Edit Shift</span>
+          {props.forkBusy ? <span className="tabular">Re-scoring…</span> : null}
+        </div>
+        <WinEstimateBar label={`Before edit (${props.labelA})`} winPct={baseA} barColor="#d97706" />
+        <WinEstimateBar
+          label={`After edit (${props.labelA})`}
+          winPct={curA}
+          barColor="var(--fork-fill)"
+          delta={curA - baseA}
+        />
+      </div>
+    );
+  }
+
   return (
-    <div className="rounded-md border border-[var(--fork)]/30 bg-[var(--surface)] px-2.5 py-1.5 flex flex-col gap-0.5">
-      <div className="flex items-center justify-between gap-2 text-[11px]">
-        <span className="text-[var(--text-2)] truncate">
-          {formatForkSummary(props.editCount, props.branchCount)}
-        </span>
-        <span className="tabular font-bold text-[var(--fork)] shrink-0">
-          A: {baseA}% → {curA}% ({deltaA >= 0 ? `+${deltaA}` : deltaA}%)
+    <div className="px-3 py-2.5 border-b border-[var(--border)] flex flex-col gap-1.5">
+      <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[var(--text-3)]">
+        <span>Hero Win Estimate</span>
+        <span className="tabular text-[var(--text-2)]">
+          {drawPct > 0 ? `${drawPct}% Draw` : `${Math.max(0, 100 - curA)}% Loss`}
         </span>
       </div>
-      {props.showCompareDelta ? (
-        <div className="flex items-center justify-end text-[10px] tabular text-[var(--text-2)]">
-          B: {baseB}% → {curB}% ({deltaB >= 0 ? `+${deltaB}` : deltaB}%)
-        </div>
+      <WinEstimateBar
+        label={props.labelA}
+        winPct={curA}
+        barColor="var(--accent)"
+        delta={props.showCompare ? curA - curB : undefined}
+      />
+      {props.showCompare ? (
+        <WinEstimateBar label={props.labelB} winPct={curB} barColor="#d97706" />
       ) : null}
     </div>
   );
 }
 
-function ForkChipsList(props: {
-  heroSeat: number;
-  edits: ForkEdit[];
+function BranchStrip(props: {
   branchEvents: BranchStepEvent[];
-  onRemoveEdit: (idx: number) => void;
+  editCount: number;
+  canStepTop: boolean;
+  forkBusy: boolean;
+  onStepModelTopMove: () => void;
+  onPopBranchAction: () => void;
+  onResetFork: () => void;
 }): ReactNode {
+  if (props.branchEvents.length === 0 && props.editCount === 0) return null;
+  const parts: string[] = [];
+  if (props.editCount > 0) parts.push(`${props.editCount} edit${props.editCount === 1 ? "" : "s"}`);
+  if (props.branchEvents.length > 0) parts.push(`+${props.branchEvents.length} branched`);
   return (
-    <>
+    <div className="px-3 py-2 border-b border-[var(--border)] bg-[var(--fork-soft)]/25 flex flex-col gap-1.5">
+      <div className="flex items-center justify-between gap-2 text-[10.5px]">
+        <span className="inline-flex items-center gap-1 font-semibold text-[var(--fork)] truncate">
+          <GitBranch className="w-3 h-3 shrink-0" />
+          {parts.join(" · ")}
+        </span>
+        <div className="flex items-center gap-1 shrink-0">
+          {props.canStepTop ? (
+            <Button
+              size="sm"
+              variant="fork"
+              disabled={props.forkBusy}
+              onClick={props.onStepModelTopMove}
+              title="Play model's top ranked move"
+              className="px-2 py-0.5 text-[10px]"
+            >
+              <FastForward className="w-2.5 h-2.5" />
+              Top
+            </Button>
+          ) : null}
+          {props.branchEvents.length > 0 ? (
+            <button
+              type="button"
+              onClick={props.onPopBranchAction}
+              title="Undo last branched action"
+              className="inline-flex items-center gap-0.5 rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.5 text-[10px] font-medium hover:border-[var(--border-strong)] cursor-pointer"
+            >
+              <Undo2 className="w-2.5 h-2.5" />
+              Undo
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={props.onResetFork}
+            title="Reset all edits and branches"
+            className="inline-flex items-center gap-0.5 rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--text-2)] hover:text-[var(--loss)] cursor-pointer"
+          >
+            <RotateCcw className="w-2.5 h-2.5" />
+            Reset
+          </button>
+        </div>
+      </div>
       {props.branchEvents.length > 0 ? (
         <div className="flex flex-wrap gap-1">
           {props.branchEvents.map((ev) => (
             <span
               key={ev.branch_index}
-              className="inline-flex items-center gap-1 rounded bg-[var(--surface)] border border-[var(--fork)]/35 px-1.5 py-0.5 text-[10px]"
+              className="inline-flex items-center gap-1 rounded bg-[var(--surface)] border border-[var(--fork)]/30 px-1.5 py-0.5 text-[9.5px]"
             >
-              <span className="tabular text-[var(--fork)] font-bold">+{ev.branch_index + 1}</span>
-              <span className="max-w-[150px] truncate">{ev.label}</span>
+              <span className="tabular font-bold text-[var(--fork)]">+{ev.branch_index + 1}</span>
+              <span className="max-w-[140px] truncate">{ev.label}</span>
             </span>
           ))}
         </div>
       ) : null}
-
-      {props.edits.length > 0 ? (
-        <div className="flex flex-wrap gap-1">
-          {props.edits.map((edit, idx) => {
-            const label = describeForkEdit(edit, props.heroSeat);
-            return (
-              <span
-                key={`${edit.op}-${edit.seat}-${edit.card ?? edit.value ?? "x"}-${String(idx)}`}
-                className="inline-flex items-center gap-1 rounded bg-[var(--surface)] border border-[var(--border)] px-1.5 py-0.5 text-[10px] font-medium"
-              >
-                <span className="max-w-[140px] truncate">{label}</span>
-                <button
-                  type="button"
-                  aria-label={`Undo ${label}`}
-                  onClick={(): void => props.onRemoveEdit(idx)}
-                  className="text-[var(--text-3)] hover:text-[var(--loss)] cursor-pointer"
-                >
-                  <X className="w-3 h-3" />
-                </button>
-              </span>
-            );
-          })}
-        </div>
-      ) : null}
-    </>
-  );
-}
-
-function canStepModelTop(args: {
-  branchDone: boolean;
-  board: BoardState;
-  evaluation: EvaluationPair;
-}): boolean {
-  return (
-    !args.branchDone &&
-    !args.board.actions_hidden &&
-    args.board.legal_actions.length > 0 &&
-    args.evaluation.primary.probs.length > 0
-  );
-}
-
-function ForkAlerts(props: { error: string | null; warnings: string[] }): ReactNode {
-  return (
-    <>
-      {props.error ? (
-        <div className="rounded bg-[var(--loss-soft)] text-[var(--loss)] px-2 py-1 text-[10px]">
-          {props.error}
-        </div>
-      ) : null}
-      {props.warnings.map((warn) => (
-        <div
-          key={warn}
-          className="rounded bg-[var(--warn-soft)] text-[var(--warn)] px-2 py-1 text-[10px]"
-        >
-          {warn}
-        </div>
-      ))}
-    </>
-  );
-}
-
-function ForkControlsSection(props: {
-  board: BoardState;
-  evaluation: EvaluationPair;
-  baseEvaluation: EvaluationPair;
-  showCompareDelta: boolean;
-  forkBusy: boolean;
-  edits: ForkEdit[];
-  branchEvents: BranchStepEvent[];
-  branchDone: boolean;
-  nearestPriorityStep: number | null;
-  warnings: string[];
-  error: string | null;
-  onAddEdit: (edit: ForkEdit) => void;
-  onRemoveEdit: (idx: number) => void;
-  onStepModelTopMove: () => void;
-  onPopBranchAction: () => void;
-  onResetFork: () => void;
-  onJumpToStep: (step: number) => void;
-}): ReactNode {
-  const [boardEditorOpen, setBoardEditorOpen] = useState(true);
-  const heroSeat = props.board.hero_seat ?? 0;
-  const hasMutations = props.edits.length > 0 || props.branchEvents.length > 0;
-  const canStepTop = canStepModelTop({
-    branchDone: props.branchDone,
-    board: props.board,
-    evaluation: props.evaluation,
-  });
-
-  return (
-    <div className="p-3 border-b border-[var(--border)] flex flex-col gap-2 bg-[var(--fork-soft)]/35">
-      <div className="flex items-center justify-between gap-2 text-[10px] font-bold uppercase tracking-wider">
-        <span className="inline-flex items-center gap-1 text-[var(--fork)]">
-          <GitBranch className="w-3 h-3" />
-          What-If &amp; Branch
-        </span>
-        <div className="flex items-center gap-1.5">
-          {props.forkBusy ? <span className="tabular text-[var(--fork)]">Evaluating…</span> : null}
-          {hasMutations ? (
-            <button
-              type="button"
-              onClick={props.onResetFork}
-              className="inline-flex items-center gap-0.5 text-[10px] font-semibold normal-case text-[var(--text-2)] hover:text-[var(--loss)] cursor-pointer"
-            >
-              <RotateCcw className="w-2.5 h-2.5" />
-              Reset
-            </button>
-          ) : null}
-        </div>
-      </div>
-
-      <ForkShiftSummary
-        editCount={props.edits.length}
-        branchCount={props.branchEvents.length}
-        evaluation={props.evaluation}
-        baseEvaluation={props.baseEvaluation}
-        showCompareDelta={props.showCompareDelta}
-      />
-
-      <div className="flex items-center gap-1.5">
-        <Button
-          size="sm"
-          variant="primary"
-          className="flex-1"
-          disabled={!canStepTop || props.forkBusy}
-          onClick={props.onStepModelTopMove}
-        >
-          <FastForward className="w-3 h-3" />
-          Play Model Top Move
-        </Button>
-        {props.branchEvents.length > 0 ? (
-          <Button size="sm" onClick={props.onPopBranchAction} title="Undo last branched action">
-            <Undo2 className="w-3 h-3" />
-            Undo
-          </Button>
-        ) : null}
-      </div>
-
-      <ForkChipsList
-        heroSeat={heroSeat}
-        edits={props.edits}
-        branchEvents={props.branchEvents}
-        onRemoveEdit={props.onRemoveEdit}
-      />
-
-      <button
-        type="button"
-        onClick={(): void => setBoardEditorOpen((v) => !v)}
-        className="text-left text-[10px] font-semibold uppercase tracking-wider text-[var(--text-3)] hover:text-[var(--text)] cursor-pointer"
-      >
-        {boardEditorOpen ? "▾ Add Cards / Edit Board" : "▸ Add Cards / Edit Board"}
-      </button>
-
-      {boardEditorOpen ? (
-        <ForkBoardEditor
-          board={props.board}
-          heroSeat={heroSeat}
-          nearestPriorityStep={props.nearestPriorityStep}
-          onJumpToStep={props.onJumpToStep}
-          onAddEdit={props.onAddEdit}
-        />
-      ) : null}
-
-      <ForkAlerts error={props.error} warnings={props.warnings} />
     </div>
   );
 }
 
-function ActionDeltaTag(props: { delta: number }): ReactNode {
-  if (props.delta === 0) return null;
-  const cls =
-    props.delta > 0
-      ? "text-[var(--win)] font-bold text-[10px]"
-      : "text-[var(--loss)] font-bold text-[10px]";
-  return <span className={cls}>({props.delta > 0 ? `+${props.delta}` : props.delta}%)</span>;
+interface RankedMoveRow {
+  act: LegalAction;
+  pPrimary: number;
+  pSecondary: number | null;
 }
 
-function LegalActionRowButton(props: {
+function buildRankedMoves(args: {
+  actions: LegalAction[];
+  probsA: number[];
+  probsB: number[];
+  baseProbs: number[];
+  useBeforeAfter: boolean;
+  useCompare: boolean;
+}): RankedMoveRow[] {
+  return args.actions
+    .map((act, idx) => {
+      const pPrimary = Math.round((args.probsA[idx] ?? 0) * 100);
+      let pSecondary: number | null = null;
+      if (args.useBeforeAfter) pSecondary = Math.round((args.baseProbs[idx] ?? 0) * 100);
+      else if (args.useCompare) pSecondary = Math.round((args.probsB[idx] ?? 0) * 100);
+      return { act, pPrimary, pSecondary };
+    })
+    .toSorted((a, b) => b.pPrimary - a.pPrimary);
+}
+
+function movesLegendLabel(args: {
+  useBeforeAfter: boolean;
+  useCompare: boolean;
+  labelA: string;
+  labelB: string;
+}): string {
+  if (args.useBeforeAfter) return "After vs Before";
+  if (args.useCompare) return `${args.labelA} vs ${args.labelB}`;
+  return "Click to play";
+}
+
+function RankedMoveCard(props: {
   rankIdx: number;
-  act: BoardState["legal_actions"][number];
-  pA: number;
-  delta: number;
+  act: LegalAction;
+  primaryPct: number;
+  secondaryPct: number | null;
+  primaryColor: string;
+  secondaryColor: string;
   isChosen: boolean;
-  forkMode: boolean;
-  forkBusy: boolean;
+  disabled: boolean;
   onBranchAction: (actionIdx: number) => void;
   onHoverFocus: (ids: number[]) => void;
 }): ReactNode {
-  const { act, rankIdx, pA, delta, isChosen, forkMode, forkBusy } = props;
-  const actionAria = forkMode
-    ? `Branch action ${rankIdx + 1}: ${act.label}`
-    : `Action ${rankIdx + 1}: ${act.label}`;
+  const delta = props.secondaryPct === null ? 0 : props.primaryPct - props.secondaryPct;
+  const topClass =
+    props.rankIdx === 0
+      ? "bg-[var(--accent-soft)]/55 border-[var(--accent)]/35 hover:border-[var(--accent)]"
+      : "bg-[var(--bg)]/55 border-[var(--border)]/70 hover:bg-[var(--surface-2)] hover:border-[var(--accent)]/50";
   return (
     <button
       type="button"
-      aria-label={actionAria}
-      disabled={forkMode && forkBusy}
-      title={forkMode ? `Branch: play "${act.label}"` : act.label}
-      onMouseEnter={(): void => props.onHoverFocus(act.focus_ids)}
+      disabled={props.disabled}
+      title={`Click to play: ${props.act.label}`}
+      aria-label={`Play action ${props.rankIdx + 1}: ${props.act.label}`}
+      onMouseEnter={(): void => props.onHoverFocus(props.act.focus_ids)}
       onMouseLeave={(): void => props.onHoverFocus([])}
-      onClick={(): void => {
-        if (forkMode && !forkBusy) props.onBranchAction(act.index);
-      }}
-      className={`w-full text-left rounded-md px-2 py-1.5 border transition-colors disabled:opacity-50 ${
-        forkMode ? "cursor-pointer hover:border-[var(--fork)]" : "cursor-default"
-      } ${
-        rankIdx === 0
-          ? "bg-[var(--win-soft)] border-[var(--win)]/25"
-          : "border-transparent hover:bg-[var(--surface-2)] hover:border-[var(--border)]"
-      }`}
+      onClick={(): void => props.onBranchAction(props.act.index)}
+      className={`w-full text-left rounded-md px-2.5 py-2 border transition-colors cursor-pointer disabled:opacity-50 ${topClass}`}
     >
-      <div className="flex items-start justify-between gap-2 text-[11px] mb-1">
+      <div className="flex items-start justify-between gap-2 text-[11px] mb-1.5">
         <span className="font-semibold leading-snug break-words line-clamp-2 min-w-0">
-          {rankIdx + 1}. {act.label}
+          {props.rankIdx + 1}. {props.act.label}
         </span>
         <span className="tabular shrink-0 flex items-center gap-1 pt-0.5">
-          {isChosen ? (
+          {props.isChosen ? (
             <span title="Action taken in recorded game" className="text-[var(--accent)]">
               ★
             </span>
           ) : null}
-          <strong>{pA}%</strong>
-          <ActionDeltaTag delta={delta} />
+          <strong>{props.primaryPct}%</strong>
+          {props.secondaryPct !== null && delta !== 0 ? (
+            <span className={`text-[10px] ${deltaToneClass(delta)}`}>
+              ({formatSignedPct(delta)})
+            </span>
+          ) : null}
         </span>
       </div>
-      <div className="h-[5px] rounded bg-[var(--surface-2)] overflow-hidden">
-        <div
-          className="h-full rounded transition-all"
-          style={{
-            width: `${Math.max(2, pA)}%`,
-            background: rankIdx === 0 ? "var(--win-fill)" : "var(--accent)",
-          }}
-        />
+      <div className="flex flex-col gap-1">
+        <div className="h-[5px] rounded-full bg-[var(--surface-2)] overflow-hidden">
+          <div
+            className="h-full rounded-full transition-all duration-150"
+            style={{ width: `${Math.max(2, props.primaryPct)}%`, background: props.primaryColor }}
+          />
+        </div>
+        {props.secondaryPct === null ? null : (
+          <div className="h-[4px] rounded-full bg-[var(--surface-2)] overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all duration-150 opacity-85"
+              style={{
+                width: `${Math.max(2, props.secondaryPct)}%`,
+                background: props.secondaryColor,
+              }}
+            />
+          </div>
+        )}
       </div>
     </button>
   );
 }
 
-function LegalActionsSection(props: {
+function RankedMovesList(props: {
   board: BoardState;
   evaluation: EvaluationPair;
-  forkMode: boolean;
+  baseEvaluation: EvaluationPair;
+  showCompare: boolean;
+  showEditCompare: boolean;
+  labelA: string;
+  labelB: string;
   forkBusy: boolean;
+  branchDone: boolean;
   onBranchAction: (actionIdx: number) => void;
   onHoverFocus: (ids: number[]) => void;
 }): ReactNode {
@@ -495,7 +647,7 @@ function LegalActionsSection(props: {
 
   if (props.board.actions_hidden) {
     return (
-      <div className="p-3 border-b border-[var(--border)]">
+      <div className="p-3 flex-1">
         <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[var(--text-3)] mb-2">
           <span>Opponent Deciding</span>
           <span>Hero POV</span>
@@ -512,266 +664,335 @@ function LegalActionsSection(props: {
   }
 
   const actions = props.board.legal_actions;
-  const probsA = props.evaluation.primary.probs;
-  const probsB = props.evaluation.compare.probs;
-  const ranked = actions
-    .map((act, idx) => ({
-      act,
-      pA: Math.round((probsA[idx] ?? 0) * 100),
-      pB: Math.round((probsB[idx] ?? 0) * 100),
-    }))
-    .toSorted((a, b) => b.pA - a.pA);
-  const maxShow = props.forkMode ? 5 : 6;
+  const baseProbs = props.baseEvaluation.primary.probs;
+  const useBeforeAfter = props.showEditCompare && baseProbs.length === actions.length;
+  const useCompare = !useBeforeAfter && props.showCompare;
+  const ranked = buildRankedMoves({
+    actions,
+    probsA: props.evaluation.primary.probs,
+    probsB: props.evaluation.compare.probs,
+    baseProbs,
+    useBeforeAfter,
+    useCompare,
+  });
+  const maxShow = 8;
   const visible = showAll ? ranked : ranked.slice(0, maxShow);
   const whoLabel = props.board.actor_is_hero === false ? "OPP" : "HERO";
+  const legendRight = movesLegendLabel({
+    useBeforeAfter,
+    useCompare,
+    labelA: props.labelA,
+    labelB: props.labelB,
+  });
 
   return (
-    <div className="p-3 border-b border-[var(--border)]">
-      <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[var(--text-3)] mb-2">
+    <div className="p-3 flex-1 min-h-0 flex flex-col gap-2 overflow-y-auto">
+      <div className="flex items-center justify-between gap-2 text-[10px] font-bold uppercase tracking-wider text-[var(--text-3)] shrink-0">
         <span>
           {whoLabel} · {props.board.action_space_kind} ({actions.length})
         </span>
-        <span>{props.forkMode ? "Click to play" : "Δ vs B"}</span>
+        <span className="truncate normal-case font-medium">{legendRight}</span>
       </div>
+
+      {props.branchDone ? (
+        <div className="rounded-md border border-[var(--win)]/40 bg-[var(--win-soft)] px-2.5 py-2 text-[11px] text-[var(--win)] font-semibold">
+          Game ended along this branched line. Click Reset or Undo to continue exploring.
+        </div>
+      ) : null}
+
       <div className="flex flex-col gap-1.5">
         {visible.map((row, idx) => (
-          <LegalActionRowButton
+          <RankedMoveCard
             key={row.act.index}
             rankIdx={idx}
             act={row.act}
-            pA={row.pA}
-            delta={row.pA - row.pB}
+            primaryPct={row.pPrimary}
+            secondaryPct={row.pSecondary}
+            primaryColor={useBeforeAfter ? "var(--fork-fill)" : "var(--accent)"}
+            secondaryColor="#d97706"
             isChosen={props.board.chosen_action === row.act.index}
-            forkMode={props.forkMode}
-            forkBusy={props.forkBusy}
+            disabled={props.forkBusy || props.branchDone}
             onBranchAction={props.onBranchAction}
             onHoverFocus={props.onHoverFocus}
           />
         ))}
       </div>
+
       {actions.length > maxShow ? (
         <button
           type="button"
           onClick={(): void => setShowAll((prev) => !prev)}
-          className="mt-2 w-full rounded-md border border-dashed border-[var(--border-strong)] py-1 text-[10.5px] font-medium text-[var(--text-2)] hover:text-[var(--text)] hover:border-[var(--accent)] cursor-pointer"
+          className="mt-1 w-full rounded-md border border-dashed border-[var(--border-strong)] py-1 text-[10.5px] font-medium text-[var(--text-2)] hover:text-[var(--text)] hover:border-[var(--accent)] cursor-pointer shrink-0"
         >
-          {showAll ? `Show top ${maxShow} ▴` : `Show all ${actions.length} actions ▾`}
+          {showAll ? `Show top ${maxShow} ▴` : `Show all ${actions.length} moves ▾`}
         </button>
       ) : null}
     </div>
   );
 }
 
-function WdlAndWatchlistFooter(props: {
-  checkpointName: string;
-  winPct: number;
-  drawPct: number;
-  lossPct: number;
-  wdlDelta: number;
-  showDelta: boolean;
-  pinned: boolean;
-  onPinPosition: (note: string) => void;
+function CollapsibleMoveLog(props: {
+  recentEvents: RecentEvent[];
+  branchEvents: BranchStepEvent[];
+  onSelectStep: (step: number) => void;
 }): ReactNode {
-  const [pinNote, setPinNote] = useState("");
-  const deltaText = props.wdlDelta > 0 ? `+${props.wdlDelta}%` : `${props.wdlDelta}%`;
+  const [open, setOpen] = useState(false);
+  const totalCount = props.recentEvents.length + props.branchEvents.length;
+
   return (
-    <div className="p-3 flex flex-col gap-2">
-      <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[var(--text-3)]">
-        <span>Hero Win Estimate</span>
-        <span className="tabular">{props.checkpointName}</span>
-      </div>
-      <div className="h-[18px] rounded-[5px] overflow-hidden flex text-[10px] font-bold text-white tabular">
-        <div
-          className="bg-[var(--win-fill)] flex items-center justify-center"
-          style={{ width: `${props.winPct}%` }}
-        >
-          {props.winPct >= 22 ? `${props.winPct}% Win` : ""}
+    <div className="shrink-0 border-t border-[var(--border)] bg-[var(--surface)]">
+      <button
+        type="button"
+        onClick={(): void => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="w-full px-3 py-2 flex items-center justify-between text-[11px] font-semibold text-[var(--text-2)] hover:text-[var(--text)] hover:bg-[var(--surface-2)]/60 cursor-pointer transition-colors"
+      >
+        <span className="tabular">Move Log ({totalCount})</span>
+        {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
+      </button>
+
+      {open ? (
+        <div className="max-h-[180px] overflow-y-auto border-t border-[var(--border)] px-2 py-1.5 flex flex-col gap-1 bg-[var(--bg)]/60">
+          {totalCount === 0 ? (
+            <div className="py-3 text-center text-[10.5px] text-[var(--text-3)]">
+              No prior moves recorded yet.
+            </div>
+          ) : null}
+          {props.branchEvents.toReversed().map((ev) => (
+            <div
+              key={`branch-${ev.branch_index}`}
+              className="flex items-center gap-1.5 rounded px-1.5 py-1 text-[10.5px] bg-[var(--fork-soft)]/50"
+            >
+              <span className="tabular text-[9.5px] font-bold text-[var(--fork)] shrink-0">
+                +{ev.branch_index + 1}
+              </span>
+              <span
+                className={`font-semibold shrink-0 ${
+                  ev.actor_side === "hero" ? "text-[var(--win)]" : "text-[var(--loss)]"
+                }`}
+              >
+                {ev.actor_side === "hero" ? "Hero" : "Opp"}:
+              </span>
+              <span className="truncate">{ev.label}</span>
+            </div>
+          ))}
+          {props.recentEvents.toReversed().map((ev) => (
+            <button
+              key={`${ev.step}-${ev.text}`}
+              type="button"
+              onClick={(): void => props.onSelectStep(ev.step)}
+              className="flex items-center gap-1.5 rounded px-1.5 py-1 text-left text-[10.5px] hover:bg-[var(--surface-2)] cursor-pointer"
+            >
+              <span className="tabular text-[9.5px] text-[var(--text-3)] shrink-0">
+                T{ev.turn} #{ev.step}
+              </span>
+              <span
+                className={`font-semibold shrink-0 ${
+                  ev.actor_side === "hero" ? "text-[var(--win)]" : "text-[var(--loss)]"
+                }`}
+              >
+                {ev.actor_side === "hero" ? "Hero" : "Opp"}:
+              </span>
+              <span className="truncate">{ev.text}</span>
+            </button>
+          ))}
         </div>
-        {props.drawPct > 0 ? (
-          <div className="bg-zinc-600" style={{ width: `${props.drawPct}%` }} />
-        ) : null}
-        <div
-          className="bg-[var(--loss-fill)] flex items-center justify-center"
-          style={{ width: `${props.lossPct}%` }}
-        >
-          {props.lossPct >= 22 ? `${props.lossPct}% Loss` : ""}
-        </div>
-      </div>
-      <div className="flex items-center justify-between tabular text-[10.5px] text-[var(--text-2)]">
-        <span>
-          Hero {props.winPct}% Win
-          {props.drawPct > 0 ? ` · ${props.drawPct}% Draw` : ""} · {props.lossPct}% Loss
-        </span>
-        {props.showDelta ? (
-          <span
-            className={
-              props.wdlDelta > 0
-                ? "text-[var(--win)] font-semibold"
-                : "text-[var(--loss)] font-semibold"
-            }
-          >
-            {deltaText} vs B
-          </span>
-        ) : null}
-      </div>
-      <div className="flex items-center gap-1.5">
-        <input
-          type="text"
-          value={pinNote}
-          onChange={(e): void => setPinNote(e.target.value)}
-          placeholder="Watchlist note…"
-          aria-label="Watchlist note"
-          className="flex-1 min-w-0 h-7 rounded-md border border-[var(--border)] bg-[var(--bg)] px-2 text-[11px]"
-        />
-        <Button
-          variant={props.pinned ? "primary" : "default"}
-          size="md"
-          onClick={(): void => {
-            props.onPinPosition(pinNote);
-            setPinNote("");
-          }}
-        >
-          <Bookmark className="w-3.5 h-3.5" />
-          {props.pinned ? "Pinned" : "Pin"}
-        </Button>
-      </div>
+      ) : null}
     </div>
   );
 }
 
-export function TabletopDock(props: {
-  board: BoardState;
-  evaluation: EvaluationPair;
-  baseEvaluation: EvaluationPair;
-  checkpoints: string[];
+function ModelSelectorsHeader(props: {
+  runId: string;
+  checkpoints: GlobalCheckpointOption[];
   ckptA: string;
   ckptB: string;
+  showCompare: boolean;
+  actionsHidden: boolean;
+  evaluation: EvaluationPair;
+  winDelta: number;
+  forkError: string | null;
+  warnings: string[];
   onChangeCkptA: (v: string) => void;
   onChangeCkptB: (v: string) => void;
-  forkMode: boolean;
-  forkBusy: boolean;
-  forkEdits: ForkEdit[];
-  branchEvents: BranchStepEvent[];
-  branchDone: boolean;
-  nearestPriorityStep: number | null;
-  forkWarnings: string[];
-  forkError: string | null;
-  onAddForkEdit: (edit: ForkEdit) => void;
-  onRemoveForkEdit: (idx: number) => void;
-  onBranchAction: (actionIdx: number) => void;
-  onStepModelTopMove: () => void;
-  onPopBranchAction: () => void;
-  onResetFork: () => void;
-  onJumpToStep: (step: number) => void;
-  onHoverActionFocus: (ids: number[]) => void;
-  onPinPosition: (note: string) => void;
-  pinned: boolean;
 }): ReactNode {
-  const wdl = props.evaluation.primary.wdl;
-  const winPct = Math.round(wdl.win * 100);
-  const drawPct = Math.round(wdl.draw * 100);
-  const lossPct = Math.max(0, 100 - winPct - drawPct);
-  const compareWinPct = Math.round(props.evaluation.compare.wdl.win * 100);
-  const wdlDelta = winPct - compareWinPct;
-  const showCompare = props.ckptB !== "same";
+  return (
+    <div className="px-3 py-2 border-b border-[var(--border)] flex flex-col gap-1.5 shrink-0">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-1.5">
+        <CheckpointSelect
+          value={props.ckptA}
+          onChange={props.onChangeCkptA}
+          checkpoints={props.checkpoints}
+          currentRunId={props.runId}
+          ariaLabel="Model A checkpoint"
+          className="h-7 rounded-md border border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] px-1.5 text-[11px] font-semibold tabular min-w-0"
+        />
+        <span className="text-[10px] font-medium text-[var(--text-3)]">vs</span>
+        <CheckpointSelect
+          value={props.ckptB}
+          onChange={props.onChangeCkptB}
+          checkpoints={props.checkpoints}
+          currentRunId={props.runId}
+          includeNone
+          noneLabel="None"
+          ariaLabel="Model B checkpoint"
+          className="h-7 rounded-md border border-amber-500/50 bg-[var(--warn-soft)]/50 text-[var(--text)] px-1.5 text-[11px] font-semibold tabular min-w-0"
+        />
+      </div>
+
+      {!props.actionsHidden && props.showCompare ? (
+        <div className="flex items-center justify-between text-[10px] tabular text-[var(--text-3)]">
+          <span title="Total Variation and KL(A || B) in nats">
+            TV {props.evaluation.diff.tv.toFixed(2)} · KL {props.evaluation.diff.kl.toFixed(2)}
+          </span>
+          <span className={deltaToneClass(props.winDelta)}>
+            Win Δ {formatSignedPct(props.winDelta)}
+          </span>
+        </div>
+      ) : null}
+
+      {props.forkError ? (
+        <div className="rounded bg-[var(--loss-soft)] text-[var(--loss)] px-2 py-1 text-[10px]">
+          {props.forkError}
+        </div>
+      ) : null}
+      {props.warnings.map((warn) => (
+        <div
+          key={warn}
+          className="rounded bg-[var(--warn-soft)] text-[var(--warn)] px-2 py-1 text-[10px]"
+        >
+          {warn}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function canStepTopMove(props: TabletopDockProps): boolean {
+  if (props.branchDone || props.board.actions_hidden) return false;
+  return props.board.legal_actions.length > 0 && props.evaluation.primary.probs.length > 0;
+}
+
+export function TabletopDock(props: TabletopDockProps): ReactNode {
+  const showCompare = props.ckptB !== "none" && props.ckptB !== "same";
+  const hasMutations = props.forkEdits.length > 0 || props.branchEvents.length > 0;
+  const showEditCompare = props.forkEdits.length > 0 && props.branchEvents.length === 0;
+  const labelA = formatCheckpointShort(props.ckptA, props.checkpoints, props.runId);
+  const labelB = formatCheckpointShort(props.ckptB, props.checkpoints, props.runId);
+  const winDelta =
+    Math.round(props.evaluation.primary.wdl.win * 100) -
+    Math.round(props.evaluation.compare.wdl.win * 100);
+  const allWarnings = [...(props.evaluation.warnings ?? []), ...props.forkWarnings];
 
   return (
     <aside
-      aria-label="Policy and counterfactual inspector"
-      className="w-full lg:w-[330px] shrink-0 border-t lg:border-t-0 lg:border-l border-[var(--border)] bg-[var(--surface)] flex flex-col min-h-0 lg:overflow-y-auto"
+      aria-label="Decision analysis"
+      className={
+        props.className ??
+        "w-full lg:w-[340px] shrink-0 border-t lg:border-t-0 lg:border-l border-[var(--border)] bg-[var(--surface)] flex flex-col min-h-0 h-full overflow-hidden"
+      }
     >
-      <div className="p-3 border-b border-[var(--border)]">
-        <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[var(--text-3)] mb-1.5">
-          <span>Checkpoint</span>
-          {props.board.actions_hidden ? (
-            <span className="normal-case font-medium text-[var(--text-3)]">Hidden in Hero POV</span>
-          ) : (
-            <span className="tabular" title="Total Variation and KL(A || B) in nats">
-              TV {props.evaluation.diff.tv.toFixed(2)} · KL {props.evaluation.diff.kl.toFixed(2)}
-            </span>
-          )}
-        </div>
-        <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1.5">
-          <select
-            value={props.ckptA}
-            onChange={(e): void => props.onChangeCkptA(e.target.value)}
-            aria-label="Primary checkpoint"
-            className="h-7 rounded-md border border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] px-1.5 text-[11px] font-semibold tabular"
-          >
-            <option value="heuristic">Heuristic</option>
-            {props.checkpoints.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-          <span className="text-[10px] text-[var(--text-3)]">vs</span>
-          <select
-            value={props.ckptB}
-            onChange={(e): void => props.onChangeCkptB(e.target.value)}
-            aria-label="Comparison checkpoint"
-            className="h-7 rounded-md border border-[var(--border)] bg-[var(--surface-2)] px-1.5 text-[11px] font-semibold tabular"
-          >
-            <option value="same">Same</option>
-            <option value="heuristic">Heuristic</option>
-            {props.checkpoints.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-        </div>
-        {(props.evaluation.warnings ?? []).map((w) => (
-          <div
-            key={w}
-            className="mt-1.5 rounded bg-[var(--warn-soft)] text-[var(--warn)] px-2 py-1 text-[10px]"
-          >
-            {w}
-          </div>
-        ))}
+      <div className="px-3 py-2 border-b border-[var(--border)] flex items-center justify-between gap-2 shrink-0">
+        <span className="text-[10.5px] font-bold uppercase tracking-wider text-[var(--text-2)]">
+          Decision Analysis
+        </span>
+        <Button size="sm" onClick={props.onOpenPolicyMatrix} className="px-2 py-1 text-[10.5px]">
+          <LayoutGrid className="w-3 h-3" />
+          Policy Matrix
+        </Button>
       </div>
 
-      {props.forkMode ? (
-        <ForkControlsSection
-          board={props.board}
-          evaluation={props.evaluation}
-          baseEvaluation={props.baseEvaluation}
-          showCompareDelta={showCompare}
-          forkBusy={props.forkBusy}
-          edits={props.forkEdits}
-          branchEvents={props.branchEvents}
-          branchDone={props.branchDone}
-          nearestPriorityStep={props.nearestPriorityStep}
-          warnings={props.forkWarnings}
-          error={props.forkError}
-          onAddEdit={props.onAddForkEdit}
-          onRemoveEdit={props.onRemoveForkEdit}
-          onStepModelTopMove={props.onStepModelTopMove}
-          onPopBranchAction={props.onPopBranchAction}
-          onResetFork={props.onResetFork}
-          onJumpToStep={props.onJumpToStep}
-        />
-      ) : null}
+      <ModelSelectorsHeader
+        runId={props.runId}
+        checkpoints={props.checkpoints}
+        ckptA={props.ckptA}
+        ckptB={props.ckptB}
+        showCompare={showCompare}
+        actionsHidden={Boolean(props.board.actions_hidden)}
+        evaluation={props.evaluation}
+        winDelta={winDelta}
+        forkError={props.forkError}
+        warnings={allWarnings}
+        onChangeCkptA={props.onChangeCkptA}
+        onChangeCkptB={props.onChangeCkptB}
+      />
 
-      <LegalActionsSection
+      <WinEstimateSection
+        labelA={labelA}
+        labelB={labelB}
+        showCompare={showCompare}
+        showEditShift={hasMutations}
+        evaluation={props.evaluation}
+        baseEvaluation={props.baseEvaluation}
+        forkBusy={props.forkBusy}
+      />
+
+      <BranchStrip
+        branchEvents={props.branchEvents}
+        editCount={props.forkEdits.length}
+        canStepTop={canStepTopMove(props)}
+        forkBusy={props.forkBusy}
+        onStepModelTopMove={props.onStepModelTopMove}
+        onPopBranchAction={props.onPopBranchAction}
+        onResetFork={props.onResetFork}
+      />
+
+      <RankedMovesList
         board={props.board}
         evaluation={props.evaluation}
-        forkMode={props.forkMode}
+        baseEvaluation={props.baseEvaluation}
+        showCompare={showCompare}
+        showEditCompare={showEditCompare}
+        labelA={labelA}
+        labelB={labelB}
         forkBusy={props.forkBusy}
+        branchDone={props.branchDone}
         onBranchAction={props.onBranchAction}
         onHoverFocus={props.onHoverActionFocus}
       />
 
-      <WdlAndWatchlistFooter
-        checkpointName={props.evaluation.primary.checkpoint}
-        winPct={winPct}
-        drawPct={drawPct}
-        lossPct={lossPct}
-        wdlDelta={wdlDelta}
-        showDelta={showCompare && wdlDelta !== 0}
-        pinned={props.pinned}
-        onPinPosition={props.onPinPosition}
+      <CollapsibleMoveLog
+        recentEvents={props.board.recent_events ?? []}
+        branchEvents={props.branchEvents}
+        onSelectStep={props.onSelectStep}
       />
     </aside>
+  );
+}
+
+export function MobilePolicySheet(props: {
+  open: boolean;
+  onClose: () => void;
+  dockProps: TabletopDockProps;
+}): ReactNode {
+  if (!props.open) return null;
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col justify-end lg:hidden">
+      <button
+        type="button"
+        aria-label="Dismiss policy sheet"
+        onClick={props.onClose}
+        className="flex-1 bg-black/45 border-0"
+      />
+      <div className="h-[74dvh] max-h-[620px] rounded-t-[14px] border-t border-[var(--border-strong)] bg-[var(--surface)] shadow-[var(--shadow-lg)] flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between px-3 py-1.5 border-b border-[var(--border)] shrink-0">
+          <span className="text-[11px] font-bold text-[var(--text-2)]">Decision Analysis</span>
+          <button
+            type="button"
+            onClick={props.onClose}
+            aria-label="Close policy sheet"
+            className="p-1 rounded text-[var(--text-2)] hover:bg-[var(--surface-2)] cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <TabletopDock
+            {...props.dockProps}
+            className="w-full h-full flex flex-col min-h-0 overflow-hidden bg-[var(--surface)]"
+          />
+        </div>
+      </div>
+    </div>
   );
 }

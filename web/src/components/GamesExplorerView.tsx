@@ -422,8 +422,8 @@ function GamesHeaderControls(props: {
         </div>
       </div>
 
-      <div className="flex flex-wrap xl:flex-nowrap items-center gap-1.5">
-        <div className="relative shrink-0">
+      <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+        <div className="relative flex-1 min-w-[150px] sm:flex-none sm:w-44">
           <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-3)]" />
           <input
             type="search"
@@ -431,7 +431,7 @@ function GamesHeaderControls(props: {
             onChange={(e): void => onPatchFilters({ search: e.target.value })}
             placeholder="Card, seed, color, run…"
             aria-label="Search games"
-            className="h-7 w-36 rounded-md border border-[var(--border)] bg-[var(--bg)] pl-6 pr-2 text-xs"
+            className="h-7 w-full rounded-md border border-[var(--border)] bg-[var(--bg)] pl-6 pr-2 text-xs"
           />
         </div>
 
@@ -442,7 +442,7 @@ function GamesHeaderControls(props: {
               onPatchFilters({ runId: e.target.value, card: "", colors: "", setCode: "" })
             }
             aria-label="Filter by run"
-            className="h-7 max-w-[118px] rounded-md border border-[var(--border)] bg-[var(--bg)] px-1.5 text-xs"
+            className="h-7 min-w-0 max-w-full sm:max-w-[148px] rounded-md border border-[var(--border)] bg-[var(--bg)] px-1.5 text-xs"
           >
             <option value="">All Runs ({facets.runs.length})</option>
             {runOptions.map((runId) => (
@@ -458,7 +458,7 @@ function GamesHeaderControls(props: {
             value={filters.setCode}
             onChange={(e): void => onPatchFilters({ setCode: e.target.value })}
             aria-label="Filter by set"
-            className="h-7 rounded-md border border-[var(--border)] bg-[var(--bg)] px-1.5 text-xs"
+            className="h-7 min-w-0 max-w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-1.5 text-xs"
           >
             <option value="">All Sets</option>
             {facets.sets.map((s) => (
@@ -474,7 +474,7 @@ function GamesHeaderControls(props: {
             value={filters.card}
             onChange={(e): void => onPatchFilters({ card: e.target.value })}
             aria-label="Filter by card"
-            className="h-7 max-w-[122px] rounded-md border border-[var(--border)] bg-[var(--bg)] px-1.5 text-xs"
+            className="h-7 min-w-0 max-w-full sm:max-w-[156px] rounded-md border border-[var(--border)] bg-[var(--bg)] px-1.5 text-xs"
           >
             <option value="">All Cards ({facets.cards.length})</option>
             {facets.cards.map((c) => (
@@ -490,7 +490,7 @@ function GamesHeaderControls(props: {
             value={filters.colors}
             onChange={(e): void => onPatchFilters({ colors: e.target.value })}
             aria-label="Filter by colors"
-            className="h-7 rounded-md border border-[var(--border)] bg-[var(--bg)] px-1.5 text-xs"
+            className="h-7 min-w-0 max-w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-1.5 text-xs"
           >
             <option value="">Colors</option>
             {facets.colors.map((col) => (
@@ -505,7 +505,7 @@ function GamesHeaderControls(props: {
           value={filters.result}
           onChange={(e): void => onPatchFilters({ result: e.target.value })}
           aria-label="Filter by outcome"
-          className="h-7 rounded-md border border-[var(--border)] bg-[var(--bg)] px-1.5 text-xs"
+          className="h-7 min-w-0 max-w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-1.5 text-xs"
         >
           <option value="">Outcome</option>
           {(facets.results.length > 0 ? facets.results : ["win", "loss", "draw"]).map((res) => (
@@ -519,7 +519,7 @@ function GamesHeaderControls(props: {
           value={filters.sort}
           onChange={(e): void => onPatchFilters({ sort: e.target.value })}
           aria-label="Sort games"
-          className="h-7 rounded-md border border-[var(--border)] bg-[var(--bg)] px-1.5 text-xs"
+          className="h-7 min-w-0 max-w-full shrink-0 rounded-md border border-[var(--border)] bg-[var(--bg)] px-1.5 text-xs font-medium"
         >
           <option value="surprise_desc">Most Wrong ↓</option>
           <option value="swing_desc">Biggest Swing ↓</option>
