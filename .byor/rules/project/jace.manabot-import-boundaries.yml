@@ -1,7 +1,7 @@
 id: jace.manabot-import-boundaries
 language: Python
 severity: error
-message: Only the designated seam modules (jace.data.catalog, jace.rl.loop, jace.collect, jace.eval, jace.forks, jace.storage.gameplay, jace.train) may import manabot or managym.
+message: Only the designated seam modules (jace.data.catalog, jace.rl.loop, jace.collect, jace.eval, jace.forks, jace.storage.gameplay, jace.studio, jace.train) may import manabot or managym.
 files:
   - src/jace/**/*.py
 ignores:
@@ -11,6 +11,7 @@ ignores:
   - src/jace/eval/**
   - src/jace/forks/**
   - src/jace/storage/gameplay.py
+  - src/jace/studio/**
   - src/jace/train/**
 rule:
   any:

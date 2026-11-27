@@ -51,11 +51,15 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  # Python: ty checks the whole project, with the dependencies in uv.lock.
-  - repo: https://github.com/astral-sh/ty-pre-commit
-    rev: v0.0.109
+  # Python: ty checks the whole project with the studio extra installed.
+  - repo: local
     hooks:
       - id: ty
+        name: ty
+        entry: uv run --locked --extra studio ty check
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
 
   # Python: keep uv.lock in sync with pyproject.toml.
   - repo: local
@@ -65,4 +69,21 @@ repos:
         entry: uv lock --check
         language: system
         files: ^(pyproject\.toml|uv\.lock)$
+        pass_filenames: false
+
+  # Web: format, strict type-aware lint, and lockfile check for web/.
+  - repo: local
+    hooks:
+      - id: oxfmt
+        name: oxfmt
+        entry: npm --prefix web run format
+        language: system
+        files: ^web/.*\.(ts|tsx|js|jsx|css|json)$
+        pass_filenames: false
+
+      - id: oxlint
+        name: oxlint
+        entry: npm --prefix web run lint
+        language: system
+        files: ^web/.*\.(ts|tsx|js|jsx)$
         pass_filenames: false

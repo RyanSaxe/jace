@@ -11,6 +11,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.4.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci
       - uses: actions/cache@v6
         with:
           path: ~/.cache/prek
@@ -22,5 +28,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.4.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci
       # Building manabot's engine needs a Rust toolchain, which the runner image provides.
-      - run: uv run --locked pytest -q
+      - run: uv run --locked --extra studio pytest -q
+      - run: npm --prefix web test
+      - run: npm --prefix web run build

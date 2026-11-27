@@ -1,0 +1,117 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #f6f5f1;
+  --surface: #ffffff;
+  --surface-2: #efede7;
+  --felt: #eae7df;
+  --felt-line: rgba(24, 24, 27, 0.08);
+  --border: rgba(24, 24, 27, 0.11);
+  --border-strong: rgba(24, 24, 27, 0.22);
+  --text: #18181b;
+  --text-2: #52525b;
+  --text-3: #63636c;
+  --accent: #4f46e5;
+  --accent-soft: rgba(79, 70, 229, 0.1);
+  --win: #15803d;
+  --win-fill: #15803d;
+  --win-soft: rgba(21, 128, 61, 0.13);
+  --loss: #b91c1c;
+  --loss-fill: #b91c1c;
+  --loss-soft: rgba(185, 28, 28, 0.12);
+  --warn: #b45309;
+  --warn-soft: rgba(180, 83, 9, 0.13);
+  --fork: #7c3aed;
+  --fork-fill: #7c3aed;
+  --fork-soft: rgba(124, 58, 237, 0.12);
+  --shadow-sm: 0 1px 2px rgba(24, 24, 27, 0.06);
+  --shadow-md: 0 8px 24px rgba(24, 24, 27, 0.12);
+  --shadow-lg: 0 18px 42px rgba(24, 24, 27, 0.22);
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+}
+
+[data-theme="dark"] {
+  --bg: #111113;
+  --surface: #18181b;
+  --surface-2: #222226;
+  --felt: #151518;
+  --felt-line: rgba(255, 255, 255, 0.07);
+  --border: rgba(255, 255, 255, 0.11);
+  --border-strong: rgba(255, 255, 255, 0.22);
+  --text: #f4f4f5;
+  --text-2: #b4b4be;
+  --text-3: #9a9aa6;
+  --accent: #818cf8;
+  --accent-soft: rgba(129, 140, 248, 0.16);
+  --win: #4ade80;
+  --win-fill: #15803d;
+  --win-soft: rgba(34, 197, 94, 0.16);
+  --loss: #f87171;
+  --loss-fill: #b91c1c;
+  --loss-soft: rgba(248, 113, 113, 0.16);
+  --warn: #fbbf24;
+  --warn-soft: rgba(245, 158, 11, 0.16);
+  --fork: #c4b5fd;
+  --fork-fill: #7c3aed;
+  --fork-soft: rgba(167, 139, 250, 0.16);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 18px 42px rgba(0, 0, 0, 0.65);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+
+.felt-surface {
+  background-color: var(--felt);
+  background-image: radial-gradient(var(--felt-line) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+
+.card-tapped {
+  transform: rotate(18deg) scale(0.94);
+  opacity: 0.82;
+}
+
+.card-tapped:hover {
+  transform: rotate(18deg) translateY(-4px) scale(1.02);
+  opacity: 1;
+}
+
+.card-back {
+  background: radial-gradient(circle at 50% 45%, #5b3a24 0%, #2a1a12 65%, #160d09 100%);
+  border: 2px solid #8a643c;
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

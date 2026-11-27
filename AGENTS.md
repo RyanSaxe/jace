@@ -3,10 +3,11 @@
 ## Setup and checks
 
 ```sh
-uv sync
+uv sync --extra studio
 prek install
 prek run --all-files
-uv run --locked pytest -q
+uv run --locked --extra studio pytest -q
+npm --prefix web test && npm --prefix web run build
 ```
 
 ## Workflow
@@ -28,6 +29,7 @@ storage, and runnable CLIs. Imports flow downward only and are enforced by
 | Package / path | Owns | Engine imports |
 | --- | --- | --- |
 | `src/jace/train/` | Top-level gameplay self-play CLIs (`full_data`, `ten_decks`, `harness`) | Yes |
+| `src/jace/studio/` | Local evaluation workbench backend: FastAPI, DuckDB/Parquet index, `managym` replay, board serialization, playout/compare analysis, Scryfall cache, and Fork API (`app`, `runs`, `index`, `board`, `replay`, `inference`, `analysis`, `scryfall`) | Yes |
 | `src/jace/pretrain/` | Supervised pretraining CLIs and helpers (`draft`, `decks`, `common`, `formats`, `schedules`, `supervised`, `deck_measures`) | No |
 | `src/jace/forks/` | Counterfactual fork collection, batched playouts, and horizon audits (`collect`, `batch`, `audit`) | Yes |
 | `src/jace/eval/` | Mirrored paired deals, parallel adaptive judging, forensics, and probe diffs (`deals`, `parallel`, `forensics`, `diffs`) | Yes |

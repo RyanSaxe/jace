@@ -5,6 +5,8 @@ __pycache__/
 .ruff_cache/
 # manabot writes a record of each game it fails on under the working directory.
 .runs/
+web/node_modules/
+web/dist/
 
 # >>> Managed by BYOR. Manual edits may be overwritten. >>>
 .byor/local.yml
