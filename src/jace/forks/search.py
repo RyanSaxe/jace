@@ -40,12 +40,12 @@ from jace.belief import (
 )
 from jace.eval.deals import wilson_interval
 from jace.forks.batch import (
-    _batched_eval,
-    _engine_error_types,
-    _hero_win_prob,
-    _safe_clone,
-    _safe_step,
-    _terminal_score,
+    batched_eval,
+    engine_error_types,
+    hero_win_prob,
+    safe_clone,
+    safe_step,
+    terminal_score,
 )
 
 if TYPE_CHECKING:
@@ -333,7 +333,7 @@ def _materialize_world(
 ) -> managym.Env:
     rng = random.Random(world_seed)
     pinned, drawn, pool = _sample_hand_cards(belief, overrides=overrides, rng=rng)
-    clone, errors = env.clone_env(), _engine_error_types()
+    clone, errors = env.clone_env(), engine_error_types()
     clone.scenario_clear_hand(opp_seat)
     failed: set[str] = set()
     clone, placed_pins = _place_cards(
@@ -408,10 +408,10 @@ def _spawn_branches(
     for w_idx, world_env in enumerate(worlds):
         pseed = seed * _BRANCH_MULT + w_idx * _WORLD_STRIDE
         for a_idx in range(num_actions):
-            b_env = _safe_clone(world_env)
+            b_env = safe_clone(world_env)
             if b_env is not None:
                 b_env.set_seed(pseed)
-                nobs, done, failed = _safe_step(b_env, a_idx)
+                nobs, done, failed = safe_step(b_env, a_idx)
                 br = _SearchBranch(w_idx, a_idx, hero_idx, b_env, nobs, random.Random(pseed), done, failed, 1)
             else:
                 br = _SearchBranch(
@@ -429,15 +429,15 @@ def _step_branches(
         active = [b for b in branches if not b.done and b.obs is not None]
         if not active:
             break
-        probs_b, vals_b, _ = _batched_eval(scope, obs_space=obs_space, observations=[b.obs for b in active if b.obs])
+        probs_b, vals_b, _ = batched_eval(scope, obs_space=obs_space, observations=[b.obs for b in active if b.obs])
         for b, probs, val in zip(active, probs_b, vals_b, strict=True):
             if not probs:
                 b.done, b.failed = True, True
             elif b.steps >= limit:
-                b.leaf_value = _hero_win_prob(b.env, hero_idx=b.hero_idx, active_value=val)
+                b.leaf_value = hero_win_prob(b.env, hero_idx=b.hero_idx, active_value=val)
                 b.done = True
             else:
-                b.obs, b.done, b.failed = _safe_step(b.env, b.rng.choices(range(len(probs)), weights=probs, k=1)[0])
+                b.obs, b.done, b.failed = safe_step(b.env, b.rng.choices(range(len(probs)), weights=probs, k=1)[0])
                 b.steps += 1
 
 
@@ -486,7 +486,7 @@ def run_local_search(
 ) -> SearchResult:
     t0 = time.perf_counter()
     n_act = len(obs.action_space.actions)
-    probs_list, _, _ = _batched_eval(scope, obs_space=obs_space, observations=[obs])
+    probs_list, _, _ = batched_eval(scope, obs_space=obs_space, observations=[obs])
     priors = probs_list[0] if probs_list and probs_list[0] else tuple([1.0 / max(1, n_act)] * n_act)
     if n_act <= 1 or config.worlds <= 0:
         best_prior = max(range(n_act), key=lambda i: priors[i]) if n_act > 0 else 0
@@ -513,7 +513,7 @@ def run_local_search(
     per_act: list[list[float]] = [[] for _ in range(n_act)]
     for b in branches:
         if not b.failed:
-            per_act[b.action_idx].append(_terminal_score(b.env, hero_idx=hero, leaf_value=b.leaf_value))
+            per_act[b.action_idx].append(terminal_score(b.env, hero_idx=hero, leaf_value=b.leaf_value))
     stats = [_action_stats(s) for s in per_act]
     vals, ci95 = tuple(s[0] for s in stats), tuple(s[1] for s in stats)
     chosen = _select_action(vals, priors=priors, temperature=config.temperature, seed=seed)

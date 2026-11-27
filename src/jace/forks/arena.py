@@ -35,8 +35,8 @@ from jace.belief import (
 from jace.collect.decks import elemental_decks, load_human_deck_catalog
 from jace.eval.arena import ArenaMatchRecord, SearchConfigSummary, run_arena_match
 from jace.eval.deals import Deal, EnsemblePolicyPlayer, PlayerFn, PolicyPlayer
-from jace.eval.parallel import PairedDealResult, PlayerSpec, _open_spec_player
-from jace.forks.batch import _engine_error_types
+from jace.eval.parallel import PairedDealResult, PlayerSpec, open_spec_player
+from jace.forks.batch import engine_error_types
 from jace.forks.search import SearchConfig, SearchResult, build_belief_from_obs, run_local_search
 
 if TYPE_CHECKING:
@@ -201,7 +201,7 @@ def _open_player(
     spec: ArenaPlayerSpec, *, seed: int, deterministic: bool
 ) -> tuple[_RuntimePlayer, PolicyPlayer | EnsemblePolicyPlayer | SearchPlayer | None]:
     if not isinstance(spec, SearchPlayerSpec):
-        return _open_spec_player(spec, seed=seed, deterministic=deterministic)
+        return open_spec_player(spec, seed=seed, deterministic=deterministic)
     policy = load_checkpoint(str(spec.checkpoint))[0].eval()
     net = load_belief_net(spec.belief_net_path) if spec.belief_net_path is not None else None
     p = SearchPlayer(policy, policy.observation_space, prior=spec.prior, config=spec.search, belief_net=net, seed=seed)
@@ -226,7 +226,7 @@ def _play_leg(
             obs, _, term, trunc, _ = env.step(act)
             decisions, turns = decisions + 1, max(turns, int(obs.turn.turn_number))
         winner = env.winner_index() if term else None
-    except _engine_error_types() as exc:
+    except engine_error_types() as exc:
         _LOGGER.warning("search eval leg seed=%d aborted (%s): %s", deal.seed, type(exc).__name__, exc)
     return (int(winner) if winner is not None else None), decisions, turns
 

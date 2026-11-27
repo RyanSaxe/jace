@@ -6,8 +6,8 @@ processes (`torch.set_num_threads(1)` per worker) so 200 mirrored games run in ~
 and 400 in ~70 seconds. Because paired deals cancel out pure mana-screw and mana-flood
 splits (`1-1` deals contribute zero paired variance), `summarize_paired_deals` computes
 paired standard errors and 95% confidence intervals that detect +3 to +5 percentage point
-Limited Magic gains. Also provides `evaluate_agent_parallel`, `evaluate_ensemble_parallel`,
-and `paired_score_metrics` for flat metric logging.
+Limited Magic gains. Also provides `open_spec_player`, `evaluate_agent_parallel`,
+`evaluate_ensemble_parallel`, and `paired_score_metrics` for flat metric logging.
 """
 
 from __future__ import annotations
@@ -54,6 +54,7 @@ __all__ = (
     "evaluate_adaptive",
     "evaluate_agent_parallel",
     "evaluate_ensemble_parallel",
+    "open_spec_player",
     "paired_score_metrics",
     "play_adaptive_parallel",
     "play_deals_parallel",
@@ -183,7 +184,7 @@ def summarize_paired_deals(results: Sequence[PairedDealResult]) -> PairedMatchSc
     )
 
 
-def _open_spec_player(
+def open_spec_player(
     spec: PlayerSpec,
     *,
     seed: int,
@@ -265,8 +266,8 @@ def _eval_worker(
     spec_a, spec_b, indexed_deals, seed, deterministic, max_actions = args
     logging.getLogger("manabot").setLevel(logging.WARNING)
     torch.set_num_threads(1)
-    fn_a, ctx_a = _open_spec_player(spec_a, seed=seed, deterministic=deterministic)
-    fn_b, ctx_b = _open_spec_player(spec_b, seed=seed + 10_000, deterministic=deterministic)
+    fn_a, ctx_a = open_spec_player(spec_a, seed=seed, deterministic=deterministic)
+    fn_b, ctx_b = open_spec_player(spec_b, seed=seed + 10_000, deterministic=deterministic)
     counter_a = _TimingCounter()
     counter_b = _TimingCounter()
     timed_a = _wrap_timed_player(fn_a, counter_a)
