@@ -9,9 +9,11 @@ import {
   Moon,
   Sun,
   Swords,
+  Trophy,
   X,
 } from "lucide-react";
 import { type ReactNode, useCallback, useState } from "react";
+import { BenchmarksView } from "@/components/BenchmarksView";
 import { CompareView } from "@/components/CompareView";
 import { GamesExplorerView } from "@/components/GamesExplorerView";
 import { RunsView } from "@/components/RunsView";
@@ -28,6 +30,7 @@ import {
 } from "@/hooks/useStudioData";
 import { addWatchlistItem, removeWatchlistItem, updateWatchlistItem } from "@/lib/api";
 import type {
+  BenchmarksRouteState,
   BoardState,
   CompareTarget,
   GameTarget,
@@ -45,17 +48,28 @@ interface NavItemSpec {
 const NAV_ITEMS: ReadonlyArray<NavItemSpec> = [
   { id: "runs", label: "Runs", shortcut: "1" },
   { id: "games", label: "Games", shortcut: "2" },
-  { id: "compare", label: "Compare", shortcut: "3" },
-  { id: "tabletop", label: "Tabletop", shortcut: "4" },
-  { id: "watchlist", label: "Watchlist", shortcut: "5" },
+  { id: "benchmarks", label: "Benchmarks", shortcut: "3" },
+  { id: "compare", label: "Compare", shortcut: "4" },
+  { id: "tabletop", label: "Tabletop", shortcut: "5" },
+  { id: "watchlist", label: "Watchlist", shortcut: "6" },
 ];
 
 const SHORTCUT_TO_TAB: Record<string, NavTab> = {
   "1": "runs",
   "2": "games",
-  "3": "compare",
-  "4": "tabletop",
-  "5": "watchlist",
+  "3": "benchmarks",
+  "4": "compare",
+  "5": "tabletop",
+  "6": "watchlist",
+};
+
+const INITIAL_BENCHMARKS_STATE: BenchmarksRouteState = {
+  subView: "arena",
+  format: "",
+  anchor: "",
+  model: "",
+  modelA: "",
+  modelB: "",
 };
 
 const INITIAL_GAMES_FILTERS: GamesFilterState = {
@@ -74,6 +88,7 @@ const INITIAL_GAMES_FILTERS: GamesFilterState = {
 interface ParsedUrlState {
   tab: NavTab;
   deepDiveRunId: string | null;
+  benchmarksState: BenchmarksRouteState;
   compareTarget: CompareTarget | null;
   gameTarget: GameTarget | null;
 }
@@ -81,6 +96,7 @@ interface ParsedUrlState {
 const DEFAULT_URL_STATE: ParsedUrlState = {
   tab: "runs",
   deepDiveRunId: null,
+  benchmarksState: INITIAL_BENCHMARKS_STATE,
   compareTarget: null,
   gameTarget: null,
 };
@@ -88,6 +104,7 @@ const DEFAULT_URL_STATE: ParsedUrlState = {
 function NavIcon(props: { id: NavTab }): ReactNode {
   if (props.id === "runs") return <Activity className="w-4 h-4 shrink-0" />;
   if (props.id === "games") return <Layers className="w-4 h-4 shrink-0" />;
+  if (props.id === "benchmarks") return <Trophy className="w-4 h-4 shrink-0" />;
   if (props.id === "compare") return <GitCompareArrows className="w-4 h-4 shrink-0" />;
   if (props.id === "tabletop") return <Swords className="w-4 h-4 shrink-0" />;
   return <Bookmark className="w-4 h-4 shrink-0" />;
@@ -121,14 +138,43 @@ function parseTabletopParams(params: URLSearchParams): GameTarget | null {
   };
 }
 
-function parseHashState(): ParsedUrlState {
-  if (typeof window === "undefined") return DEFAULT_URL_STATE;
-  const raw = window.location.hash.replace(/^#\/?/, "");
-  const [pathPart = "runs", queryPart = ""] = raw.split("?");
-  const params = new URLSearchParams(queryPart);
+function parseBenchmarksHash(pathPart: string, params: URLSearchParams): BenchmarksRouteState {
+  const subView = pathPart === "benchmarks/puzzles" ? "puzzles" : "arena";
+  return {
+    subView,
+    format: params.get("format") ?? "",
+    anchor: params.get("anchor") ?? "",
+    model: params.get("model") ?? "",
+    modelA: params.get("a") ?? "",
+    modelB: params.get("b") ?? "",
+  };
+}
+
+function buildBenchmarksHash(state: BenchmarksRouteState): string {
+  const params = new URLSearchParams();
+  if (state.format) params.set("format", state.format);
+  if (state.subView === "arena") {
+    if (state.anchor) params.set("anchor", state.anchor);
+    if (state.model) params.set("model", state.model);
+  } else {
+    if (state.modelA) params.set("a", state.modelA);
+    if (state.modelB) params.set("b", state.modelB);
+  }
+  const qs = params.toString();
+  return `#benchmarks/${state.subView}${qs ? `?${qs}` : ""}`;
+}
+
+function parseRoutePath(pathPart: string, params: URLSearchParams): ParsedUrlState {
   if (pathPart.startsWith("runs/")) {
     const runId = decodeURIComponent(pathPart.slice("runs/".length));
     return { ...DEFAULT_URL_STATE, tab: "runs", deepDiveRunId: runId || null };
+  }
+  if (pathPart === "benchmarks" || pathPart.startsWith("benchmarks/")) {
+    return {
+      ...DEFAULT_URL_STATE,
+      tab: "benchmarks",
+      benchmarksState: parseBenchmarksHash(pathPart, params),
+    };
   }
   if (pathPart === "games" || pathPart === "watchlist") {
     return { ...DEFAULT_URL_STATE, tab: pathPart };
@@ -142,27 +188,39 @@ function parseHashState(): ParsedUrlState {
   return DEFAULT_URL_STATE;
 }
 
+function parseHashState(): ParsedUrlState {
+  if (typeof window === "undefined") return DEFAULT_URL_STATE;
+  const raw = window.location.hash.replace(/^#\/?/, "");
+  const [pathPart = "runs", queryPart = ""] = raw.split("?");
+  return parseRoutePath(pathPart, new URLSearchParams(queryPart));
+}
+
+function buildTabletopHash(target: GameTarget): string {
+  const p = new URLSearchParams({
+    run: target.run_id,
+    iter: String(target.iteration),
+    game: String(target.game_idx),
+    step: String(target.step),
+    seed: String(target.seed),
+  });
+  if (target.ckpt_a) p.set("a", target.ckpt_a);
+  if (target.ckpt_b) p.set("b", target.ckpt_b);
+  return `#tabletop?${p.toString()}`;
+}
+
+function buildCompareHash(target: CompareTarget): string {
+  const p = new URLSearchParams({ a: target.ckptA, b: target.ckptB });
+  if (target.runId) p.set("run", target.runId);
+  return `#compare?${p.toString()}`;
+}
+
 function buildHashUrl(state: ParsedUrlState): string {
   if (state.tab === "runs") {
     return state.deepDiveRunId ? `#runs/${encodeURIComponent(state.deepDiveRunId)}` : "#runs";
   }
-  if (state.tab === "compare" && state.compareTarget) {
-    const p = new URLSearchParams({ a: state.compareTarget.ckptA, b: state.compareTarget.ckptB });
-    if (state.compareTarget.runId) p.set("run", state.compareTarget.runId);
-    return `#compare?${p.toString()}`;
-  }
-  if (state.tab === "tabletop" && state.gameTarget) {
-    const p = new URLSearchParams({
-      run: state.gameTarget.run_id,
-      iter: String(state.gameTarget.iteration),
-      game: String(state.gameTarget.game_idx),
-      step: String(state.gameTarget.step),
-      seed: String(state.gameTarget.seed),
-    });
-    if (state.gameTarget.ckpt_a) p.set("a", state.gameTarget.ckpt_a);
-    if (state.gameTarget.ckpt_b) p.set("b", state.gameTarget.ckpt_b);
-    return `#tabletop?${p.toString()}`;
-  }
+  if (state.tab === "benchmarks") return buildBenchmarksHash(state.benchmarksState);
+  if (state.tab === "compare" && state.compareTarget) return buildCompareHash(state.compareTarget);
+  if (state.tab === "tabletop" && state.gameTarget) return buildTabletopHash(state.gameTarget);
   return `#${state.tab}`;
 }
 
@@ -354,6 +412,9 @@ export function App(): ReactNode {
   const initialUrl = parseHashState();
   const [tab, setTab] = useState<NavTab>(initialUrl.tab);
   const [deepDiveRunId, setDeepDiveRunId] = useState<string | null>(initialUrl.deepDiveRunId);
+  const [benchmarksState, setBenchmarksState] = useState<BenchmarksRouteState>(
+    initialUrl.benchmarksState,
+  );
   const [compareTarget, setCompareTarget] = useState<CompareTarget | null>(
     initialUrl.compareTarget,
   );
@@ -385,12 +446,13 @@ export function App(): ReactNode {
     const parsed = parseHashState();
     setTab(parsed.tab);
     setDeepDiveRunId(parsed.deepDiveRunId);
+    if (parsed.tab === "benchmarks") setBenchmarksState(parsed.benchmarksState);
     if (parsed.compareTarget) setCompareTarget(parsed.compareTarget);
     if (parsed.gameTarget) setActiveGame(parsed.gameTarget);
   }, []);
 
   useUrlHashSync(
-    buildHashUrl({ tab, deepDiveRunId, compareTarget, gameTarget: activeGame }),
+    buildHashUrl({ tab, deepDiveRunId, benchmarksState, compareTarget, gameTarget: activeGame }),
     handleHashChange,
   );
 
@@ -456,9 +518,105 @@ export function App(): ReactNode {
       });
   };
 
+  const handleComparePair = (target: CompareTarget): void => {
+    setCompareTarget(target);
+    setTab("compare");
+    setMobileMenuOpen(false);
+  };
+
+  const handleOpenPuzzles = (format: string): void => {
+    setBenchmarksState((prev) => ({ ...prev, subView: "puzzles", format }));
+    setTab("benchmarks");
+    setMobileMenuOpen(false);
+  };
+
   const runningCount = runs.filter((r) => r.status === "running").length;
   const desktopExpanded = tab !== "tabletop";
   const bannerError = runsError ? `Backend connection error: ${runsError}` : actionError;
+
+  const activeMainView = (): ReactNode => {
+    switch (tab) {
+      case "runs":
+        return (
+          <RunsView
+            runs={runs}
+            details={details}
+            checkpoints={checkpoints}
+            experiments={experiments}
+            evalMetricKeys={evalMetricKeys}
+            trainMetricKeys={trainMetricKeys}
+            selectedRunId={deepDiveRunId}
+            onSelectRunDeepDive={setDeepDiveRunId}
+            loading={runsLoading}
+            error={runsError}
+            onReload={reload}
+            onBrowseGames={(runId): void => {
+              setGamesFilters({ ...INITIAL_GAMES_FILTERS, runId });
+              setTab("games");
+            }}
+            onComparePair={handleComparePair}
+          />
+        );
+      case "games":
+        return (
+          <GamesExplorerView
+            runs={runs}
+            filters={gamesFilters}
+            onChangeFilters={setGamesFilters}
+            onOpenTabletop={openTabletop}
+          />
+        );
+      case "benchmarks":
+        return (
+          <BenchmarksView
+            checkpoints={checkpoints}
+            routeState={benchmarksState}
+            onChangeRouteState={setBenchmarksState}
+            onOpenTabletop={openTabletop}
+            onComparePair={handleComparePair}
+          />
+        );
+      case "compare":
+        return (
+          <CompareView
+            runs={runs}
+            checkpoints={checkpoints}
+            initialTarget={compareTarget}
+            onOpenTabletop={openTabletop}
+          />
+        );
+      case "tabletop":
+        return (
+          <TabletopView
+            target={activeGame}
+            checkpoints={checkpoints}
+            watchlist={watchlist}
+            onChangeStep={(step): void =>
+              setActiveGame((prev) => (prev ? { ...prev, step } : null))
+            }
+            onPinPosition={handlePinPosition}
+            onBackToGames={(): void => setTab("games")}
+          />
+        );
+      case "watchlist":
+        return (
+          <WatchlistView
+            items={watchlist}
+            loading={watchlistLoading}
+            onOpenTabletop={openTabletop}
+            onRemove={handleRemoveWatchlist}
+            onUpdate={async (itemId, patch): Promise<void> => {
+              setActionError(null);
+              const updated = await updateWatchlistItem(itemId, patch);
+              setWatchlist((prev) => prev.map((item) => (item.id === itemId ? updated : item)));
+            }}
+            onOpenPuzzles={handleOpenPuzzles}
+          />
+        );
+      default:
+        return null;
+    }
+  };
 
   return (
     <div className="flex h-[100dvh] w-full overflow-hidden bg-[var(--bg)] text-[var(--text)]">
@@ -525,77 +683,7 @@ export function App(): ReactNode {
           </div>
         ) : null}
 
-        <main className="flex-1 min-h-0 overflow-hidden">
-          {tab === "runs" ? (
-            <RunsView
-              runs={runs}
-              details={details}
-              checkpoints={checkpoints}
-              experiments={experiments}
-              evalMetricKeys={evalMetricKeys}
-              trainMetricKeys={trainMetricKeys}
-              selectedRunId={deepDiveRunId}
-              onSelectRunDeepDive={setDeepDiveRunId}
-              loading={runsLoading}
-              error={runsError}
-              onReload={reload}
-              onBrowseGames={(runId): void => {
-                setGamesFilters({ ...INITIAL_GAMES_FILTERS, runId });
-                setTab("games");
-              }}
-              onComparePair={(target): void => {
-                setCompareTarget(target);
-                setTab("compare");
-                setMobileMenuOpen(false);
-              }}
-            />
-          ) : null}
-
-          {tab === "games" ? (
-            <GamesExplorerView
-              runs={runs}
-              filters={gamesFilters}
-              onChangeFilters={setGamesFilters}
-              onOpenTabletop={openTabletop}
-            />
-          ) : null}
-
-          {tab === "compare" ? (
-            <CompareView
-              runs={runs}
-              checkpoints={checkpoints}
-              initialTarget={compareTarget}
-              onOpenTabletop={openTabletop}
-            />
-          ) : null}
-
-          {tab === "tabletop" ? (
-            <TabletopView
-              target={activeGame}
-              checkpoints={checkpoints}
-              watchlist={watchlist}
-              onChangeStep={(step): void =>
-                setActiveGame((prev) => (prev ? { ...prev, step } : null))
-              }
-              onPinPosition={handlePinPosition}
-              onBackToGames={(): void => setTab("games")}
-            />
-          ) : null}
-
-          {tab === "watchlist" ? (
-            <WatchlistView
-              items={watchlist}
-              loading={watchlistLoading}
-              onOpenTabletop={openTabletop}
-              onRemove={handleRemoveWatchlist}
-              onUpdate={async (itemId, patch): Promise<void> => {
-                setActionError(null);
-                const updated = await updateWatchlistItem(itemId, patch);
-                setWatchlist((prev) => prev.map((item) => (item.id === itemId ? updated : item)));
-              }}
-            />
-          ) : null}
-        </main>
+        <main className="flex-1 min-h-0 overflow-hidden">{activeMainView()}</main>
       </div>
     </div>
   );

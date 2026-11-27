@@ -29,10 +29,10 @@ storage, and runnable CLIs. Imports flow downward only and are enforced by
 | Package / path | Owns | Engine imports |
 | --- | --- | --- |
 | `src/jace/train/` | Top-level gameplay self-play CLIs (`full_data`, `ten_decks`, `harness`) | Yes |
-| `src/jace/studio/` | Local evaluation workbench backend: FastAPI, DuckDB/Parquet index, `managym` replay, board serialization, playout/compare analysis, Scryfall cache, and Fork API (`app`, `runs`, `index`, `board`, `replay`, `inference`, `analysis`, `scryfall`) | Yes |
+| `src/jace/studio/` | Local evaluation workbench backend: FastAPI, DuckDB/Parquet index, `managym` replay, board serialization, playout/compare analysis, Arena/puzzle benchmarks, Scryfall cache, and Fork API (`app`, `runs`, `index`, `board`, `replay`, `inference`, `analysis`, `benchmarks`, `scryfall`) | Yes |
 | `src/jace/pretrain/` | Supervised pretraining CLIs and helpers (`draft`, `decks`, `common`, `formats`, `schedules`, `supervised`, `deck_measures`) | No |
 | `src/jace/forks/` | Counterfactual fork collection, batched playouts, and horizon audits (`collect`, `batch`, `audit`) | Yes |
-| `src/jace/eval/` | Mirrored paired deals, parallel adaptive judging, forensics, and probe diffs (`deals`, `parallel`, `forensics`, `diffs`) | Yes |
+| `src/jace/eval/` | Mirrored paired deals, parallel adaptive judging, Bradley-Terry Arena ledger, local report, tactical puzzles, forensics, and probe diffs (`deals`, `parallel`, `arena`, `report`, `puzzles`, `forensics`, `diffs`) | Yes |
 | `src/jace/collect/` | v11 `ActorCritic` factory, deck/curriculum loading, and in-process / multi-process collectors (`agent`, `decks`, `local`, `pool`) | Yes |
 | `src/jace/rl/` | Pure-tensor RL math (`credit`, `losses`, `select`, `schedules`, `ema`, `pool`, `prefetch`, `diagnostics`) and collection bridge (`loop`) | Only `loop.py` |
 | `src/jace/draft/` | Booster specs, multi-pod draft state machine, and `DrafterModel` | No |

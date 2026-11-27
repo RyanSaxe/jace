@@ -1,6 +1,6 @@
-/** Tabletop MTG zone composites, floating hover card zoom, direct-on-board edit popovers, and timeline bar. */
+/** Responsive tabletop MTG zone composites, scale helpers, stack popover, and direct-on-board edit popovers. */
 
-import { ChevronLeft, ChevronRight, Plus, Repeat2, Sparkles, Trash2, X } from "lucide-react";
+import { Plus, Repeat2, Trash2, X } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { Button } from "@/components/ui/Primitives";
 import { cardImageUrl } from "@/lib/api";
@@ -11,7 +11,6 @@ import type {
   PlayerState,
   PovMode,
   StackItem,
-  TimelinePoint,
 } from "@/lib/types";
 
 export interface HoverCardInfo {
@@ -59,58 +58,82 @@ function chipCls(active: boolean): string {
     : "px-2 py-0.5 rounded-sm cursor-pointer text-[var(--text-3)]";
 }
 
+export type TabletopScale = "desktop" | "mobile-tall" | "mobile-short";
+
+function landSizeCls(scale: TabletopScale, dense: boolean): string {
+  if (scale === "mobile-short") return dense ? "w-[32px] h-[44px]" : "w-[34px] h-[47px]";
+  if (scale === "mobile-tall") return dense ? "w-[36px] h-[50px]" : "w-[38px] h-[52px]";
+  return dense ? "w-[42px] h-[56px]" : "w-[48px] h-[66px]";
+}
+
 export function LandPilesRow(props: {
   piles: LandPile[];
   compact?: boolean;
+  scale?: TabletopScale;
   onHover: (info: HoverCardInfo | null) => void;
 }): ReactNode {
   const seen = new Map<string, number>();
+  const scale = props.scale ?? "desktop";
   const dense = Boolean(props.compact) || props.piles.length >= 6;
-  const size = dense ? "w-[42px] h-[56px]" : "w-[48px] h-[66px]";
+  const size = landSizeCls(scale, dense);
+  const gap = dense || scale !== "desktop" ? "gap-1.5" : "gap-2";
+  const items = props.piles.map((pile) => {
+    const key = `${pile.name}-${pile.tapped ? "t" : "u"}-${pile.id ?? "basic"}`;
+    const occ = (seen.get(key) ?? 0) + 1;
+    seen.set(key, occ);
+    return (
+      <div
+        key={`${key}#${occ}`}
+        onMouseEnter={(e): void =>
+          props.onHover({
+            name: pile.name,
+            tapped: pile.tapped,
+            count: pile.count,
+            anchorX: e.clientX,
+            anchorY: e.clientY,
+          })
+        }
+        onMouseLeave={(): void => props.onHover(null)}
+        className={`relative ${size} shrink-0 cursor-pointer transition-transform ${pile.tapped ? "card-tapped" : "hover:-translate-y-1"}`}
+      >
+        <div className="relative w-full h-full rounded-[5px] overflow-hidden border border-black/45 shadow-[var(--shadow-sm)] bg-[#1c1917]">
+          <img
+            src={cardImageUrl(pile.name)}
+            alt={pile.name}
+            className="w-full h-full object-cover"
+          />
+          <span className="tabular absolute top-0.5 right-0.5 rounded bg-black/88 px-1 text-[9px] font-bold text-white">
+            ×{pile.count}
+          </span>
+          {pile.tapped ? (
+            <span className="tabular absolute bottom-0.5 left-0.5 rounded bg-black/85 px-1 text-[8px] font-bold text-amber-400">
+              T
+            </span>
+          ) : null}
+        </div>
+      </div>
+    );
+  });
+  if (props.compact) {
+    return <div className={`flex items-center flex-nowrap ${gap}`}>{items}</div>;
+  }
   return (
-    <div className={`flex items-center justify-center flex-nowrap ${dense ? "gap-1.5" : "gap-2"}`}>
-      {props.piles.map((pile) => {
-        const key = `${pile.name}-${pile.tapped ? "t" : "u"}-${pile.id ?? "basic"}`;
-        const occ = (seen.get(key) ?? 0) + 1;
-        seen.set(key, occ);
-        return (
-          <div
-            key={`${key}#${occ}`}
-            onMouseEnter={(e): void =>
-              props.onHover({
-                name: pile.name,
-                tapped: pile.tapped,
-                count: pile.count,
-                anchorX: e.clientX,
-                anchorY: e.clientY,
-              })
-            }
-            onMouseLeave={(): void => props.onHover(null)}
-            className={`relative ${size} shrink-0 cursor-pointer transition-transform ${pile.tapped ? "card-tapped" : "hover:-translate-y-1"}`}
-          >
-            <div className="relative w-full h-full rounded-[5px] overflow-hidden border border-black/45 shadow-[var(--shadow-sm)] bg-[#1c1917]">
-              <img
-                src={cardImageUrl(pile.name)}
-                alt={pile.name}
-                className="w-full h-full object-cover"
-              />
-              <span className="tabular absolute top-0.5 right-0.5 rounded bg-black/88 px-1 text-[9px] font-bold text-white">
-                ×{pile.count}
-              </span>
-              {pile.tapped ? (
-                <span className="tabular absolute bottom-0.5 left-0.5 rounded bg-black/85 px-1 text-[8px] font-bold text-amber-400">
-                  T
-                </span>
-              ) : null}
-            </div>
-          </div>
-        );
-      })}
+    <div className="w-full min-w-0 overflow-x-auto no-scrollbar py-1">
+      <div className={`w-max mx-auto flex items-center flex-nowrap px-1.5 ${gap}`}>{items}</div>
     </div>
   );
 }
 
-function cardWidth(count: number, compact: boolean): number {
+function mobileCardWidth(count: number, compact: boolean, short: boolean): number {
+  if (compact) return short ? 34 : 40;
+  if (count >= 7) return short ? 44 : 48;
+  if (count >= 5) return short ? 48 : 54;
+  if (count >= 3) return short ? 50 : 58;
+  return short ? 52 : 64;
+}
+
+function cardWidth(count: number, compact: boolean, scale: TabletopScale): number {
+  if (scale !== "desktop") return mobileCardWidth(count, compact, scale === "mobile-short");
   if (compact) return 48;
   if (count >= 9) return 56;
   if (count >= 7) return 64;
@@ -190,77 +213,116 @@ function PermCardBadges(props: { perm: PermanentState; pt: string | undefined })
 export function PermanentsRow(props: {
   permanents: PermanentState[];
   compact?: boolean;
+  scale?: TabletopScale;
   highlightIds: ReadonlySet<number>;
   highlightTone: "target" | "source";
   permNames?: ReadonlyMap<number, string>;
   onHover: (info: HoverCardInfo | null) => void;
   onPinCard?: (info: HoverCardInfo) => void;
 }): ReactNode {
-  const width = cardWidth(props.permanents.length, Boolean(props.compact));
+  const scale = props.scale ?? "desktop";
+  const width = cardWidth(props.permanents.length, Boolean(props.compact), scale);
   const height = Math.round(width * 1.38);
+  const cards = props.permanents.map((perm) => {
+    const pt = perm.is_creature ? `${perm.power}/${perm.toughness}` : undefined;
+    const blockingName =
+      perm.blocking_id === null || perm.blocking_id === undefined
+        ? undefined
+        : props.permNames?.get(perm.blocking_id);
+    const info: HoverCardInfo = {
+      name: perm.name,
+      pt,
+      damage: perm.damage,
+      counters: perm.plus1_counters,
+      tapped: perm.tapped,
+      token: perm.is_token,
+      sick: perm.sick,
+      attacking: perm.attacking,
+      blocking: perm.blocking,
+      blockingName,
+      copyIndex: perm.copy_index,
+    };
+    const suffix =
+      perm.copy_index === null || perm.copy_index === undefined ? "" : ` #${perm.copy_index}`;
+    return (
+      <button
+        key={perm.id}
+        type="button"
+        aria-label={`Inspect ${perm.name}${suffix}`}
+        style={{ width, height }}
+        onMouseEnter={(e): void =>
+          props.onHover({ ...info, anchorX: e.clientX, anchorY: e.clientY })
+        }
+        onMouseLeave={(): void => props.onHover(null)}
+        onClick={(e): void =>
+          props.onPinCard?.({ ...info, anchorX: e.clientX, anchorY: e.clientY })
+        }
+        className={`relative p-0 shrink-0 rounded-[7px] overflow-hidden border-[1.5px] bg-[#18181b] shadow-[var(--shadow-sm)] cursor-pointer transition-all ${permRing(perm, props.highlightIds.has(perm.id), props.highlightTone)} ${perm.tapped ? "card-tapped mx-1" : "hover:-translate-y-1.5 hover:z-20"}`}
+      >
+        <img src={cardImageUrl(perm.name)} alt={perm.name} className="w-full h-full object-cover" />
+        <PermCardBadges perm={perm} pt={pt} />
+      </button>
+    );
+  });
+  if (props.compact) {
+    return <div className="flex items-center gap-1.5 lg:gap-2 flex-nowrap">{cards}</div>;
+  }
   return (
-    <div className="flex items-center justify-center gap-2 flex-nowrap min-w-0 overflow-x-auto no-scrollbar py-1">
-      {props.permanents.map((perm) => {
-        const pt = perm.is_creature ? `${perm.power}/${perm.toughness}` : undefined;
-        const blockingName =
-          perm.blocking_id === null || perm.blocking_id === undefined
-            ? undefined
-            : props.permNames?.get(perm.blocking_id);
-        const info: HoverCardInfo = {
-          name: perm.name,
-          pt,
-          damage: perm.damage,
-          counters: perm.plus1_counters,
-          tapped: perm.tapped,
-          token: perm.is_token,
-          sick: perm.sick,
-          attacking: perm.attacking,
-          blocking: perm.blocking,
-          blockingName,
-          copyIndex: perm.copy_index,
-        };
-        const suffix =
-          perm.copy_index === null || perm.copy_index === undefined ? "" : ` #${perm.copy_index}`;
-        return (
-          <button
-            key={perm.id}
-            type="button"
-            aria-label={`Inspect ${perm.name}${suffix}`}
-            style={{ width, height }}
-            onMouseEnter={(e): void =>
-              props.onHover({ ...info, anchorX: e.clientX, anchorY: e.clientY })
-            }
-            onMouseLeave={(): void => props.onHover(null)}
-            onClick={(e): void =>
-              props.onPinCard?.({ ...info, anchorX: e.clientX, anchorY: e.clientY })
-            }
-            className={`relative p-0 shrink-0 rounded-[7px] overflow-hidden border-[1.5px] bg-[#18181b] shadow-[var(--shadow-sm)] cursor-pointer transition-all ${permRing(perm, props.highlightIds.has(perm.id), props.highlightTone)} ${perm.tapped ? "card-tapped mx-1" : "hover:-translate-y-1.5 hover:z-20"}`}
-          >
-            <img
-              src={cardImageUrl(perm.name)}
-              alt={perm.name}
-              className="w-full h-full object-cover"
-            />
-            <PermCardBadges perm={perm} pt={pt} />
-          </button>
-        );
-      })}
+    <div className="w-full min-w-0 overflow-x-auto no-scrollbar py-1.5">
+      <div className="w-max mx-auto flex items-center gap-1.5 lg:gap-2 flex-nowrap px-2">
+        {cards}
+      </div>
     </div>
   );
 }
 
-function handOverlapPx(count: number, compact: boolean): number {
+function handOverlapPx(count: number, compact: boolean, mobile: boolean): number {
+  if (mobile) {
+    if (compact) return count >= 6 ? -16 : -12;
+    if (count >= 7) return -22;
+    return count >= 5 ? -16 : -12;
+  }
   if (compact) return count >= 7 ? -16 : -10;
   if (count >= 8) return -26;
   if (count >= 6) return -18;
   return -10;
 }
 
-function editRingCls(editMode: boolean, selected: boolean): string {
+function editRingCls(editMode: boolean, selected: boolean, mobile: boolean): string {
   if (!editMode) return "";
-  return selected
-    ? "ring-2 ring-[var(--fork)] -translate-y-4 z-40"
-    : "hover:ring-2 hover:ring-[var(--fork)]";
+  if (selected) {
+    return mobile
+      ? "ring-2 ring-[var(--fork)] z-40"
+      : "ring-2 ring-[var(--fork)] -translate-y-4 z-40";
+  }
+  return "hover:ring-2 hover:ring-[var(--fork)]";
+}
+
+function handCardLayout(
+  isHero: boolean,
+  scale: TabletopScale,
+): { cardCls: string; rowCls: string } {
+  if (scale === "desktop") {
+    return isHero
+      ? {
+          cardCls:
+            "w-[74px] h-[104px] sm:w-[84px] sm:h-[116px] translate-y-[32px] hover:-translate-y-4 hover:scale-110",
+          rowCls: "items-end h-[70px] sm:h-[76px]",
+        }
+      : {
+          cardCls:
+            "w-[64px] h-[90px] sm:w-[70px] sm:h-[98px] -translate-y-[30px] hover:translate-y-3 hover:scale-110",
+          rowCls: "items-start h-[54px] sm:h-[58px]",
+        };
+  }
+  if (isHero) {
+    return scale === "mobile-short"
+      ? { cardCls: "w-[50px] h-[69px]", rowCls: "items-center h-[70px]" }
+      : { cardCls: "w-[58px] h-[80px]", rowCls: "items-center h-[82px]" };
+  }
+  return scale === "mobile-short"
+    ? { cardCls: "w-[44px] h-[60px]", rowCls: "items-center h-[62px]" }
+    : { cardCls: "w-[52px] h-[72px]", rowCls: "items-center h-[74px]" };
 }
 
 export function HandFanView(props: {
@@ -268,12 +330,15 @@ export function HandFanView(props: {
   cards: string[];
   hiddenCount: number;
   hidden: boolean;
+  scale?: TabletopScale;
   editMode?: boolean;
   selectedEditKey?: string | null;
   onHover: (info: HoverCardInfo | null) => void;
   onPinCard?: (info: HoverCardInfo) => void;
   onSelectCardForEdit?: (target: HandCardEditTarget) => void;
 }): ReactNode {
+  const scale = props.scale ?? "desktop";
+  const mobile = scale !== "desktop";
   const count = props.hidden ? props.hiddenCount : props.cards.length;
   if (count === 0) {
     return (
@@ -283,68 +348,72 @@ export function HandFanView(props: {
     );
   }
   if (props.hidden) {
-    const overlap = handOverlapPx(count, true);
+    const overlap = handOverlapPx(count, true, mobile);
+    const backs = Array.from({ length: count }, (_, idx) => (
+      <div
+        key={`h-${idx + 1}`}
+        style={idx > 0 ? { marginLeft: overlap } : undefined}
+        title="Hidden in Hero POV"
+        className={`card-back rounded-[5px] shrink-0 ${mobile ? "w-[32px] h-[44px]" : "w-[42px] h-[58px] -translate-y-[24px]"}`}
+      />
+    ));
+    if (mobile) {
+      return (
+        <div className="w-full min-w-0 overflow-x-auto no-scrollbar">
+          <div className="w-max mx-auto flex items-center h-[44px] px-1">{backs}</div>
+        </div>
+      );
+    }
+    return <div className="flex items-start justify-center h-[34px] overflow-visible">{backs}</div>;
+  }
+  const isHero = props.side === "hero";
+  const overlap = handOverlapPx(count, !isHero, mobile);
+  const { cardCls, rowCls } = handCardLayout(isHero, scale);
+  const buttons = keyByOccurrence(props.cards).map((entry) => {
+    const editKey = `${props.side}:${entry.key}`;
     return (
-      <div className="flex items-start justify-center h-[34px] overflow-visible">
-        {Array.from({ length: count }, (_, idx) => (
-          <div
-            key={`h-${idx + 1}`}
-            style={idx > 0 ? { marginLeft: overlap } : undefined}
-            title="Hidden in Hero POV"
-            className="card-back w-[42px] h-[58px] -translate-y-[24px] rounded-[5px] shrink-0"
-          />
-        ))}
+      <button
+        key={entry.key}
+        type="button"
+        aria-label={props.editMode ? `Edit ${entry.name} in hand` : `Inspect ${entry.name}`}
+        style={entry.order > 0 ? { marginLeft: overlap } : undefined}
+        onMouseEnter={(e): void =>
+          props.onHover({ name: entry.name, anchorX: e.clientX, anchorY: e.clientY })
+        }
+        onMouseLeave={(): void => props.onHover(null)}
+        onClick={(e): void => {
+          if (props.editMode && props.onSelectCardForEdit) {
+            const r = e.currentTarget.getBoundingClientRect();
+            props.onHover(null);
+            props.onSelectCardForEdit({
+              side: props.side,
+              cardName: entry.name,
+              key: editKey,
+              anchorX: r.left + r.width / 2,
+              anchorY: r.top,
+            });
+            return;
+          }
+          props.onPinCard?.({ name: entry.name, anchorX: e.clientX, anchorY: e.clientY });
+        }}
+        className={`relative p-0 ${cardCls} rounded-[7px] overflow-hidden border border-black/45 bg-[#1c1917] shrink-0 shadow-[var(--shadow-md)] cursor-pointer transition-all duration-150 hover:z-40 ${editRingCls(Boolean(props.editMode), props.selectedEditKey === editKey, mobile)}`}
+      >
+        <img
+          src={cardImageUrl(entry.name)}
+          alt={entry.name}
+          className="w-full h-full object-cover object-top"
+        />
+      </button>
+    );
+  });
+  if (mobile) {
+    return (
+      <div className="w-full min-w-0 overflow-x-auto no-scrollbar">
+        <div className={`w-max mx-auto flex px-1 ${rowCls}`}>{buttons}</div>
       </div>
     );
   }
-  const isHero = props.side === "hero";
-  const overlap = handOverlapPx(count, !isHero);
-  const cardCls = isHero
-    ? "w-[74px] h-[104px] sm:w-[84px] sm:h-[116px] translate-y-[32px] hover:-translate-y-4 hover:scale-110"
-    : "w-[64px] h-[90px] sm:w-[70px] sm:h-[98px] -translate-y-[30px] hover:translate-y-3 hover:scale-110";
-  return (
-    <div
-      className={`flex justify-center overflow-visible ${isHero ? "items-end h-[70px] sm:h-[76px]" : "items-start h-[54px] sm:h-[58px]"}`}
-    >
-      {keyByOccurrence(props.cards).map((entry) => {
-        const editKey = `${props.side}:${entry.key}`;
-        return (
-          <button
-            key={entry.key}
-            type="button"
-            aria-label={props.editMode ? `Edit ${entry.name} in hand` : `Inspect ${entry.name}`}
-            style={entry.order > 0 ? { marginLeft: overlap } : undefined}
-            onMouseEnter={(e): void =>
-              props.onHover({ name: entry.name, anchorX: e.clientX, anchorY: e.clientY })
-            }
-            onMouseLeave={(): void => props.onHover(null)}
-            onClick={(e): void => {
-              if (props.editMode && props.onSelectCardForEdit) {
-                const r = e.currentTarget.getBoundingClientRect();
-                props.onHover(null);
-                props.onSelectCardForEdit({
-                  side: props.side,
-                  cardName: entry.name,
-                  key: editKey,
-                  anchorX: r.left + r.width / 2,
-                  anchorY: r.top,
-                });
-                return;
-              }
-              props.onPinCard?.({ name: entry.name, anchorX: e.clientX, anchorY: e.clientY });
-            }}
-            className={`relative p-0 ${cardCls} rounded-[7px] overflow-hidden border border-black/45 bg-[#1c1917] shrink-0 shadow-[var(--shadow-md)] cursor-pointer transition-all duration-150 hover:z-40 ${editRingCls(Boolean(props.editMode), props.selectedEditKey === editKey)}`}
-          >
-            <img
-              src={cardImageUrl(entry.name)}
-              alt={entry.name}
-              className="w-full h-full object-cover object-top"
-            />
-          </button>
-        );
-      })}
-    </div>
-  );
+  return <div className={`flex justify-center overflow-visible ${rowCls}`}>{buttons}</div>;
 }
 
 function clampPopoverPos(args: {
@@ -770,7 +839,7 @@ export function StackOverlay(props: {
 }): ReactNode {
   if (props.stack.length === 0 || !props.open) return null;
   return (
-    <div className="absolute top-3 right-[78px] z-30 w-[236px] max-w-[calc(100%-92px)] max-h-[68%] rounded-[9px] border border-[var(--border-strong)] bg-[var(--surface)]/95 backdrop-blur-sm shadow-[var(--shadow-lg)] p-2 flex flex-col gap-1.5 overflow-y-auto">
+    <div className="absolute top-[52%] left-2 right-2 sm:left-auto sm:top-3 sm:right-[78px] z-30 sm:w-[236px] sm:max-w-[calc(100%-92px)] max-h-[44%] sm:max-h-[68%] rounded-[9px] border border-[var(--border-strong)] bg-[var(--surface)]/95 backdrop-blur-sm shadow-[var(--shadow-lg)] p-2 flex flex-col gap-1.5 overflow-y-auto">
       <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[var(--text-2)]">
         <span>Stack ({props.stack.length})</span>
         <button
@@ -819,145 +888,6 @@ export function StackOverlay(props: {
           </div>
         </div>
       ))}
-    </div>
-  );
-}
-
-function TimelineCurveSvg(props: {
-  timeline: TimelinePoint[];
-  currentTurn: number;
-  onSelectStep: (step: number) => void;
-}): ReactNode {
-  const pts = props.timeline;
-  if (pts.length < 2) return null;
-  const stepX = 816 / (pts.length - 1);
-  const coords = pts.map((p, i) => ({
-    turn: p.turn,
-    step: p.step,
-    x: 22 + i * stepX,
-    y: 25 - Math.max(0, Math.min(1, p.eval_win)) * 21,
-  }));
-  const poly = coords.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
-  const area = `${coords[0]?.x ?? 22},25 ${poly} ${coords[coords.length - 1]?.x ?? 22},25`;
-  const stride = Math.max(1, Math.ceil(coords.length / 18));
-  return (
-    <svg viewBox="0 0 860 38" className="w-full h-[38px] block">
-      <line x1={22} y1={15} x2={838} y2={15} stroke="var(--border)" strokeDasharray="3 3" />
-      <polygon points={area} fill="var(--accent-soft)" />
-      <polyline
-        points={poly}
-        fill="none"
-        stroke="var(--accent)"
-        strokeWidth="1.8"
-        strokeLinejoin="round"
-      />
-      {coords.map((c, idx) => {
-        const active = c.turn === props.currentTurn;
-        return (
-          <g
-            key={c.turn}
-            onClick={(): void => props.onSelectStep(c.step)}
-            className="cursor-pointer"
-          >
-            <circle
-              cx={c.x}
-              cy={c.y}
-              r={active ? 4.5 : 3}
-              fill={active ? "var(--accent)" : "var(--text-2)"}
-              stroke="var(--surface)"
-              strokeWidth="1.4"
-            />
-            {active || idx === coords.length - 1 || idx % stride === 0 ? (
-              <text
-                x={c.x}
-                y={37}
-                textAnchor="middle"
-                fontSize="9"
-                fill={active ? "var(--text)" : "var(--text-3)"}
-                fontWeight={active ? 700 : 500}
-                className="tabular"
-              >
-                T{c.turn}
-              </text>
-            ) : null}
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
-
-export function TurnTimelineBar(props: {
-  timeline: TimelinePoint[];
-  evalSource?: string;
-  currentStep: number;
-  totalSteps: number;
-  maxPlayableStep: number;
-  turningPointStep?: number;
-  currentTurn: number;
-  onSelectStep: (step: number) => void;
-}): ReactNode {
-  const upper = Math.max(0, Math.min(Math.max(0, props.totalSteps - 1), props.maxPlayableStep));
-  const hasTurnPt =
-    props.turningPointStep !== undefined &&
-    props.turningPointStep >= 0 &&
-    props.turningPointStep <= upper;
-  return (
-    <div className="relative shrink-0 border-t border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 hidden lg:flex flex-col gap-1">
-      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--text-2)]">
-        <div className="flex items-center gap-2 min-w-0">
-          <strong className="text-[var(--text)] whitespace-nowrap">
-            {props.evalSource === "model" ? "Model Win%" : "Turn Timeline"}
-          </strong>
-          <span className="tabular whitespace-nowrap">
-            T{props.currentTurn} · Step {props.currentStep}/{upper}
-          </span>
-          {hasTurnPt ? (
-            <button
-              type="button"
-              onClick={(): void => props.onSelectStep(props.turningPointStep ?? 0)}
-              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10.5px] border cursor-pointer ${props.currentStep === props.turningPointStep ? "border-[var(--warn)] bg-[var(--warn-soft)] text-[var(--warn)] font-semibold" : "border-[var(--border)] text-[var(--text-2)]"}`}
-            >
-              <Sparkles className="w-3 h-3" />
-              Turning Pt #{props.turningPointStep}
-            </button>
-          ) : null}
-        </div>
-        <div className="flex items-center gap-1.5">
-          <input
-            type="range"
-            min={0}
-            max={Math.max(0, upper)}
-            value={Math.min(props.currentStep, upper)}
-            aria-label="Scrub game step"
-            onChange={(e): void => props.onSelectStep(Number(e.target.value))}
-            className="w-32 sm:w-44 accent-[var(--accent)] cursor-pointer"
-          />
-          <Button
-            size="sm"
-            disabled={props.currentStep <= 0}
-            onClick={(): void => props.onSelectStep(Math.max(0, props.currentStep - 1))}
-            title="Previous step"
-            className="px-1.5 py-1"
-          >
-            <ChevronLeft className="w-3.5 h-3.5" />
-          </Button>
-          <Button
-            size="sm"
-            disabled={props.currentStep >= upper}
-            onClick={(): void => props.onSelectStep(Math.min(upper, props.currentStep + 1))}
-            title="Next step"
-            className="px-1.5 py-1"
-          >
-            <ChevronRight className="w-3.5 h-3.5" />
-          </Button>
-        </div>
-      </div>
-      <TimelineCurveSvg
-        timeline={props.timeline}
-        currentTurn={props.currentTurn}
-        onSelectStep={props.onSelectStep}
-      />
     </div>
   );
 }
