@@ -13,10 +13,12 @@ and `paired_score_metrics` for flat metric logging.
 from __future__ import annotations
 
 import copy
+import functools
 import logging
 import math
 import multiprocessing as mp
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -39,6 +41,7 @@ from jace.eval.deals import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    import managym
     from manabot.backends.torch.policy import ActorCritic
     from manabot.env.observation import ObservationSpace
 
@@ -72,6 +75,10 @@ class PairedDealResult:
     draws: int
     decisions: int
     turns: int
+    decision_ms_a: float = 0.0
+    decision_ms_b: float = 0.0
+    decisions_a: int = 0
+    decisions_b: int = 0
 
     @property
     def win_rate(self) -> float:
@@ -199,6 +206,59 @@ def _open_spec_player(
     return player, player
 
 
+class _TimingCounter:
+    __slots__ = ("decisions", "elapsed_ms")
+
+    def __init__(self) -> None:
+        self.decisions = 0
+        self.elapsed_ms = 0.0
+
+    def reset(self) -> None:
+        self.decisions = 0
+        self.elapsed_ms = 0.0
+
+    def timed_call(self, fn: PlayerFn, obs: managym.Observation) -> int:
+        start = time.perf_counter()
+        action = fn(obs)
+        self.elapsed_ms += (time.perf_counter() - start) * 1000.0
+        self.decisions += 1
+        return action
+
+
+class _TimedPolicyPlayer(PolicyPlayer):
+    def __init__(self, inner: PolicyPlayer, counter: _TimingCounter) -> None:
+        self._inner = inner
+        self._counter = counter
+
+    @property
+    def needs_decision_memory(self) -> bool:
+        return self._inner.needs_decision_memory
+
+    def __call__(self, obs: managym.Observation) -> int:
+        return self._counter.timed_call(self._inner, obs)
+
+
+class _TimedEnsemblePlayer(EnsemblePolicyPlayer):
+    def __init__(self, inner: EnsemblePolicyPlayer, counter: _TimingCounter) -> None:
+        self._inner = inner
+        self._counter = counter
+
+    @property
+    def needs_decision_memory(self) -> bool:
+        return self._inner.needs_decision_memory
+
+    def __call__(self, obs: managym.Observation) -> int:
+        return self._counter.timed_call(self._inner, obs)
+
+
+def _wrap_timed_player(fn: PlayerFn, counter: _TimingCounter) -> PlayerFn:
+    if isinstance(fn, PolicyPlayer):
+        return _TimedPolicyPlayer(fn, counter)
+    if isinstance(fn, EnsemblePolicyPlayer):
+        return _TimedEnsemblePlayer(fn, counter)
+    return functools.partial(counter.timed_call, fn)
+
+
 def _eval_worker(
     args: tuple[PlayerSpec, PlayerSpec, list[tuple[int, Deal]], int, bool, int],
 ) -> list[PairedDealResult]:
@@ -207,6 +267,10 @@ def _eval_worker(
     torch.set_num_threads(1)
     fn_a, ctx_a = _open_spec_player(spec_a, seed=seed, deterministic=deterministic)
     fn_b, ctx_b = _open_spec_player(spec_b, seed=seed + 10_000, deterministic=deterministic)
+    counter_a = _TimingCounter()
+    counter_b = _TimingCounter()
+    timed_a = _wrap_timed_player(fn_a, counter_a)
+    timed_b = _wrap_timed_player(fn_b, counter_b)
     results: list[PairedDealResult] = []
     if ctx_a is not None:
         ctx_a.__enter__()
@@ -214,7 +278,9 @@ def _eval_worker(
         ctx_b.__enter__()
     try:
         for deal_idx, deal in indexed_deals:
-            score = play_match(fn_a, fn_b, deals=(deal,), max_actions=max_actions)
+            counter_a.reset()
+            counter_b.reset()
+            score = play_match(timed_a, timed_b, deals=(deal,), max_actions=max_actions)
             results.append(
                 PairedDealResult(
                     deal_index=deal_idx,
@@ -223,6 +289,10 @@ def _eval_worker(
                     draws=score.draws,
                     decisions=round(score.mean_decisions * score.games),
                     turns=round(score.mean_turns * score.games),
+                    decision_ms_a=counter_a.elapsed_ms,
+                    decision_ms_b=counter_b.elapsed_ms,
+                    decisions_a=counter_a.decisions,
+                    decisions_b=counter_b.decisions,
                 )
             )
     finally:
@@ -389,6 +459,10 @@ def play_adaptive_parallel(
                 draws=item.draws,
                 decisions=item.decisions,
                 turns=item.turns,
+                decision_ms_a=item.decision_ms_a,
+                decision_ms_b=item.decision_ms_b,
+                decisions_a=item.decisions_a,
+                decisions_b=item.decisions_b,
             )
             for item in chunk
         ]

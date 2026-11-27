@@ -1,10 +1,21 @@
-/** Saved Watchlist view: searchable, tag-filterable bookmarks with inline title/note editing and Tabletop jump. */
+/** Saved Watchlist view: searchable, tag-filterable bookmarks with inline title/note editing, puzzle promotion, and Tabletop jump. */
 
-import { ArrowRight, Bookmark, Check, Pencil, Search, Tag, Trash2, X } from "lucide-react";
+import {
+  ArrowRight,
+  Bookmark,
+  Check,
+  Pencil,
+  Search,
+  Sparkles,
+  Tag,
+  Trash2,
+  X,
+} from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { Badge, Button } from "@/components/ui/Primitives";
-import { cardImageUrl } from "@/lib/api";
-import type { GameTarget, WatchlistItem } from "@/lib/types";
+import { useBenchmarkFormats } from "@/hooks/useBenchmarksData";
+import { cardImageUrl, promoteWatchlistToPuzzle } from "@/lib/api";
+import type { GameTarget, PromotePuzzleResult, WatchlistItem } from "@/lib/types";
 
 export interface WatchlistViewProps {
   items: WatchlistItem[];
@@ -15,6 +26,7 @@ export interface WatchlistViewProps {
     itemId: string,
     patch: { label?: string; note?: string; tag?: string },
   ) => Promise<void>;
+  onOpenPuzzles?: (format: string) => void;
 }
 
 function humanizeTitle(raw: string): string {
@@ -219,8 +231,43 @@ function BookmarkCardReadBody(props: {
   );
 }
 
+function PromoteStatusBanner(props: {
+  result: PromotePuzzleResult | null;
+  error: string | null;
+  format: string;
+  onOpenPuzzles?: (format: string) => void;
+}): ReactNode {
+  if (props.error) {
+    return <div className="text-[11px] text-[var(--loss)] leading-snug">{props.error}</div>;
+  }
+  if (!props.result) return null;
+  if (props.result.admitted) {
+    const marginPct = (props.result.puzzle.margin * 100).toFixed(1);
+    return (
+      <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--win)]">
+        <span className="tabular font-medium">
+          Promoted to {props.format} (+{marginPct}%)
+        </span>
+        {props.onOpenPuzzles ? (
+          <button
+            type="button"
+            onClick={(): void => props.onOpenPuzzles?.(props.format)}
+            className="text-[11px] font-semibold text-[var(--accent)] hover:underline cursor-pointer bg-transparent border-0 p-0"
+          >
+            View Puzzles →
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+  return (
+    <div className="tabular text-[11px] text-[var(--loss)] leading-snug">{props.result.detail}</div>
+  );
+}
+
 function WatchlistCard(props: {
   item: WatchlistItem;
+  promoteFormat: string;
   onSelectTag: (tag: string) => void;
   onOpenTabletop: (target: GameTarget) => void;
   onRemove: (itemId: string) => void;
@@ -228,6 +275,7 @@ function WatchlistCard(props: {
     itemId: string,
     patch: { label?: string; note?: string; tag?: string },
   ) => Promise<void>;
+  onOpenPuzzles?: (format: string) => void;
 }): ReactNode {
   const { item } = props;
   const displayTitle = humanizeTitle(item.label);
@@ -237,6 +285,9 @@ function WatchlistCard(props: {
   const [draftTag, setDraftTag] = useState(item.tag ?? "");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [promoting, setPromoting] = useState(false);
+  const [promoteResult, setPromoteResult] = useState<PromotePuzzleResult | null>(null);
+  const [promoteError, setPromoteError] = useState<string | null>(null);
 
   const openEditor = (): void => {
     setDraftLabel(displayTitle);
@@ -244,6 +295,22 @@ function WatchlistCard(props: {
     setDraftTag(item.tag ?? "");
     setSaveError(null);
     setEditing(true);
+  };
+
+  const handlePromote = (): void => {
+    const targetFormat = props.promoteFormat.trim() || "default";
+    setPromoting(true);
+    setPromoteError(null);
+    setPromoteResult(null);
+    void promoteWatchlistToPuzzle({ itemId: item.id, format: targetFormat })
+      .then((res) => {
+        setPromoting(false);
+        setPromoteResult(res);
+      })
+      .catch((err: unknown) => {
+        setPromoting(false);
+        setPromoteError(err instanceof Error ? err.message : "Failed to promote puzzle");
+      });
   };
 
   const itemTag = item.tag?.trim() ?? "";
@@ -306,24 +373,42 @@ function WatchlistCard(props: {
         ) : (
           <BookmarkCardReadBody item={item} displayTitle={displayTitle} onStartEdit={openEditor} />
         )}
+
+        <PromoteStatusBanner
+          result={promoteResult}
+          error={promoteError}
+          format={props.promoteFormat.trim() || "default"}
+          onOpenPuzzles={props.onOpenPuzzles}
+        />
       </div>
 
-      <div className="flex items-center justify-between gap-2 pt-2 border-t border-[var(--border)]">
-        <Button
-          variant="primary"
-          onClick={(): void =>
-            props.onOpenTabletop({
-              run_id: item.run_id,
-              iteration: item.iteration,
-              game_idx: item.game_idx,
-              step: item.step,
-              seed: item.seed,
-            })
-          }
-        >
-          Open in Tabletop
-          <ArrowRight className="w-3.5 h-3.5" />
-        </Button>
+      <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[var(--border)]">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Button
+            variant="primary"
+            onClick={(): void =>
+              props.onOpenTabletop({
+                run_id: item.run_id,
+                iteration: item.iteration,
+                game_idx: item.game_idx,
+                step: item.step,
+                seed: item.seed,
+              })
+            }
+          >
+            Open in Tabletop
+            <ArrowRight className="w-3.5 h-3.5" />
+          </Button>
+          <Button
+            variant="default"
+            disabled={promoting}
+            title="Verify with N=64 paired playouts and add to format puzzles"
+            onClick={handlePromote}
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            {promoting ? "Verifying…" : "Promote to Puzzle"}
+          </Button>
+        </div>
 
         <div className="flex items-center gap-1">
           {editing ? null : (
@@ -348,6 +433,7 @@ function WatchlistBody(props: {
   items: WatchlistItem[];
   filtered: WatchlistItem[];
   loading: boolean;
+  promoteFormat: string;
   hasActiveFilters: boolean;
   onClearFilters: () => void;
   onSelectTag: (tag: string) => void;
@@ -357,6 +443,7 @@ function WatchlistBody(props: {
     itemId: string,
     patch: { label?: string; note?: string; tag?: string },
   ) => Promise<void>;
+  onOpenPuzzles?: (format: string) => void;
 }): ReactNode {
   if (props.loading) {
     return <div className="text-xs text-[var(--text-3)]">Loading pinned positions…</div>;
@@ -389,10 +476,12 @@ function WatchlistBody(props: {
         <WatchlistCard
           key={item.id}
           item={item}
+          promoteFormat={props.promoteFormat}
           onSelectTag={props.onSelectTag}
           onOpenTabletop={props.onOpenTabletop}
           onRemove={props.onRemove}
           onUpdate={props.onUpdate}
+          onOpenPuzzles={props.onOpenPuzzles}
         />
       ))}
     </div>
@@ -402,6 +491,9 @@ function WatchlistBody(props: {
 export function WatchlistView(props: WatchlistViewProps): ReactNode {
   const [search, setSearch] = useState("");
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
+  const [customFormat, setCustomFormat] = useState("");
+  const { formats, defaultFormat } = useBenchmarkFormats();
+  const promoteFormat = customFormat || defaultFormat || "default";
 
   const distinctTags = collectDistinctTags(props.items);
   const effectiveTag =
@@ -478,6 +570,23 @@ export function WatchlistView(props: WatchlistViewProps): ReactNode {
             })}
           </div>
         ) : null}
+        {formats.length > 0 ? (
+          <label className="flex items-center gap-1.5 text-[11px] text-[var(--text-3)] ml-auto">
+            <span>Puzzle format</span>
+            <select
+              aria-label="Puzzle format"
+              value={promoteFormat}
+              onChange={(e): void => setCustomFormat(e.target.value)}
+              className="h-7 rounded-md border border-[var(--border)] bg-[var(--bg)] px-2 text-[11.5px] font-medium text-[var(--text)]"
+            >
+              {formats.map((fmt) => (
+                <option key={fmt} value={fmt}>
+                  {fmt}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
       </div>
 
       <div className="flex-1 overflow-y-auto p-4">
@@ -485,6 +594,7 @@ export function WatchlistView(props: WatchlistViewProps): ReactNode {
           items={props.items}
           filtered={filteredItems}
           loading={props.loading}
+          promoteFormat={promoteFormat}
           hasActiveFilters={hasActiveFilters}
           onClearFilters={(): void => {
             setSearch("");
@@ -494,6 +604,7 @@ export function WatchlistView(props: WatchlistViewProps): ReactNode {
           onOpenTabletop={props.onOpenTabletop}
           onRemove={props.onRemove}
           onUpdate={props.onUpdate}
+          onOpenPuzzles={props.onOpenPuzzles}
         />
       </div>
     </div>

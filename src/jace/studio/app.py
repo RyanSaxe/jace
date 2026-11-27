@@ -2,10 +2,11 @@
 
 Exposes dynamic training run telemetry and global checkpoint discovery,
 DuckDB/Parquet faceted game search, native `managym` step replay, Scryfall card
-and token art caching, watchlist CRUD persistence, stateless counterfactual
-forking + any-step action branching (`POST /api/fork`), N-model policy matrices
-(`POST /api/matrix`), batched counterfactual playouts (`POST /api/playout`), and
-cross-checkpoint policy comparisons (`POST /api/compare`).
+and token art caching, watchlist CRUD and puzzle promotion, Arena Elo
+leaderboards and match ledgers, verified tactical puzzles, stateless
+counterfactual forking + any-step action branching (`POST /api/fork`), N-model
+policy matrices (`POST /api/matrix`), batched counterfactual playouts
+(`POST /api/playout`), and cross-checkpoint policy comparisons (`POST /api/compare`).
 """
 
 from __future__ import annotations
@@ -21,10 +22,12 @@ from typing import TYPE_CHECKING, Annotated, Literal
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from jace.studio.analysis import compare_checkpoints, run_action_playouts
+from jace.studio.benchmarks import BenchmarkService
 from jace.studio.index import GameQuery, StudioIndex
 from jace.studio.inference import ForkEdit, InferenceEngine, apply_fork_and_branch
 from jace.studio.replay import PlayerSpec, PovMode, RecordedGame, ReplayService, serialize_observation
@@ -32,6 +35,8 @@ from jace.studio.runs import discover_runs, list_all_checkpoints, load_run_detai
 from jace.studio.scryfall import ScryfallCache
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import managym
 
 __all__ = (
@@ -139,6 +144,21 @@ class WatchlistPatchPayload(BaseModel):
     key_cards: list[str] | None = None
 
 
+class PromotePuzzleRequest(BaseModel):
+    format: str = Field(min_length=1, max_length=128)
+    playouts: int = Field(default=64, ge=4, le=512)
+    min_margin: float = Field(default=0.15, ge=0.0, le=1.0)
+    model_ref: str | None = None
+
+
+class PuzzlesQueryParams(BaseModel):
+    format: str | None = None
+    model_a: str | None = None
+    model_b: str | None = None
+    phase: str | None = None
+    source: str | None = None
+
+
 class GamesFilterParams(BaseModel):
     run_id: str | None = None
     set_code: str | None = None
@@ -190,6 +210,10 @@ class _WatchlistStore:
     def list_items(self) -> list[dict[str, object]]:
         with self._lock:
             return self._read_locked()
+
+    def get_item(self, item_id: str) -> dict[str, object] | None:
+        with self._lock:
+            return next((item for item in self._read_locked() if item.get("id") == item_id), None)
 
     def add_item(self, payload: WatchlistItemPayload) -> dict[str, object]:
         with self._lock:
@@ -585,6 +609,88 @@ def _register_watchlist_routes(app: FastAPI, watchlist: _WatchlistStore) -> None
         return _require_watchlist_found(item_id, found=watchlist.delete_item(item_id))
 
 
+def _run_watchlist_promotion(
+    benchmarks: BenchmarkService,
+    *,
+    item: dict[str, object],
+    req: PromotePuzzleRequest,
+) -> dict[str, object] | JSONResponse:
+    try:
+        result = benchmarks.promote_watchlist_item(
+            item,
+            format_id=req.format,
+            playouts=req.playouts,
+            min_margin=req.min_margin,
+            model_ref=req.model_ref,
+        )
+    except (FileNotFoundError, IndexError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not result.admitted:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": result.detail or "Position did not pass puzzle promotion gate.",
+                "margin": result.margin,
+                "ci_low": result.ci_low,
+                "ci_high": result.ci_high,
+            },
+        )
+    return {"admitted": True, "puzzle": result.puzzle}
+
+
+def _call_benchmark[T](fn: Callable[[], T]) -> T:
+    try:
+        return fn()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _register_benchmark_routes(
+    app: FastAPI,
+    *,
+    benchmarks: BenchmarkService,
+    watchlist: _WatchlistStore,
+) -> None:
+    @app.get("/api/arena/leaderboard", summary="Joint Bradley-Terry Elo leaderboard and early-run forecast")
+    def arena_leaderboard(
+        format_id: Annotated[str | None, Query(alias="format")] = None,
+        anchor: Annotated[str | None, Query()] = None,
+    ) -> dict[str, object]:
+        return _call_benchmark(lambda: benchmarks.get_leaderboard(format_id=format_id, anchor=anchor))
+
+    @app.get("/api/arena/matches", summary="Mirrored match ledger rows for one arena model")
+    def arena_matches(
+        format_id: Annotated[str, Query(alias="format")],
+        model: Annotated[str, Query()],
+    ) -> dict[str, object]:
+        return _call_benchmark(lambda: benchmarks.get_matches(format_id=format_id, model=model))
+
+    @app.get("/api/puzzles", summary="Verified tactical puzzles with cached checkpoint policy scoring")
+    def list_puzzles(params: Annotated[PuzzlesQueryParams, Depends()]) -> dict[str, object]:
+        return _call_benchmark(
+            lambda: benchmarks.get_puzzles(
+                format_id=params.format,
+                model_a=params.model_a,
+                model_b=params.model_b,
+                phase=params.phase,
+                source=params.source,
+            )
+        )
+
+    @app.post(
+        "/api/watchlist/{item_id}/promote-puzzle",
+        summary="Verify a Watchlist board with paired playouts and promote to verified puzzles",
+        response_model=None,
+    )
+    def promote_watchlist_puzzle(item_id: str, req: PromotePuzzleRequest) -> dict[str, object] | JSONResponse:
+        item = watchlist.get_item(item_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"watchlist item not found: {item_id}")
+        return _run_watchlist_promotion(benchmarks, item=item, req=req)
+
+
 def create_app(config: StudioConfig) -> FastAPI:
     runs_dir = config.runs_dir.resolve()
     app = FastAPI(title="Jace Studio", version="0.3.0")
@@ -599,12 +705,14 @@ def create_app(config: StudioConfig) -> FastAPI:
     replays = ReplayService(runs_dir)
     scryfall = ScryfallCache(runs_dir / ".studio" / "scryfall", allow_network=config.allow_scryfall_network)
     watchlist = _WatchlistStore(runs_dir / ".studio" / "watchlist.json")
+    benchmarks = BenchmarkService(runs_dir, replays=replays, inference=inference)
     _register_run_routes(app, runs_dir=runs_dir, index=index)
     _register_index_routes(app, index=index, replays=replays)
     _register_replay_routes(app, replays=replays, inference=inference)
     _register_fork_and_analysis_routes(app, runs_dir=runs_dir, replays=replays, inference=inference, index=index)
     _register_asset_routes(app, scryfall)
     _register_watchlist_routes(app, watchlist)
+    _register_benchmark_routes(app, benchmarks=benchmarks, watchlist=watchlist)
     web_dist = config.web_dist if config.web_dist is not None else _DEFAULT_WEB_DIST
     if web_dist.is_dir():
         app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="studio-web")

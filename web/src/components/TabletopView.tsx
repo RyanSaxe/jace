@@ -202,7 +202,7 @@ function ReadyWorkspace(props: {
     Math.min(Math.max(0, active.board.total_steps - 1), props.overview.maxPlayableStep),
   );
   const btnCls =
-    "h-8 px-2 rounded-md border border-[var(--border)] bg-[var(--surface-2)] text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer disabled:opacity-40";
+    "min-h-[34px] h-[34px] px-2 rounded-md border border-[var(--border)] bg-[var(--surface-2)] text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer disabled:opacity-40";
   return (
     <>
       {ctrl.overlay === "pin" ? (
@@ -234,7 +234,7 @@ function ReadyWorkspace(props: {
             disabled={target.step <= 0}
             aria-label="Previous step"
             onClick={(): void => ctrl.selectStep(Math.max(0, target.step - 1))}
-            className={`${btnCls} w-8 justify-center px-0`}
+            className={`${btnCls} min-w-[34px] w-[34px] justify-center px-0`}
           >
             <ChevronLeft className="w-4 h-4" />
           </button>
@@ -246,7 +246,7 @@ function ReadyWorkspace(props: {
             disabled={target.step >= upperStep}
             aria-label="Next step"
             onClick={(): void => ctrl.selectStep(Math.min(upperStep, target.step + 1))}
-            className={`${btnCls} w-8 justify-center px-0`}
+            className={`${btnCls} min-w-[34px] w-[34px] justify-center px-0`}
           >
             <ChevronRight className="w-4 h-4" />
           </button>
@@ -317,7 +317,9 @@ function LoadedTabletop(
   const [pov, setPov] = useState<PovMode>("hero");
   const [editMode, setEditMode] = useState(false);
   const [overlay, setOverlay] = useState<ActiveOverlay>("none");
-  const [stackOpen, setStackOpen] = useState(true);
+  const [stackOpen, setStackOpen] = useState<boolean>(() =>
+    typeof window === "undefined" ? true : window.innerWidth >= 640,
+  );
   const [handEditTarget, setHandEditTarget] = useState<HandCardEditTarget | null>(null);
   const [pinSaving, setPinSaving] = useState(false);
   const [drawer, setDrawer] = useState<DrawerTarget | null>(null);

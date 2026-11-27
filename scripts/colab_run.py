@@ -78,7 +78,7 @@ _LOGGER = logging.getLogger(__name__)
 _EXEC_TIMEOUT_S = 90.0
 _REMOTE_EXEC_TIMEOUT_S = 45
 _PROVISION_TIMEOUT_S = 420.0
-_TRANSFER_TIMEOUT_S = 180.0
+_TRANSFER_TIMEOUT_S = 600.0
 _SETUP_TIMEOUT_S = 900.0
 _STOP_TIMEOUT_S = 60.0
 
@@ -121,6 +121,7 @@ class ColabRunConfig:
     reuse_session: bool = False
     keep_vm: bool = False
     dry_run: bool = False
+    preflight_first: bool = False
     extra_args: tuple[str, ...] = ()
 
 
@@ -169,8 +170,15 @@ def _provision_command(cfg: ColabRunConfig) -> tuple[str, ...]:
     return (*_COLAB_CMD, "new", "-s", cfg.session, "--gpu", cfg.gpu, *extra)
 
 
+def _is_checkpoint_artifact_name(name: str) -> bool:
+    if name == _RESUME_FILENAME:
+        return False
+    is_weight_snapshot = name.startswith("weights-u") and name.endswith(".pt")
+    return name.endswith(_CHECKPOINT_SUFFIXES) or is_weight_snapshot
+
+
 def _is_checkpoint_artifact(path: Path) -> bool:
-    return path.is_file() and path.name != _RESUME_FILENAME and path.name.endswith(_CHECKPOINT_SUFFIXES)
+    return path.is_file() and _is_checkpoint_artifact_name(path.name)
 
 
 def _resume_uploads(resume_from: Path, *, remote_run_dir: str) -> list[tuple[Path, str]]:
@@ -251,6 +259,13 @@ _KILL_REMOTE_TRAIN = (
 )
 
 
+def _build_preflight_args(cfg: ColabRunConfig) -> list[str]:
+    args = [arg for arg in _build_train_args(cfg, force_resume=False) if arg != "--resume"]
+    if "--preflight" not in args:
+        args.append("--preflight")
+    return args
+
+
 def build_remote_script(cfg: ColabRunConfig) -> str:
     train_args = _build_train_args(cfg, force_resume=cfg.reuse_session)
     branch_q = shlex.quote(cfg.branch)
@@ -263,6 +278,7 @@ def build_remote_script(cfg: ColabRunConfig) -> str:
         f"  git -C {shlex.quote(_REMOTE_REPO_DIR)} fetch origin {branch_q} && "
         f"git -C {shlex.quote(_REMOTE_REPO_DIR)} checkout -B {branch_q} FETCH_HEAD\nfi"
     )
+    preflight_lines = [shlex.join(_build_preflight_args(cfg))] if cfg.preflight_first else []
     lines = [
         "set -euo pipefail",
         'export PATH="$HOME/.local/bin:$PATH"',
@@ -272,6 +288,7 @@ def build_remote_script(cfg: ColabRunConfig) -> str:
         *([_KILL_REMOTE_TRAIN, "sleep 2"] if cfg.reuse_session else []),
         f"cd {shlex.quote(_REMOTE_REPO_DIR)}",
         "uv sync --frozen",
+        *preflight_lines,
         f"rm -f {_REMOTE_EXIT_FILE}",
         f"nohup bash -lc {shlex.quote(inner_cmd)} >{_REMOTE_LOG_FILE} 2>&1 </dev/null &",
         f"PID=$!; echo $PID > {_REMOTE_PID_FILE}; sleep 2; kill -0 $PID; echo LAUNCHED pid=$PID",
@@ -298,6 +315,7 @@ def _build_restart_script(cfg: ColabRunConfig, *, seed_offset: int) -> str:
 
 def _remote_poll_code(remote_run_dir: str) -> str:
     metrics_path = f"{remote_run_dir}/metrics.jsonl"
+    checkpoints_path = f"{remote_run_dir}/checkpoints"
     return (
         "import json, os, pathlib, subprocess\n"
         f"pid_file, exit_file = pathlib.Path({_REMOTE_PID_FILE!r}), pathlib.Path({_REMOTE_EXIT_FILE!r})\n"
@@ -323,8 +341,10 @@ def _remote_poll_code(remote_run_dir: str) -> str:
         '        lu, lk = str(rec.get("update", "none")), str(rec.get("kind", "none"))\n'
         "    except Exception:\n"
         "        pass\n"
+        f"cp = pathlib.Path({checkpoints_path!r})\n"
+        'snaps = ",".join(sorted(p.name for p in cp.glob("weights-u*.pt") if p.is_file())) if cp.is_dir() else ""\n'
         'print(f"ALIVE={alive} EXIT={exit_code} PID={pid} LINES={len(lines)} '
-        'LAST_UPDATE={lu} LAST_KIND={lk} GPU=[{gpu}] LAST={last}")\n'
+        'LAST_UPDATE={lu} LAST_KIND={lk} SNAPSHOTS={snaps} GPU=[{gpu}] LAST={last}")\n'
         f"lp = pathlib.Path({_REMOTE_LOG_FILE!r})\n"
         'if not alive and lp.exists(): print("LOG_TAIL:\\n" + lp.read_text(errors="ignore")[-1500:])\n'
     )
@@ -375,9 +395,36 @@ def _upload_file(
     )
 
 
-def _sync_once(cfg: ColabRunConfig, *, remote_run_dir: str, runner: CommandRunner) -> None:
+def _incremental_snapshot_targets(
+    backup_dir: Path,
+    *,
+    remote_run_dir: str,
+    snapshot_names: Sequence[str] | set[str],
+) -> list[tuple[str, Path]]:
+    targets: list[tuple[str, Path]] = []
+    for name in sorted(set(snapshot_names)):
+        if not _is_checkpoint_artifact_name(name):
+            continue
+        local_path = backup_dir / "checkpoints" / name
+        if local_path.is_file():
+            continue
+        targets.append((f"{remote_run_dir}/checkpoints/{name}", local_path))
+    return targets
+
+
+def _sync_once(
+    cfg: ColabRunConfig,
+    *,
+    remote_run_dir: str,
+    runner: CommandRunner,
+    snapshot_names: Sequence[str] | set[str] = (),
+) -> None:
     (cfg.backup_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
-    for remote_path, local_path in _sync_targets(cfg.backup_dir, remote_run_dir=remote_run_dir):
+    targets = [
+        *_sync_targets(cfg.backup_dir, remote_run_dir=remote_run_dir),
+        *_incremental_snapshot_targets(cfg.backup_dir, remote_run_dir=remote_run_dir, snapshot_names=snapshot_names),
+    ]
+    for remote_path, local_path in targets:
         cmd = (*_COLAB_CMD, "download", "-s", cfg.session, remote_path, str(local_path))
         try:
             result = runner(cmd, check=False, timeout=_TRANSFER_TIMEOUT_S)
@@ -433,6 +480,13 @@ def _parse_poll_token(stdout: str, prefix: str) -> str | None:
 def _parse_remote_lines(stdout: str) -> int | None:
     raw = _parse_poll_token(stdout, "LINES=")
     return int(raw) if raw is not None and raw.isdigit() else None
+
+
+def _parse_snapshot_names(stdout: str) -> tuple[str, ...]:
+    raw = _parse_poll_token(stdout, "SNAPSHOTS=")
+    if not raw:
+        return ()
+    return tuple(name for name in raw.split(",") if _is_checkpoint_artifact_name(name))
 
 
 def _is_in_eval_window(stdout: str, *, eval_every: int) -> bool:
@@ -522,11 +576,13 @@ def _watch_remote_training(
     remote_run_dir: str,
     runner: CommandRunner,
     clock: Callable[[], float] = time.monotonic,
+    discovered_snapshots: set[str] | None = None,
 ) -> int:
     poll_code = _remote_poll_code(remote_run_dir)
     exec_cmd = (*_COLAB_CMD, "exec", "-s", cfg.session, "--timeout", str(_REMOTE_EXEC_TIMEOUT_S))
     sync_every = max(1, cfg.sync_interval_s // max(1, cfg.poll_interval_s)) if cfg.sync_interval_s > 0 else 0
     ticks = 0
+    snapshots = set() if discovered_snapshots is None else discovered_snapshots
     eval_every = _extract_int_flag(cfg.extra_args, flag="--eval-every", default=40)
     tracker = _StallTracker(last_lines=None, last_progress=clock(), eval_every=eval_every)
     while True:
@@ -534,8 +590,9 @@ def _watch_remote_training(
             time.sleep(cfg.poll_interval_s)
         ticks += 1
         stdout = _poll_once(exec_cmd, poll_code=poll_code, ticks=ticks, runner=runner)
+        snapshots.update(_parse_snapshot_names(stdout))
         if sync_every > 0 and ticks % sync_every == 0:
-            _sync_once(cfg, remote_run_dir=remote_run_dir, runner=runner)
+            _sync_once(cfg, remote_run_dir=remote_run_dir, runner=runner, snapshot_names=snapshots)
         if "ALIVE=False" in stdout:
             return _parse_remote_exit_code(stdout)
         stall_exit = tracker.observe(stdout, cfg=cfg, remote_run_dir=remote_run_dir, runner=runner, clock=clock)
@@ -611,10 +668,17 @@ def run_colab_training(
             _upload_resume_files(cfg, remote_run_dir=remote_run_dir, runner=active_runner)
         ssh_cmd = (*_COLAB_CMD, "ssh", "-s", cfg.session, "--", "bash", "-lc", remote_script)
         active_runner(ssh_cmd, check=True, timeout=_SETUP_TIMEOUT_S)
+        discovered_snapshots: set[str] = set()
         try:
-            return _watch_remote_training(cfg, remote_run_dir=remote_run_dir, runner=active_runner, clock=clock)
+            return _watch_remote_training(
+                cfg,
+                remote_run_dir=remote_run_dir,
+                runner=active_runner,
+                clock=clock,
+                discovered_snapshots=discovered_snapshots,
+            )
         finally:
-            _sync_once(cfg, remote_run_dir=remote_run_dir, runner=active_runner)
+            _sync_once(cfg, remote_run_dir=remote_run_dir, runner=active_runner, snapshot_names=discovered_snapshots)
     finally:
         if not cfg.keep_vm:
             _stop_session(cfg.session, runner=active_runner)
@@ -682,6 +746,12 @@ def _parse_args(argv: Sequence[str] | None) -> ColabRunConfig:
     )
     parser.add_argument("--keep-vm", action="store_true", default=False, help="keep Colab VM running on exit")
     parser.add_argument("--dry-run", action="store_true", default=False, help="print plan without calling colab")
+    parser.add_argument(
+        "--preflight-first",
+        action="store_true",
+        default=False,
+        help="run synchronous --preflight smoke gate over SSH before detaching training",
+    )
     ns, extra = parser.parse_known_args(argv)
     forwarded = tuple(extra[1:] if extra and extra[0] == "--" else extra)
     return ColabRunConfig(
@@ -703,6 +773,7 @@ def _parse_args(argv: Sequence[str] | None) -> ColabRunConfig:
         reuse_session=ns.reuse_session,
         keep_vm=ns.keep_vm,
         dry_run=ns.dry_run,
+        preflight_first=ns.preflight_first,
         extra_args=forwarded,
     )
 
