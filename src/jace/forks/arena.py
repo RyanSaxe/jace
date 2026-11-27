@@ -64,6 +64,7 @@ class SearchPlayerSpec:
     search: SearchConfig
     prior: FormatPrior
     belief_net_path: Path | None = None
+    device: str = "cpu"
 
 
 @dataclass(slots=True)
@@ -178,6 +179,7 @@ def resolve_search_player_spec(
     format_id: str,
     decks_path: Path | None = None,
     deals: Sequence[Deal] = (),
+    device: str = "cpu",
 ) -> SearchPlayerSpec:
     if spec in {"heuristic", "random"} or not isinstance(spec, (Path, tuple)):
         msg = f"Search requires a policy checkpoint, not {spec!r}"
@@ -187,7 +189,7 @@ def resolve_search_player_spec(
         runs_dir, format_id=format_id, belief_id=belief_id, decks_path=decks_path, deals=deals
     )
     cfg = SearchConfig(worlds=worlds, horizon_plies=horizon_plies, prior_only=prior_only)
-    return SearchPlayerSpec(ckpt, cfg, prior, net_p)
+    return SearchPlayerSpec(ckpt, cfg, prior, net_p, device=device)
 
 
 type ArenaPlayerSpec = PlayerSpec | SearchPlayerSpec
@@ -200,6 +202,8 @@ def _open_player(
     if not isinstance(spec, SearchPlayerSpec):
         return _open_spec_player(spec, seed=seed, deterministic=deterministic)
     policy = load_checkpoint(str(spec.checkpoint))[0].eval()
+    if spec.device != "cpu":
+        policy = policy.to(spec.device)
     net = load_belief_net(spec.belief_net_path) if spec.belief_net_path is not None else None
     p = SearchPlayer(policy, policy.observation_space, prior=spec.prior, config=spec.search, belief_net=net, seed=seed)
     return p, p
@@ -296,6 +300,7 @@ def run_search_arena_match(
     search_config_b: SearchConfigSummary | None = None,
     model_a_spec: PlayerSpec | None = None,
     model_b_spec: PlayerSpec | None = None,
+    device: str = "cpu",
 ) -> ArenaMatchRecord:
     resolved_decks = (
         decks_path
@@ -314,6 +319,7 @@ def run_search_arena_match(
                 format_id=format_id,
                 decks_path=resolved_decks,
                 deals=deal_list,
+                device=device,
             )
             if search_config_a is not None
             else spec_a
@@ -328,6 +334,7 @@ def run_search_arena_match(
                 format_id=format_id,
                 decks_path=resolved_decks,
                 deals=deal_list,
+                device=device,
             )
             if search_config_b is not None
             else spec_b
@@ -387,6 +394,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_match.add_argument("--belief-id", default=None)
     p_match.add_argument("--no-search", action="store_true")
     p_match.add_argument("--belief-prior-only", action="store_true")
+    p_match.add_argument("--device", default="cpu")
     return parser
 
 
@@ -404,6 +412,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             num_workers=args.num_workers,
             decks_path=Path(args.decks_path) if args.decks_path else None,
             search_config_a=cfg,
+            device=args.device,
         )
         for cfg in configs
     ]
