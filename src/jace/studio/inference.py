@@ -1,10 +1,12 @@
-"""Checkpoint inference, policy diffing, batched trajectory scoring, and Fork/Branch execution.
+"""Checkpoint inference, policy diffing, policy matrix, and Fork/Branch execution.
 
-Loads saved `.safetensors` checkpoints through a thread-safe LRU cache with a
-persistent `PolicyInference` scope, evaluates legal-action probabilities and
-3-class WDL distributions normalized to Hero's perspective, scores sampled game
-trajectories in batches for mistake/surprise indexing, and runs stateless
-counterfactual board edits plus any-step action branching via `env.clone_env()`.
+Loads saved `.safetensors` checkpoints (including cross-run `run_id::ckpt`
+references) through a thread-safe LRU cache with device acceleration (`cuda` /
+`mps` / `cpu` with safe CPU fallback), evaluates legal-action probabilities and
+3-class WDL distributions normalized to Hero's perspective, runs stateless
+counterfactual board and hand edits plus any-step action branching via
+`env.clone_env()`, and delegates batched playouts and cross-checkpoint
+comparisons to `jace.studio.analysis`.
 """
 
 from __future__ import annotations
@@ -21,7 +23,8 @@ from manabot.backends.torch.checkpoint import load_checkpoint
 from manabot.env.observation import ObservationSpace
 from managym.enums import ActionEnum
 
-from jace.studio.replay import engine_step_errors, non_permanent_card_names
+from jace.modules import default_device_name
+from jace.studio.replay import engine_step_errors, non_permanent_card_names, serialize_legal_actions
 from jace.studio.runs import resolve_run_dir
 
 if TYPE_CHECKING:
@@ -38,9 +41,10 @@ __all__ = (
     "compute_policy_diff",
 )
 
-_MAX_LOADED_CKPTS = 4
+_MAX_LOADED_CKPTS = 6
 _MIN_PROB = 1e-12
 _WDL_CLASSES = 3
+_BATCH_CHUNK_SIZE = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +53,7 @@ class ForkEdit:
     seat: int
     value: int | None = None
     card: str | None = None
+    replacement_card: str | None = None
     after_branch: int = 0
 
 
@@ -66,6 +71,7 @@ class _CachedModel:
     agent: ActorCritic
     obs_space: ObservationSpace
     scope: PolicyInference
+    device: str
 
 
 def _scalar_to_wdl(raw_value: float) -> dict[str, float]:
@@ -83,6 +89,16 @@ def _normalize_wdl_for_hero(
     if acting_seat == hero_seat:
         return wdl
     return {"win": wdl["loss"], "draw": wdl["draw"], "loss": wdl["win"]}
+
+
+def _format_checkpoint_label(ref: str) -> str:
+    if not ref or ref == "heuristic":
+        return "Heuristic"
+    if "::" in ref:
+        run_part, ckpt_part = ref.split("::", 1)
+        run_tail = run_part.split("/")[-1]
+        return f"{run_tail} · {ckpt_part}"
+    return ref
 
 
 def _heuristic_eval(obs: managym.Observation, *, hero_seat: int = 0) -> tuple[list[float], dict[str, float]]:
@@ -106,71 +122,89 @@ def _heuristic_eval(obs: managym.Observation, *, hero_seat: int = 0) -> tuple[li
     return probs, wdl
 
 
-def _forward_model(
+def _active_obs_space(space: ObservationSpace, max_actions: int) -> ObservationSpace:
+    if max_actions > space.config.max_actions:
+        return ObservationSpace(space.config.model_copy(update={"max_actions": max_actions}))
+    return space
+
+
+def _move_cached_to_cpu(cached: _CachedModel) -> None:
+    cached.scope.__exit__(None, None, None)
+    cached.agent.to("cpu")
+    new_scope = cached.agent.inference_scope()
+    new_scope.__enter__()
+    cached.scope = new_scope
+    cached.device = "cpu"
+
+
+def _run_forward_distribution(
     cached: _CachedModel,
-    obs: managym.Observation,
+    obs_batch: managym.ObservationBatch,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    try:
+        with torch.no_grad():
+            prepared = cached.scope.prepare(obs_batch)
+            return cached.agent.forward_distribution(prepared)
+    except RuntimeError:
+        if cached.device == "cpu":
+            raise
+        _move_cached_to_cpu(cached)
+        with torch.no_grad():
+            prepared = cached.scope.prepare(obs_batch)
+            return cached.agent.forward_distribution(prepared)
+
+
+def _decode_wdl_rows(
+    value_out: torch.Tensor,
+    obs_list: list[managym.Observation],
     *,
-    hero_seat: int,
-) -> tuple[list[float], dict[str, float]]:
-    count = len(obs.action_space.actions)
-    space = cached.obs_space
-    active_space = (
-        ObservationSpace(space.config.model_copy(update={"max_actions": count}))
-        if count > space.config.max_actions
-        else space
-    )
-    obs_batch = managym.encode_observation_batch([obs], active_space.layout, active_space.config.action_overflow)
-    with torch.no_grad():
-        prepared = cached.scope.prepare(obs_batch)
-        logits, value_out = cached.agent.forward_distribution(prepared)
-        raw_probs = torch.softmax(logits, dim=-1)[0, :count].tolist()
-        if value_out.shape[-1] == _WDL_CLASSES:
-            loss_p, draw_p, win_p = torch.softmax(value_out, dim=-1)[0].tolist()
-            wdl = {"win": round(float(win_p), 4), "draw": round(float(draw_p), 4), "loss": round(float(loss_p), 4)}
-        else:
-            wdl = _scalar_to_wdl(float(value_out.item()))
-    probs = [round(float(p), 4) for p in raw_probs]
-    hero_wdl = _normalize_wdl_for_hero(wdl, acting_seat=int(obs.agent.player_index), hero_seat=hero_seat)
-    return probs, hero_wdl
+    hero_seats: list[int],
+) -> list[dict[str, float]]:
+    if value_out.shape[-1] == _WDL_CLASSES:
+        rows = torch.softmax(value_out, dim=-1).cpu().tolist()
+        return [
+            _normalize_wdl_for_hero(
+                {"win": round(float(row[2]), 4), "draw": round(float(row[1]), 4), "loss": round(float(row[0]), 4)},
+                acting_seat=int(obs.agent.player_index),
+                hero_seat=seat,
+            )
+            for obs, row, seat in zip(obs_list, rows, hero_seats, strict=True)
+        ]
+    scalars = value_out.reshape(-1).cpu().tolist()
+    return [
+        _normalize_wdl_for_hero(
+            _scalar_to_wdl(float(raw_val)),
+            acting_seat=int(obs.agent.player_index),
+            hero_seat=seat,
+        )
+        for obs, raw_val, seat in zip(obs_list, scalars, hero_seats, strict=True)
+    ]
 
 
-def _forward_batch_hero_win(
+def _forward_batch_full(
     cached: _CachedModel,
     obs_list: list[managym.Observation],
     *,
-    hero_seat: int,
-) -> list[float]:
+    hero_seats: list[int],
+) -> tuple[list[list[float]], list[dict[str, float]]]:
     if not obs_list:
-        return []
-    max_actions = max((len(obs.action_space.actions) for obs in obs_list), default=1)
-    space = cached.obs_space
-    active_space = (
-        ObservationSpace(space.config.model_copy(update={"max_actions": max_actions}))
-        if max_actions > space.config.max_actions
-        else space
-    )
-    obs_batch = managym.encode_observation_batch(obs_list, active_space.layout, active_space.config.action_overflow)
-    with torch.no_grad():
-        prepared = cached.scope.prepare(obs_batch)
-        _, value_out = cached.agent.forward_distribution(prepared)
-        if value_out.shape[-1] == _WDL_CLASSES:
-            wdl_probs = torch.softmax(value_out, dim=-1).tolist()
-            results: list[float] = []
-            for obs, row in zip(obs_list, wdl_probs, strict=True):
-                loss_p, _, win_p = float(row[0]), float(row[1]), float(row[2])
-                hero_win = win_p if int(obs.agent.player_index) == hero_seat else loss_p
-                results.append(round(hero_win, 4))
-            return results
-        scalars = value_out.reshape(-1).tolist()
-        results = []
-        for obs, raw_val in zip(obs_list, scalars, strict=True):
-            wdl = _normalize_wdl_for_hero(
-                _scalar_to_wdl(float(raw_val)),
-                acting_seat=int(obs.agent.player_index),
-                hero_seat=hero_seat,
-            )
-            results.append(wdl["win"])
-        return results
+        return [], []
+    probs_out: list[list[float]] = []
+    wdls_out: list[dict[str, float]] = []
+    for start in range(0, len(obs_list), _BATCH_CHUNK_SIZE):
+        chunk = obs_list[start : start + _BATCH_CHUNK_SIZE]
+        chunk_seats = hero_seats[start : start + _BATCH_CHUNK_SIZE]
+        max_actions = max((len(obs.action_space.actions) for obs in chunk), default=1)
+        active_space = _active_obs_space(cached.obs_space, max_actions)
+        obs_batch = managym.encode_observation_batch(chunk, active_space.layout, active_space.config.action_overflow)
+        logits, value_out = _run_forward_distribution(cached, obs_batch)
+        probs_tensor = torch.softmax(logits, dim=-1).cpu()
+        for row_idx, obs in enumerate(chunk):
+            count = len(obs.action_space.actions)
+            raw_probs = probs_tensor[row_idx, :count].tolist()
+            probs_out.append([round(float(p), 4) for p in raw_probs])
+        wdls_out.extend(_decode_wdl_rows(value_out, chunk, hero_seats=chunk_seats))
+    return probs_out, wdls_out
 
 
 def compute_policy_diff(probs_a: list[float], probs_b: list[float]) -> dict[str, object]:
@@ -189,22 +223,70 @@ def compute_policy_diff(probs_a: list[float], probs_b: list[float]) -> dict[str,
     }
 
 
-def _apply_single_edit(cloned: managym.Env, edit: ForkEdit) -> str | None:
-    if edit.op == "set_life" and edit.value is not None:
-        cloned.scenario_set_life(edit.seat, max(1, min(99, int(edit.value))))
-        return None
+def _hand_cards_list(env: managym.Env, seat: int) -> list[str]:
+    snap = env.hand_snapshot(seat)
+    return [str(name) for name, count in sorted(snap.cards.items()) for _ in range(int(count))]
+
+
+def _remove_hand_card(cloned: managym.Env, *, seat: int, card: str) -> str | None:
+    cards = _hand_cards_list(cloned, seat)
+    if card not in cards:
+        return f"Card '{card}' is not in seat {seat}'s hand."
+    cards.remove(card)
+    cloned.scenario_clear_hand(seat)
+    for name in cards:
+        cloned.scenario_force_card_in_hand(seat, name)
+    return None
+
+
+def _swap_hand_card(
+    cloned: managym.Env,
+    *,
+    seat: int,
+    card: str,
+    replacement_card: str,
+) -> str | None:
+    cards = _hand_cards_list(cloned, seat)
+    if card not in cards:
+        return f"Card '{card}' is not in seat {seat}'s hand."
+    cards.remove(card)
+    cloned.scenario_clear_hand(seat)
+    step_errors = engine_step_errors()
+    try:
+        cloned.scenario_force_card_in_hand(seat, replacement_card)
+    except step_errors as exc:
+        for name in (*cards, card):
+            cloned.scenario_force_card_in_hand(seat, name)
+        return f"Cannot swap '{card}' for '{replacement_card}': {exc}"
+    for name in cards:
+        cloned.scenario_force_card_in_hand(seat, name)
+    return None
+
+
+def _apply_hand_edit(cloned: managym.Env, edit: ForkEdit) -> str | None:
     if edit.op == "clear_hand":
         cloned.scenario_clear_hand(edit.seat)
         return None
     if edit.op == "add_hand_card" and edit.card:
         cloned.scenario_force_card_in_hand(edit.seat, edit.card)
         return None
+    if edit.op == "remove_hand_card" and edit.card:
+        return _remove_hand_card(cloned, seat=edit.seat, card=edit.card)
+    if edit.op == "swap_hand_card" and edit.card and edit.replacement_card:
+        return _swap_hand_card(cloned, seat=edit.seat, card=edit.card, replacement_card=edit.replacement_card)
+    return f"unsupported fork edit: {edit.op}"
+
+
+def _apply_single_edit(cloned: managym.Env, edit: ForkEdit) -> str | None:
+    if edit.op == "set_life" and edit.value is not None:
+        cloned.scenario_set_life(edit.seat, max(1, min(99, int(edit.value))))
+        return None
     if edit.op == "add_battlefield" and edit.card:
         if edit.card in non_permanent_card_names():
             return f"Cannot put Instant/Sorcery '{edit.card}' onto the battlefield (CR 304.4) - add to Hand instead."
         cloned.scenario_force_battlefield(edit.seat, edit.card, ready=True)
         return None
-    return f"unsupported fork edit: {edit.op}"
+    return _apply_hand_edit(cloned, edit)
 
 
 def _describe_branch_action(obs: managym.Observation, action_idx: int) -> str:
@@ -315,15 +397,35 @@ class InferenceEngine:
         self._runs_dir = runs_dir.resolve()
         self._cache: OrderedDict[str, _CachedModel] = OrderedDict()
         self._lock = threading.Lock()
+        self._preferred_device = default_device_name()
+
+    @property
+    def preferred_device(self) -> str:
+        return self._preferred_device
+
+    @staticmethod
+    def diff_policies(probs_a: list[float], probs_b: list[float]) -> dict[str, object]:
+        return compute_policy_diff(probs_a, probs_b)
 
     def _resolve_checkpoint(self, run_id: str, checkpoint_name: str) -> Path:
-        run_dir = resolve_run_dir(self._runs_dir, run_id)
-        filename = checkpoint_name if checkpoint_name.endswith(".safetensors") else f"{checkpoint_name}.safetensors"
+        if "::" in checkpoint_name:
+            target_run_id, ckpt_name = checkpoint_name.split("::", 1)
+        else:
+            target_run_id, ckpt_name = run_id, checkpoint_name
+        run_dir = resolve_run_dir(self._runs_dir, target_run_id)
+        filename = ckpt_name if ckpt_name.endswith(".safetensors") else f"{ckpt_name}.safetensors"
         path = (run_dir / "checkpoints" / filename).resolve()
         if not path.is_relative_to(run_dir / "checkpoints") or not path.is_file():
-            msg = f"checkpoint not found: {run_id}/{filename}"
+            msg = f"checkpoint not found: {target_run_id}/{filename}"
             raise FileNotFoundError(msg)
         return path
+
+    def can_load_checkpoint(self, run_id: str, checkpoint_name: str) -> bool:
+        try:
+            self._resolve_checkpoint(run_id, checkpoint_name)
+        except (FileNotFoundError, ValueError):
+            return False
+        return True
 
     def find_checkpoint_for_iteration(self, run_id: str, iteration: int) -> str | None:
         try:
@@ -333,12 +435,10 @@ class InferenceEngine:
         ckpt_dir = run_dir / "checkpoints"
         if not ckpt_dir.is_dir():
             return None
-        exact = ckpt_dir / f"iter-{iteration:04d}.safetensors"
-        if exact.is_file():
-            return exact.stem
-        exact_ema = ckpt_dir / f"iter-{iteration:04d}-ema.safetensors"
-        if exact_ema.is_file():
-            return exact_ema.stem
+        for candidate_name in (f"iter-{iteration:04d}.safetensors", f"iter-{iteration:04d}-ema.safetensors"):
+            exact = ckpt_dir / candidate_name
+            if exact.is_file():
+                return exact.stem
         candidates = sorted(p for p in ckpt_dir.iterdir() if p.is_file() and p.suffix == ".safetensors")
         return candidates[-1].stem if candidates else None
 
@@ -351,14 +451,64 @@ class InferenceEngine:
         loaded = load_checkpoint(key)
         agent, obs_space = loaded[0], loaded[1]
         agent.eval()
-        scope = agent.inference_scope()
-        scope.__enter__()
-        model = _CachedModel(agent=agent, obs_space=obs_space, scope=scope)
+        device = self._preferred_device
+        try:
+            agent.to(device)
+            scope = agent.inference_scope()
+            scope.__enter__()
+        except RuntimeError:
+            device = "cpu"
+            agent.to(device)
+            scope = agent.inference_scope()
+            scope.__enter__()
+        model = _CachedModel(agent=agent, obs_space=obs_space, scope=scope, device=device)
         self._cache[key] = model
         while len(self._cache) > _MAX_LOADED_CKPTS:
             _, evicted = self._cache.popitem(last=False)
             evicted.scope.__exit__(None, None, None)
         return model
+
+    def evaluate_batch_full(
+        self,
+        obs_list: list[managym.Observation],
+        *,
+        run_id: str,
+        checkpoint_name: str | None,
+        hero_seats: list[int],
+    ) -> tuple[list[list[float]], list[dict[str, float]], str, str | None]:
+        if not obs_list:
+            return [], [], "cpu", None
+        if checkpoint_name and checkpoint_name != "heuristic":
+            try:
+                ckpt_path = self._resolve_checkpoint(run_id, checkpoint_name)
+                with self._lock:
+                    cached = self._get_or_load_locked(ckpt_path)
+                    probs, wdls = _forward_batch_full(cached, obs_list, hero_seats=hero_seats)
+                    device = cached.device
+            except (FileNotFoundError, RuntimeError, ValueError) as exc:
+                pairs = [_heuristic_eval(obs, hero_seat=seat) for obs, seat in zip(obs_list, hero_seats, strict=True)]
+                return (
+                    [p for p, _ in pairs],
+                    [w for _, w in pairs],
+                    "cpu",
+                    f"Checkpoint '{checkpoint_name}' fallback to heuristic: {exc}",
+                )
+            else:
+                return probs, wdls, device, None
+        pairs = [_heuristic_eval(obs, hero_seat=seat) for obs, seat in zip(obs_list, hero_seats, strict=True)]
+        return [p for p, _ in pairs], [w for _, w in pairs], "cpu", None
+
+    def evaluate_batch_action_probs(
+        self,
+        obs_list: list[managym.Observation],
+        *,
+        run_id: str,
+        checkpoint_name: str,
+    ) -> tuple[list[list[float]], str, str | None]:
+        probs, _, device, warn = self.evaluate_batch_full(
+            obs_list, run_id=run_id, checkpoint_name=checkpoint_name, hero_seats=[0] * len(obs_list)
+        )
+        return probs, device, warn
 
     def evaluate_batch_win_probs(
         self,
@@ -370,17 +520,14 @@ class InferenceEngine:
     ) -> tuple[list[float], str]:
         if not obs_list:
             return [], "heuristic"
-        if checkpoint_name and checkpoint_name != "heuristic":
-            try:
-                ckpt_path = self._resolve_checkpoint(run_id, checkpoint_name)
-                with self._lock:
-                    cached = self._get_or_load_locked(ckpt_path)
-                    wins = _forward_batch_hero_win(cached, obs_list, hero_seat=hero_seat)
-            except (FileNotFoundError, RuntimeError, ValueError):
-                pass
-            else:
-                return wins, "model"
-        return [_heuristic_eval(obs, hero_seat=hero_seat)[1]["win"] for obs in obs_list], "heuristic"
+        _, wdls, _, warn = self.evaluate_batch_full(
+            obs_list,
+            run_id=run_id,
+            checkpoint_name=checkpoint_name,
+            hero_seats=[hero_seat] * len(obs_list),
+        )
+        used_model = bool(checkpoint_name) and checkpoint_name != "heuristic" and warn is None
+        return [float(w["win"]) for w in wdls], ("model" if used_model else "heuristic")
 
     def _eval_one(
         self,
@@ -390,19 +537,12 @@ class InferenceEngine:
         checkpoint_name: str | None,
         hero_seat: int,
     ) -> tuple[list[float], dict[str, float], str, str | None]:
-        if not checkpoint_name or checkpoint_name == "heuristic":
-            probs, wdl = _heuristic_eval(obs, hero_seat=hero_seat)
-            return probs, wdl, "heuristic", None
-        try:
-            ckpt_path = self._resolve_checkpoint(run_id, checkpoint_name)
-            with self._lock:
-                cached = self._get_or_load_locked(ckpt_path)
-                probs, wdl = _forward_model(cached, obs, hero_seat=hero_seat)
-        except (FileNotFoundError, RuntimeError, ValueError) as exc:
-            probs, wdl = _heuristic_eval(obs, hero_seat=hero_seat)
-            return probs, wdl, "heuristic", f"Checkpoint '{checkpoint_name}' fallback to heuristic: {exc}"
-        else:
-            return probs, wdl, checkpoint_name, None
+        probs_list, wdls_list, _, warn = self.evaluate_batch_full(
+            [obs], run_id=run_id, checkpoint_name=checkpoint_name, hero_seats=[hero_seat]
+        )
+        is_model = bool(checkpoint_name) and checkpoint_name != "heuristic" and warn is None
+        label = checkpoint_name if (is_model and checkpoint_name is not None) else "heuristic"
+        return probs_list[0], wdls_list[0], label, warn
 
     def evaluate_pair(
         self,
@@ -433,3 +573,30 @@ class InferenceEngine:
             "diff": diff,
             "warnings": warnings,
         }
+
+    def evaluate_matrix(
+        self,
+        obs: managym.Observation,
+        *,
+        run_id: str,
+        hero_seat: int = 0,
+        models: list[str],
+        hide_actions: bool = False,
+    ) -> dict[str, object]:
+        legal_actions = [] if hide_actions else serialize_legal_actions(obs, hero_seat=hero_seat)
+        columns: list[dict[str, object]] = []
+        for ref in models:
+            probs, wdl, _, warn = self._eval_one(obs, run_id=run_id, checkpoint_name=ref, hero_seat=hero_seat)
+            visible_probs = [] if hide_actions else probs
+            top_idx = max(range(len(visible_probs)), key=visible_probs.__getitem__) if visible_probs else None
+            columns.append(
+                {
+                    "ref": ref,
+                    "label": _format_checkpoint_label(ref),
+                    "probs": visible_probs,
+                    "wdl": wdl,
+                    "top_action_index": top_idx,
+                    "warning": warn,
+                }
+            )
+        return {"legal_actions": legal_actions, "columns": columns}

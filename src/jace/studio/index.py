@@ -374,9 +374,10 @@ def _partition_path(games_root: Path, *, run_id: str, iteration: int) -> Path:
 
 
 def _write_partition(rows: list[dict[str, object]], *, games_root: Path, run_id: str, iteration: int) -> None:
-    if not rows:
-        return
     target = _partition_path(games_root, run_id=run_id, iteration=iteration)
+    if not rows:
+        target.unlink(missing_ok=True)
+        return
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.{threading.get_ident()}.tmp")
     pq.write_table(pa.Table.from_pylist(rows, schema=_GAMES_SCHEMA), tmp)
@@ -466,7 +467,14 @@ class StudioIndex:
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         tmp.replace(self._manifest_path)
 
-    def _sync_run_games(self, run_id: str, *, manifest: dict[str, str], seen_keys: set[str]) -> tuple[int, int]:
+    def _sync_run_games(
+        self,
+        run_id: str,
+        *,
+        manifest: dict[str, str],
+        seen_keys: set[str],
+        seen_partitions: set[Path],
+    ) -> tuple[int, int]:
         games_dir = self._runs_dir / run_id / "games"
         if not games_dir.is_dir():
             return 0, 0
@@ -476,18 +484,26 @@ class StudioIndex:
             match = _EVAL_FILE_RE.match(path.name)
             if match is None or not path.is_file():
                 continue
+            iteration = int(match.group(1))
+            seen_partitions.add(_partition_path(self._games_root, run_id=run_id, iteration=iteration).resolve())
             key = str(path.resolve())
             seen_keys.add(key)
             stamp = _file_stamp(path)
             if manifest.get(key) == stamp:
                 continue
-            iteration = int(match.group(1))
             rows = _extract_games_from_jsonl(path, run_id=run_id, iteration=iteration, inference=self._inference)
             _write_partition(rows, games_root=self._games_root, run_id=run_id, iteration=iteration)
             manifest[key] = stamp
             files_done += 1
             games_done += len(rows)
         return files_done, games_done
+
+    def _prune_orphan_partitions(self, seen_partitions: set[Path]) -> None:
+        if not self._games_root.is_dir():
+            return
+        for part in self._games_root.rglob("*.parquet"):
+            if part.resolve() not in seen_partitions:
+                part.unlink(missing_ok=True)
 
     def sync(self, *, force: bool = True) -> dict[str, int]:
         with self._lock:
@@ -496,15 +512,19 @@ class StudioIndex:
                 return {"indexed_files": 0, "indexed_games": 0}
             manifest = self._load_manifest()
             seen_keys: set[str] = set()
+            seen_partitions: set[Path] = set()
             indexed_files = 0
             indexed_games = 0
             for summary in discover_runs(self._runs_dir):
-                f_cnt, g_cnt = self._sync_run_games(summary.run_id, manifest=manifest, seen_keys=seen_keys)
+                f_cnt, g_cnt = self._sync_run_games(
+                    summary.run_id, manifest=manifest, seen_keys=seen_keys, seen_partitions=seen_partitions
+                )
                 indexed_files += f_cnt
                 indexed_games += g_cnt
             pruned = [key for key in manifest if key not in seen_keys]
             for key in pruned:
                 del manifest[key]
+            self._prune_orphan_partitions(seen_partitions)
             if indexed_files > 0 or pruned or not self._manifest_path.exists():
                 self._save_manifest(manifest)
             self._last_sync_mono = time.monotonic()
@@ -526,14 +546,17 @@ class StudioIndex:
             where_sql,
             "ORDER BY",
             order_sql,
-            "LIMIT ? OFFSET ?",
         ]
+        select_params: list[object] = [glob_pattern, *params]
+        if query.limit > 0:
+            select_parts.append("LIMIT ? OFFSET ?")
+            select_params.extend([query.limit, query.offset])
         count_sql = " ".join(count_parts)
         select_sql = " ".join(select_parts)
         with duckdb.connect(":memory:") as conn:
             total_row = conn.execute(count_sql, [glob_pattern, *params]).fetchone()
             total = int(total_row[0]) if total_row is not None else 0
-            records = conn.execute(select_sql, [glob_pattern, *params, query.limit, query.offset]).fetchall()
+            records = conn.execute(select_sql, select_params).fetchall()
         items = [
             GameRecordSummary(
                 run_id=str(row[0]),
@@ -564,7 +587,23 @@ class StudioIndex:
         ]
         return items, total
 
-    def available_cards(self, *, run_id: str | None = None, limit: int = 2000) -> list[str]:
+    def run_game_counts(self) -> dict[str, tuple[int, int]]:
+        self.sync(force=False)
+        if not self._games_root.is_dir() or not any(self._games_root.rglob("*.parquet")):
+            return {}
+        glob_pattern = str(self._games_root / "**" / "*.parquet")
+        counts_sql = (
+            "SELECT run_id, "
+            "SUM(CASE WHEN playable THEN 1 ELSE 0 END) AS playable_cnt, "
+            "SUM(CASE WHEN NOT playable THEN 1 ELSE 0 END) AS legacy_cnt "
+            "FROM read_parquet(?, hive_partitioning = false) "
+            "GROUP BY run_id"
+        )
+        with duckdb.connect(":memory:") as conn:
+            rows = conn.execute(counts_sql, [glob_pattern]).fetchall()
+        return {str(row[0]): (int(row[1] or 0), int(row[2] or 0)) for row in rows}
+
+    def available_cards(self, *, run_id: str | None = None, limit: int | None = None) -> list[str]:
         self.sync(force=False)
         if not self._games_root.is_dir() or not any(self._games_root.rglob("*.parquet")):
             return []
@@ -575,11 +614,14 @@ class StudioIndex:
             "SELECT DISTINCT unnest(cards_seen) AS card",
             "FROM read_parquet(?, hive_partitioning = false)",
             where_sql,
-            "ORDER BY card ASC LIMIT ?",
+            "ORDER BY card ASC",
         ]
+        if limit is not None and limit > 0:
+            cards_parts.append("LIMIT ?")
+            params.append(limit)
         cards_sql = " ".join(cards_parts)
         with duckdb.connect(":memory:") as conn:
-            rows = conn.execute(cards_sql, [*params, limit]).fetchall()
+            rows = conn.execute(cards_sql, params).fetchall()
         return [str(row[0]) for row in rows if row[0] is not None]
 
     def facets(self, *, run_id: str | None = None) -> GameFacets:
@@ -610,7 +652,7 @@ class StudioIndex:
         cards_parts = [
             "SELECT DISTINCT unnest(cards_seen) AS card FROM read_parquet(?, hive_partitioning = false)",
             where_sql,
-            "ORDER BY card ASC LIMIT 2000",
+            "ORDER BY card ASC",
         ]
         counts_where = "WHERE run_id = ?" if run_id else ""
         counts_parts = [

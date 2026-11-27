@@ -1,16 +1,18 @@
 """Training run discovery and live metrics parsing for Jace Studio.
 
 Scans a runs root directory for Jace training runs containing `metrics.jsonl`,
-reads run configurations, separates train vs. eval curves, and enumerates
-saved `.safetensors` checkpoints and `games/eval-iter-*.jsonl` recordings.
+reads run configurations, dynamically discovers numeric train and eval metrics,
+and enumerates saved `.safetensors` checkpoints and `games/eval-iter-*.jsonl`
+recordings.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,9 +20,11 @@ if TYPE_CHECKING:
 
 __all__ = (
     "CheckpointInfo",
+    "GlobalCheckpointOption",
     "RunDetail",
     "RunSummary",
     "discover_runs",
+    "list_all_checkpoints",
     "load_run_detail",
     "resolve_run_dir",
 )
@@ -29,6 +33,8 @@ _EVAL_FILE_RE = re.compile(r"^eval-iter-(\d+)\.jsonl$")
 _CKPT_ITER_RE = re.compile(r"iter-(\d+)")
 _MIN_NESTED_PARTS = 2
 _RUNNING_STALE_SECONDS = 1800.0
+_MAX_TAG_STR_LEN = 64
+_INDEX_METRIC_KEYS = frozenset({"update", "iteration", "kind", "step", "timestamp"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +42,17 @@ class CheckpointInfo:
     iteration: int
     name: str
     path: str
+    size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class GlobalCheckpointOption:
+    ref: str
+    run_id: str
+    run_name: str
+    experiment: str
+    checkpoint: str
+    iteration: int
     size_bytes: int
 
 
@@ -58,6 +75,14 @@ class RunSummary:
     eval_files: int
     checkpoints: tuple[int, ...]
     updated_at: float
+    peak_ensemble_win: float | None = None
+    playable_games: int = 0
+    legacy_games: int = 0
+    latest_metrics: dict[str, float] = field(default_factory=dict)
+    best_metrics: dict[str, float] = field(default_factory=dict)
+    eval_metric_keys: tuple[str, ...] = ()
+    train_metric_keys: tuple[str, ...] = ()
+    config_tags: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,13 +93,16 @@ class RunDetail:
     train_points: tuple[dict[str, object], ...]
     checkpoints: tuple[CheckpointInfo, ...]
     eval_iterations: tuple[int, ...]
+    eval_metric_keys: tuple[str, ...] = ()
+    train_metric_keys: tuple[str, ...] = ()
 
 
 def _safe_float(value: object) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
     return None
 
 
@@ -83,7 +111,7 @@ def _safe_int(value: object, default: int = 0) -> int:
         return default
     if isinstance(value, int):
         return value
-    if isinstance(value, float):
+    if isinstance(value, float) and math.isfinite(value):
         return int(value)
     return default
 
@@ -97,6 +125,17 @@ def _read_config(run_dir: Path) -> dict[str, object]:
     except (json.JSONDecodeError, OSError):
         return {}
     return raw if isinstance(raw, dict) else {}
+
+
+def _is_compact_config_tag(value: object) -> bool:
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, (int, float)):
+        return math.isfinite(float(value))
+    if isinstance(value, str):
+        stripped = value.strip()
+        return bool(stripped) and len(stripped) <= _MAX_TAG_STR_LEN and not stripped.startswith("/")
+    return False
 
 
 def _parse_metric_line(raw_line: str) -> dict[str, object] | None:
@@ -127,6 +166,15 @@ def _read_metrics(metrics_path: Path) -> tuple[list[dict[str, object]], list[dic
             elif item.get("kind") == "train" or "update" in item:
                 train_rows.append(item)
     return train_rows, eval_rows
+
+
+def _discover_metric_keys(rows: list[dict[str, object]]) -> tuple[str, ...]:
+    keys: set[str] = set()
+    for row in rows:
+        for key, value in row.items():
+            if key not in _INDEX_METRIC_KEYS and _safe_float(value) is not None:
+                keys.add(str(key))
+    return tuple(sorted(keys))
 
 
 def _list_checkpoints(run_dir: Path) -> tuple[CheckpointInfo, ...]:
@@ -194,6 +242,20 @@ def _latest_metric(rows: list[dict[str, object]], key: str) -> float | None:
     return None
 
 
+def _populate_metric_maps(
+    rows: list[dict[str, object]],
+    *,
+    keys: tuple[str, ...],
+    latest: dict[str, float],
+    best: dict[str, float],
+) -> None:
+    for key in keys:
+        if key not in latest and (latest_val := _latest_metric(rows, key)) is not None:
+            latest[key] = latest_val
+        if key not in best and (best_val := _peak_metric(rows, key)) is not None:
+            best[key] = best_val
+
+
 def _infer_status(latest_update: int, total_updates: int, *, age_seconds: float) -> str:
     if total_updates > 0 and latest_update >= total_updates:
         return "completed"
@@ -222,6 +284,12 @@ def _build_run_summary(
     )
     total_updates = _safe_int(config.get("updates"))
     mtime = (run_dir / "metrics.jsonl").stat().st_mtime
+    eval_keys = _discover_metric_keys(eval_rows)
+    train_keys = _discover_metric_keys(train_rows)
+    latest_metrics: dict[str, float] = {}
+    best_metrics: dict[str, float] = {}
+    _populate_metric_maps(eval_rows, keys=eval_keys, latest=latest_metrics, best=best_metrics)
+    _populate_metric_maps(train_rows, keys=train_keys, latest=latest_metrics, best=best_metrics)
     return RunSummary(
         run_id=run_id,
         experiment=experiment,
@@ -235,11 +303,17 @@ def _build_run_summary(
         latest_ensemble_win=_latest_metric(eval_rows, "ensemble_held_out_det_win_rate"),
         peak_live_win=_peak_metric(eval_rows, "live_held_out_det_win_rate"),
         peak_ema_win=_peak_metric(eval_rows, "held_out_det_win_rate"),
+        peak_ensemble_win=_peak_metric(eval_rows, "ensemble_held_out_det_win_rate"),
         hidden_dim=_safe_int(config.get("hidden_dim")) or None,
         attention_layers=_safe_int(config.get("attention_layers")) or None,
         eval_files=len(eval_iterations),
         checkpoints=tuple(ckpt.iteration for ckpt in checkpoints),
         updated_at=mtime,
+        latest_metrics=latest_metrics,
+        best_metrics=best_metrics,
+        eval_metric_keys=eval_keys,
+        train_metric_keys=train_keys,
+        config_tags={str(key): val for key, val in sorted(config.items()) if _is_compact_config_tag(val)},
     )
 
 
@@ -296,6 +370,35 @@ def discover_runs(
     return sorted(summaries, key=lambda item: item.updated_at, reverse=True)
 
 
+def list_all_checkpoints(
+    runs_dir: Path,
+    *,
+    include_archive: bool = False,
+) -> list[GlobalCheckpointOption]:
+    resolved = runs_dir.resolve()
+    options: list[GlobalCheckpointOption] = []
+    for summary in discover_runs(resolved, include_archive=include_archive):
+        run_dir = resolve_run_dir(resolved, summary.run_id)
+        ckpts = sorted(
+            _list_checkpoints(run_dir),
+            key=lambda item: (item.iteration, item.name),
+            reverse=True,
+        )
+        options.extend(
+            GlobalCheckpointOption(
+                ref=f"{summary.run_id}::{ckpt.name}",
+                run_id=summary.run_id,
+                run_name=summary.name,
+                experiment=summary.experiment,
+                checkpoint=ckpt.name,
+                iteration=ckpt.iteration,
+                size_bytes=ckpt.size_bytes,
+            )
+            for ckpt in ckpts
+        )
+    return options
+
+
 def load_run_detail(
     runs_dir: Path,
     run_id: str,
@@ -327,4 +430,6 @@ def load_run_detail(
         train_points=_downsample_train(train_rows, max_points=max_train_points),
         checkpoints=checkpoints,
         eval_iterations=eval_iterations,
+        eval_metric_keys=summary.eval_metric_keys,
+        train_metric_keys=summary.train_metric_keys,
     )
