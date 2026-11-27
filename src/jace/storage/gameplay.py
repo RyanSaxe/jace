@@ -3,8 +3,10 @@
 Every training run writes to one self-contained directory under
 `<runs_dir>/<experiment>/<run_id>/` using upstream `manabot` and `managym` formats so
 every trained checkpoint and recorded game opens directly in Academy without conversion.
-Checkpoints are stored as portable `.safetensors` containers beside companion
-`PolicySpec` JSON files, game recordings use `managym`'s native JSONL schema, and
+Evaluation checkpoints use portable `.safetensors` containers beside companion
+`PolicySpec` JSON files, compact `bf16` weight snapshots (`weights-u*.pt`) track dense
+early progression without optimizer state, atomic `resume-state.pt` files preserve full
+crash-recovery state, game recordings use `managym`'s native JSONL schema, and
 structured metrics and forensics stay plain JSON for lightweight inspection.
 """
 
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
     from jace.rl.pool import SnapshotPool, StepRecord
 
 __all__ = (
+    "DENSE_EARLY_UPDATES",
     "RunExistsError",
     "RunLayout",
     "academy_commands",
@@ -34,11 +37,16 @@ __all__ = (
     "append_train_metric",
     "create_run",
     "load_resume_state",
+    "load_weight_snapshot",
     "save_forensics",
     "save_policy_checkpoint",
     "save_resume_state",
+    "save_weight_snapshot",
+    "should_save_weight_snapshot",
 )
 
+DENSE_EARLY_UPDATES: frozenset[int] = frozenset({25, 50, 100, 150, 200, 300, 400})
+_WEIGHT_SNAPSHOT_INTERVAL = 100
 _RESUME_FILENAME = "resume-state.pt"
 
 
@@ -75,6 +83,9 @@ class RunLayout:
 
     def checkpoint_path(self, iteration: int) -> Path:
         return self.checkpoints_dir / f"iter-{iteration:04d}.safetensors"
+
+    def weight_snapshot_path(self, iteration: int) -> Path:
+        return self.checkpoints_dir / f"weights-u{iteration:05d}.pt"
 
     def policy_spec_path(self, iteration: int) -> Path:
         return self.checkpoints_dir / f"iter-{iteration:04d}.policy.json"
@@ -250,3 +261,69 @@ def _restore_ema_state(ema: EmaWeights | None, raw_state: object, *, agent: Acto
         ema.restore_state(raw_state)
     else:
         ema.sync_from(agent)
+
+
+def should_save_weight_snapshot(update: int, *, dense_early: bool = True) -> bool:
+    if dense_early and update in DENSE_EARLY_UPDATES:
+        return True
+    return update > 0 and update % _WEIGHT_SNAPSHOT_INTERVAL == 0
+
+
+def _to_bf16_cpu_state(state: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    converted: dict[str, torch.Tensor] = {}
+    for key, tensor in state.items():
+        cpu_tensor = tensor.detach().cpu()
+        converted[key] = cpu_tensor.to(dtype=torch.bfloat16) if cpu_tensor.is_floating_point() else cpu_tensor.clone()
+    return converted
+
+
+def _extract_ema_tensors(ema: EmaWeights, *, live_keys: set[str]) -> dict[str, torch.Tensor]:
+    exported = ema.export_state()
+    merged: dict[str, torch.Tensor] = {}
+    for section in ("params", "buffers"):
+        raw = exported.get(section)
+        if not isinstance(raw, Mapping):
+            continue
+        for key, val in raw.items():
+            name = str(key)
+            if isinstance(val, torch.Tensor) and name in live_keys:
+                merged[name] = val
+    return _to_bf16_cpu_state(merged)
+
+
+def save_weight_snapshot(
+    layout: RunLayout,
+    *,
+    iteration: int,
+    agent: ActorCritic,
+    ema: EmaWeights | None = None,
+) -> Path:
+    """Atomically write compact bf16 live and optional EMA weights without optimizer state.
+
+    Floating-point tensors are stored in `torch.bfloat16` on CPU while integer and boolean
+    buffers keep their exact original dtypes. Writes to a `.partial` sibling file and
+    renames into place so interrupted transfers or crashes never leave corrupt snapshots.
+    """
+    live_raw = agent.state_dict()
+    payload: dict[str, object] = {
+        "iteration": iteration,
+        "live_state_dict": _to_bf16_cpu_state(live_raw),
+        "ema_state_dict": None if ema is None else _extract_ema_tensors(ema, live_keys=set(live_raw)),
+    }
+    target = layout.weight_snapshot_path(iteration)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_suffix(".pt.partial")
+    torch.save(payload, partial)
+    partial.rename(target)
+    return target
+
+
+def load_weight_snapshot(path: Path) -> dict[str, object]:
+    if not path.exists():
+        msg = f"weight snapshot not found: {path}"
+        raise FileNotFoundError(msg)
+    raw = torch.load(path, map_location="cpu", weights_only=True)
+    if not isinstance(raw, Mapping):
+        msg = f"invalid weight snapshot payload in {path}"
+        raise TypeError(msg)
+    return dict(raw)

@@ -1,10 +1,11 @@
-"""Full-data 17Lands TLA self-play training loop with held-out parallel eval and resume.
+"""Full-data 17Lands TLA self-play training loop with dense snapshots, preflight, and resume.
 
 Trains Jace v2's `ActorCritic` across all 91,359 human Limited decks in `decks.pt` using
 sharded multi-process CPU or in-process GPU/native collection, auto-resolved CUDA
 precision (`bf16`) and live-token attention, optional `stream_norm`/`focus_film`,
 AlphaStar-style even-odds snapshot matching, batch-to-batch gradient-agreement logging,
-atomic checkpoint resume, and fast 8-worker mirrored evaluations strictly on the 10,137
+compact `bf16` dense early weight snapshots, atomic checkpoint resume, a `< 60s`
+`--preflight` smoke gate, and fast 8-worker mirrored evaluations strictly on the 10,137
 unseen held-out human decks.
 """
 
@@ -14,9 +15,13 @@ import argparse
 import copy
 import json
 import logging
+import math
 import sys
+import tempfile
+import time
+from collections.abc import Mapping
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -65,9 +70,12 @@ from jace.storage.gameplay import (
     append_train_metric,
     create_run,
     load_resume_state,
+    load_weight_snapshot,
     save_forensics,
     save_policy_checkpoint,
     save_resume_state,
+    save_weight_snapshot,
+    should_save_weight_snapshot,
 )
 
 if TYPE_CHECKING:
@@ -76,9 +84,22 @@ if TYPE_CHECKING:
     from manabot.backends.torch.policy import ActorCritic
     from manabot.env.observation import ObservationSpace
 
-__all__ = ("FullDataConfig", "main", "resolve_live_tokens", "resolve_precision", "run_full_data_training")
+__all__ = (
+    "FullDataConfig",
+    "PreflightReport",
+    "main",
+    "resolve_live_tokens",
+    "resolve_precision",
+    "run_full_data_training",
+    "run_preflight",
+)
 
 _RESUME_FILENAME = "resume-state.pt"
+_PREFLIGHT_UPDATES = 2
+_PREFLIGHT_MAX_KL = 0.5
+_PREFLIGHT_GRAD_NORM_MULT = 10.0
+_PREFLIGHT_MAX_VRAM_FRAC = 0.9
+_BYTES_PER_GIB = float(1024**3)
 type PrecisionChoice = Literal["auto", "float32", "tf32", "bf16"]
 
 
@@ -150,8 +171,34 @@ class FullDataConfig:
     record_train_fraction: float = 0.01
     init_checkpoint: Path | None = None
     resume: bool = False
+    dense_early_checkpoints: bool = True
+    preflight: bool = False
     fork: BatchedForkSpec = field(default_factory=BatchedForkSpec)
     seed: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class PreflightReport:
+    passed: bool
+    elapsed_s: float
+    updates_run: int
+    peak_vram_gb: float
+    vram_budget_gb: float
+    tps: float
+    max_grad_norm_seen: float
+    max_collection_kl: float
+    checkpoint_reload_ok: bool
+    failures: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class _TrainingSession:
+    layout: RunLayout
+    agent: ActorCritic
+    optimizer: torch.optim.Optimizer
+    pool: SnapshotPool | None
+    ema_weights: EmaWeights | None
+    records: list[StepRecord]
 
 
 def _evaluate_full_data(
@@ -306,13 +353,7 @@ def _init_training_state(
     return 1
 
 
-def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
-    """Train Jace v2 across all 17Lands TLA human decks with held-out evaluation and resume.
-
-    Loads `cfg.decks_path` (`decks.pt`), runs sharded 8-worker self-play over the 91,359
-    training decks, evaluates every `cfg.eval_every` updates on 200 mirrored games drawn
-    strictly from the 10,137 unseen held-out human decks, and saves atomic resume state.
-    """
+def _run_training_session(cfg: FullDataConfig) -> _TrainingSession:
     logging.getLogger("manabot").setLevel(logging.WARNING)
     torch.manual_seed(cfg.seed)
     catalog = load_human_deck_catalog(cfg.decks_path)
@@ -366,6 +407,7 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
     held_out_deals = build_human_deals(catalog, split="held_out", count=cfg.eval_deals, seed=cfg.seed + 20_000)
     forensics_deals = held_out_deals[: cfg.forensics_deals]
     probes = capture_probes(forensics_deals, max_probes=cfg.probe_count)
+    records: list[StepRecord] = []
 
     run_eval = partial(
         _evaluate_full_data,
@@ -386,6 +428,9 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
 
     def on_update(record: StepRecord) -> None:
         append_train_metric(layout, record)
+        records.append(record)
+        if should_save_weight_snapshot(record.update, dense_early=cfg.dense_early_checkpoints):
+            save_weight_snapshot(layout, iteration=record.update, agent=agent, ema=ema_weights)
         if record.update % cfg.eval_every == 0 or record.update == cfg.updates:
             run_eval(iteration=record.update, record_games=True)
         elif cfg.resume_save_every > 0 and record.update % cfg.resume_save_every == 0:
@@ -508,7 +553,213 @@ def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
             snapshot_pool=pool,
             ema_weights=ema_weights,
         )
-    return layout
+    return _TrainingSession(
+        layout=layout,
+        agent=agent,
+        optimizer=optimizer,
+        pool=pool,
+        ema_weights=ema_weights,
+        records=records,
+    )
+
+
+def run_full_data_training(cfg: FullDataConfig) -> RunLayout:
+    """Train Jace v2 across all 17Lands TLA human decks with held-out evaluation and resume.
+
+    Loads `cfg.decks_path` (`decks.pt`), runs sharded 8-worker self-play over the 91,359
+    training decks, evaluates every `cfg.eval_every` updates on 200 mirrored games drawn
+    strictly from the 10,137 unseen held-out human decks, writes dense `bf16` weight
+    snapshots, and saves atomic resume state.
+    """
+    return _run_training_session(cfg).layout
+
+
+def _is_cuda_device(device_name: str) -> bool:
+    return device_name.startswith("cuda") and torch.cuda.is_available()
+
+
+def _reset_cuda_peak_memory(device_name: str) -> None:
+    if _is_cuda_device(device_name):
+        torch.cuda.reset_peak_memory_stats(torch.device(device_name))
+
+
+def _cuda_vram_stats(device_name: str) -> tuple[float, float]:
+    if not _is_cuda_device(device_name):
+        return 0.0, 0.0
+    device = torch.device(device_name)
+    peak_gb = torch.cuda.max_memory_allocated(device) / _BYTES_PER_GIB
+    budget_gb = torch.cuda.get_device_properties(device).total_memory / _BYTES_PER_GIB
+    return peak_gb, budget_gb
+
+
+def _tensors_are_finite(state: Mapping[str, object]) -> bool:
+    for val in state.values():
+        if isinstance(val, torch.Tensor) and val.is_floating_point() and not bool(torch.isfinite(val).all().item()):
+            return False
+    return True
+
+
+def _verify_snapshot_reload(
+    session: _TrainingSession,
+    *,
+    fresh_agent: ActorCritic,
+    iteration: int,
+) -> bool:
+    snap_path = save_weight_snapshot(session.layout, iteration=iteration, agent=session.agent, ema=session.ema_weights)
+    snap = load_weight_snapshot(snap_path)
+    live_state = snap.get("live_state_dict")
+    if snap.get("iteration") != iteration or not isinstance(live_state, Mapping) or not _tensors_are_finite(live_state):
+        return False
+    fresh_agent.load_state_dict(live_state)
+    ema_state = snap.get("ema_state_dict")
+    if session.ema_weights is not None:
+        if not isinstance(ema_state, Mapping) or not _tensors_are_finite(ema_state):
+            return False
+        fresh_agent.load_state_dict(ema_state)
+    return True
+
+
+def _verify_checkpoint_roundtrip(session: _TrainingSession, *, cfg: FullDataConfig, iteration: int) -> bool:
+    use_live_tokens = resolve_live_tokens(live_tokens=cfg.live_tokens, device=cfg.learn_device)
+    fresh_agent, _ = build_agent(
+        hidden_dim=cfg.hidden_dim,
+        attention_layers=cfg.attention_layers,
+        decision_memory=cfg.decision_memory,
+        stream_norm=cfg.stream_norm,
+        focus_film=cfg.focus_film,
+        bucketed_shapes=True,
+        live_tokens=use_live_tokens,
+    )
+    if not _verify_snapshot_reload(session, fresh_agent=fresh_agent, iteration=iteration):
+        return False
+    save_resume_state(
+        session.layout,
+        iteration=iteration,
+        optimizer=session.optimizer,
+        snapshot_pool=session.pool,
+        agent=session.agent,
+        ema=session.ema_weights,
+    )
+    fresh_opt = torch.optim.Adam(fresh_agent.parameters(), lr=cfg.learning_rate)
+    fresh_pool = (
+        SnapshotPool(max_size=cfg.snapshot_pool_size, matching=cfg.snapshot_matching)
+        if session.pool is not None
+        else None
+    )
+    fresh_ema = EmaWeights(fresh_agent, decay=cfg.ema) if cfg.ema is not None else None
+    loaded_iter = load_resume_state(
+        session.layout,
+        agent=fresh_agent,
+        optimizer=fresh_opt,
+        snapshot_pool=fresh_pool,
+        ema=fresh_ema,
+        device="cpu",
+    )
+    return loaded_iter == iteration and _tensors_are_finite(fresh_agent.state_dict())
+
+
+def _collect_preflight_failures(
+    *,
+    updates_run: int,
+    weights_finite: bool,
+    losses_finite: bool,
+    max_grad_norm_seen: float,
+    max_grad_norm_limit: float,
+    max_collection_kl: float,
+    peak_vram_gb: float,
+    vram_budget_gb: float,
+    tps: float,
+    checkpoint_reload_ok: bool,
+) -> tuple[str, ...]:
+    checks = (
+        (updates_run < _PREFLIGHT_UPDATES, f"expected {_PREFLIGHT_UPDATES} updates, ran {updates_run}"),
+        (not weights_finite, "non-finite weights detected after preflight updates"),
+        (not losses_finite, "non-finite policy_loss or value_loss detected"),
+        (
+            not math.isfinite(max_grad_norm_seen) or max_grad_norm_seen <= 0.0,
+            f"grad_norm collapsed: {max_grad_norm_seen}",
+        ),
+        (
+            math.isfinite(max_grad_norm_seen) and max_grad_norm_seen > max_grad_norm_limit,
+            f"grad_norm exploded: {max_grad_norm_seen:.4f} > {max_grad_norm_limit:.4f}",
+        ),
+        (
+            not math.isfinite(max_collection_kl) or max_collection_kl > _PREFLIGHT_MAX_KL,
+            f"collection_kl exceeded {_PREFLIGHT_MAX_KL}: {max_collection_kl:.4f}",
+        ),
+        (
+            vram_budget_gb > 0.0 and peak_vram_gb > _PREFLIGHT_MAX_VRAM_FRAC * vram_budget_gb,
+            f"peak VRAM {peak_vram_gb:.2f} GB exceeded 90% of {vram_budget_gb:.2f} GB",
+        ),
+        (not math.isfinite(tps) or tps <= 0.0, f"throughput collapsed: tps={tps}"),
+        (not checkpoint_reload_ok, "weight snapshot or resume state reload verification failed"),
+    )
+    return tuple(message for failed, message in checks if failed)
+
+
+def run_preflight(cfg: FullDataConfig) -> PreflightReport:
+    """Run a self-contained 2-update smoke gate in a temporary directory.
+
+    Preserves the caller's model dimensions, precision, device, and RL hyperparameters
+    while shrinking evaluation and worker counts so numerical stability, VRAM headroom,
+    throughput, and both weight-snapshot and resume-state round-trips are verified before
+    committing to a long GPU training run.
+    """
+    start_s = time.perf_counter()
+    _reset_cuda_peak_memory(cfg.learn_device)
+    with tempfile.TemporaryDirectory(prefix="jace-preflight-") as tmp_dir:
+        smoke_cfg = replace(
+            cfg,
+            runs_dir=Path(tmp_dir),
+            run_id=f"{cfg.run_id}-preflight",
+            updates=_PREFLIGHT_UPDATES,
+            eval_every=_PREFLIGHT_UPDATES,
+            resume_save_every=_PREFLIGHT_UPDATES,
+            eval_deals=2,
+            forensics_deals=2,
+            probe_count=4,
+            collect_workers=0,
+            eval_workers=1,
+            resume=False,
+            preflight=False,
+        )
+        session = _run_training_session(smoke_cfg)
+        updates_run = len(session.records)
+        weights_finite = _tensors_are_finite(session.agent.state_dict())
+        losses_finite = all(
+            math.isfinite(rec.stats.policy_loss) and math.isfinite(rec.stats.value_loss) for rec in session.records
+        )
+        max_grad_norm_seen = max((rec.stats.grad_norm for rec in session.records), default=0.0)
+        max_collection_kl = max((rec.stats.collection_kl for rec in session.records), default=0.0)
+        total_rows = sum(rec.stats.rows for rec in session.records)
+        total_step_s = sum(rec.collect_s + rec.learn_s for rec in session.records)
+        tps = total_rows / max(total_step_s, 1e-6) if total_rows > 0 else 0.0
+        checkpoint_reload_ok = _verify_checkpoint_roundtrip(session, cfg=smoke_cfg, iteration=updates_run)
+    peak_vram_gb, vram_budget_gb = _cuda_vram_stats(cfg.learn_device)
+    failures = _collect_preflight_failures(
+        updates_run=updates_run,
+        weights_finite=weights_finite,
+        losses_finite=losses_finite,
+        max_grad_norm_seen=max_grad_norm_seen,
+        max_grad_norm_limit=_PREFLIGHT_GRAD_NORM_MULT * cfg.max_grad_norm,
+        max_collection_kl=max_collection_kl,
+        peak_vram_gb=peak_vram_gb,
+        vram_budget_gb=vram_budget_gb,
+        tps=tps,
+        checkpoint_reload_ok=checkpoint_reload_ok,
+    )
+    return PreflightReport(
+        passed=not failures,
+        elapsed_s=round(time.perf_counter() - start_s, 3),
+        updates_run=updates_run,
+        peak_vram_gb=round(peak_vram_gb, 3),
+        vram_budget_gb=round(vram_budget_gb, 3),
+        tps=round(tps, 1),
+        max_grad_norm_seen=round(max_grad_norm_seen, 5),
+        max_collection_kl=round(max_collection_kl, 5),
+        checkpoint_reload_ok=checkpoint_reload_ok,
+        failures=failures,
+    )
 
 
 def _parse_args(argv: Sequence[str] | None) -> FullDataConfig:
@@ -535,6 +786,8 @@ def _parse_args(argv: Sequence[str] | None) -> FullDataConfig:
     parser.add_argument("--record-train-fraction", type=float, default=0.01)
     parser.add_argument("--init-checkpoint", type=Path, default=None)
     parser.add_argument("--resume", action="store_true", default=False)
+    parser.add_argument("--dense-early-checkpoints", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--preflight", action="store_true", default=False)
     add_fork_cli_args(parser)
     parser.add_argument("--seed", type=int, default=1)
     ns = parser.parse_args(argv)
@@ -545,6 +798,10 @@ def _parse_args(argv: Sequence[str] | None) -> FullDataConfig:
 
 def main(argv: Sequence[str] | None = None) -> int:
     cfg = _parse_args(argv)
+    if cfg.preflight:
+        report = run_preflight(cfg)
+        sys.stdout.write(json.dumps(asdict(report), sort_keys=True) + "\n")
+        return 0 if report.passed else 1
     layout = run_full_data_training(cfg)
     sys.stdout.write(json.dumps({"run_root": str(layout.root)}) + "\n")
     return 0
