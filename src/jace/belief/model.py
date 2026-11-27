@@ -56,27 +56,31 @@ class BeliefNet(nn.Module):
         signal_dim: int = GAMEPLAY_SIGNAL_DIM,
         hidden_dim: int = 64,
         embedding: CardVectors | None = None,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.signal_dim = signal_dim
         self.hidden_dim = hidden_dim
+        self.dropout = dropout
         self.embedding: CardVectors | None = embedding
         self.card_project: nn.Linear | None = None if embedding is None else nn.Linear(embedding.width, hidden_dim)
         self.scalar_encoder = nn.Sequential(
             nn.Linear(_CARD_SCALAR_DIM, hidden_dim),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
         )
         self.global_encoder = nn.Sequential(
             nn.Linear(signal_dim + _SIZE_FEATURE_DIM, hidden_dim),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
         )
         out = nn.Linear(hidden_dim, 2)
         # Zero-init final projection so the untrained network reproduces the calibrated deck prior.
         nn.init.zeros_(out.weight)
         nn.init.zeros_(out.bias)
-        self.card_head = nn.Sequential(nn.Linear(hidden_dim * 3, hidden_dim), nn.GELU(), out)
+        self.card_head = nn.Sequential(nn.Linear(hidden_dim * 3, hidden_dim), nn.GELU(), nn.Dropout(dropout), out)
 
     @override
     def forward(
@@ -247,6 +251,7 @@ def save_belief_net(path: Path, model: BeliefNet) -> None:
     payload: dict[str, object] = {
         "signal_dim": model.signal_dim,
         "hidden_dim": model.hidden_dim,
+        "dropout": model.dropout,
         "card_table": card_table,
         "state_dict": model.state_dict(),
     }
@@ -262,10 +267,11 @@ def load_belief_net(path: Path) -> BeliefNet:
         raise TypeError(msg)
     signal_dim = int(payload.get("signal_dim", GAMEPLAY_SIGNAL_DIM))
     hidden_dim = int(payload.get("hidden_dim", 64))
+    dropout = float(payload.get("dropout", 0.0))
     raw_table = payload.get("card_table")
     embedding = CardTable(raw_table) if isinstance(raw_table, Tensor) else None
     state_dict = payload.get("state_dict", payload)
-    model = BeliefNet(signal_dim=signal_dim, hidden_dim=hidden_dim, embedding=embedding)
+    model = BeliefNet(signal_dim=signal_dim, hidden_dim=hidden_dim, embedding=embedding, dropout=dropout)
     model.load_state_dict(state_dict)
     model.eval()
     return model

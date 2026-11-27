@@ -35,6 +35,7 @@ class MatchupPredictor(nn.Module):
         width: int = 64,
         layers: int = 2,
         heads: int = 4,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.width = width
@@ -48,6 +49,7 @@ class MatchupPredictor(nn.Module):
         self.head: nn.Sequential = nn.Sequential(
             nn.Linear(width * 4, width),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(width, 1),
         )
 

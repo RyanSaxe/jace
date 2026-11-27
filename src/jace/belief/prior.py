@@ -34,6 +34,8 @@ _MATRIX_NDIM = 2
 _MAX_UINT8 = 255.0
 _PRIOR_FORMAT_VERSION = 1
 _FALLBACK_UNCOVERED_FLOOR = 0.05
+_LIFT_FLOOR = 1e-5
+_DEFAULT_MIN_ESS = 25.0
 _REQUIRED_PRIOR_KEYS = frozenset(
     {"version", "format_id", "card_names", "mean_copies", "cond_copies", "booster_fallback", "deck_pool", "copy_limits"}
 )
@@ -74,11 +76,15 @@ def fit_format_prior(  # noqa: PLR0917 -- public contract takes (format_id, card
 
 
 class BayesianDeckPoolPrior:
-    def __init__(self, *, temperature: float = 1.0) -> None:
+    def __init__(self, *, temperature: float = 1.0, min_ess: float = _DEFAULT_MIN_ESS) -> None:
         if temperature <= 0.0:
             msg = f"temperature must be positive, got {temperature}"
             raise ValueError(msg)
+        if min_ess < 0.0:
+            msg = f"min_ess must be non-negative, got {min_ess}"
+            raise ValueError(msg)
         self.temperature = temperature
+        self.min_ess = min_ess
 
     def posterior_deck(self, revealed_counts: Tensor, prior: FormatPrior) -> Tensor:
         revealed_2d, was_1d = _as_batched_revealed(revealed_counts, len(prior.card_names))
@@ -89,14 +95,20 @@ class BayesianDeckPoolPrior:
             result = _apply_copy_limits(fallback, revealed=revealed_2d, copy_limits=prior.copy_limits)
             return result.squeeze(0) if was_1d else result
 
-        unseen_pool, has_cover = _hypergeometric_pool_posterior(
+        unseen_pool, ess, has_cover = _hypergeometric_pool_posterior(
             revealed_2d,
             pool=prior.deck_pool,
             temperature=self.temperature,
         )
         booster = prior.booster_fallback.to(device=device, dtype=torch.float32).unsqueeze(0)
         uncovered_fallback = (1.0 - _FALLBACK_UNCOVERED_FLOOR) * fallback + _FALLBACK_UNCOVERED_FLOOR * booster
-        combined = torch.where(has_cover.unsqueeze(-1), unseen_pool, uncovered_fallback)
+        if self.min_ess > 0.0:
+            # Empirical-Bayes ESS shrinkage prevents late-game zero-count collapse when only 1..10 decks cover.
+            gamma = torch.where(has_cover, ess / (ess + self.min_ess), torch.zeros_like(ess)).unsqueeze(-1)
+            combined = gamma * unseen_pool + (1.0 - gamma) * fallback
+            combined = torch.where(has_cover.unsqueeze(-1), combined, uncovered_fallback)
+        else:
+            combined = torch.where(has_cover.unsqueeze(-1), unseen_pool, uncovered_fallback)
         result = _apply_copy_limits(combined, revealed=revealed_2d, copy_limits=prior.copy_limits)
         return result.squeeze(0) if was_1d else result
 
@@ -264,25 +276,28 @@ def _hypergeometric_pool_posterior(
     *,
     pool: Tensor,
     temperature: float,
-) -> tuple[Tensor, Tensor]:
+) -> tuple[Tensor, Tensor, Tensor]:
     # Only the k << C nonzero revealed columns affect deck coverage and log-binomial weights,
     # avoiding a dense (B, N_decks, C) allocation that would blow up RAM on 90k-deck pools.
     batch, num_cards = revealed.shape
     device = revealed.device
     if batch == 0:
-        return torch.empty_like(revealed), torch.empty((0,), dtype=torch.bool, device=device)
+        empty_f = torch.empty((0,), dtype=torch.float32, device=device)
+        return torch.empty_like(revealed), empty_f, torch.empty((0,), dtype=torch.bool, device=device)
 
     pool_totals = pool.sum(dim=-1, dtype=torch.float32).to(device=device)
     pool_mean = (pool.sum(dim=0, dtype=torch.float32) / float(pool.shape[0])).to(device=device)
     zero_row = torch.zeros((num_cards,), dtype=torch.float32, device=device)
 
     expected_rows: list[Tensor] = []
+    ess = torch.zeros((batch,), dtype=torch.float32, device=device)
     has_cover = torch.zeros((batch,), dtype=torch.bool, device=device)
     for i in range(batch):
         rev = revealed[i]
         nz = (rev > 0.0).nonzero(as_tuple=False).squeeze(-1)
         if nz.numel() == 0:
             has_cover[i] = True
+            ess[i] = float(pool.shape[0])
             expected_rows.append(pool_mean)
             continue
 
@@ -297,12 +312,13 @@ def _hypergeometric_pool_posterior(
         card_log_ways = _log_binom(sub_pool[cov_idx], sub_rev.unsqueeze(0)).sum(dim=-1)
         total_log_ways = _log_binom(pool_totals[cov_idx], sub_rev.sum())
         weights = torch.softmax((card_log_ways - total_log_ways) / temperature, dim=-1)
+        ess[i] = 1.0 / (weights * weights).sum().clamp_min(1e-12)
         cov_full = pool[cov_idx.to(device=pool.device)].to(device=device, dtype=torch.float32)
         expected_rows.append(weights @ cov_full)
 
     expected_full = torch.stack(expected_rows, dim=0)
     unseen = (expected_full - revealed).clamp_min(0.0)
-    return unseen, has_cover
+    return unseen, ess, has_cover
 
 
 def _conditional_fallback(revealed: Tensor, prior: FormatPrior, *, device: torch.device) -> Tensor:
@@ -312,7 +328,23 @@ def _conditional_fallback(revealed: Tensor, prior: FormatPrior, *, device: torch
 
     rev_total = revealed.sum(dim=-1, keepdim=True)
     no_revealed = rev_total <= 0.0
-    cond_est = (revealed @ cond_copies) / rev_total.clamp_min(1.0)
+    seen_mask = (revealed > 0.0).to(dtype=torch.float32)
+    # Calibrated sqrt(k) pairwise log-lift preserves archetype/color sharpness when exact pool cover is sparse.
+    safe_mean = mean_copies.clamp_min(_LIFT_FLOOR)
+    safe_cond = cond_copies.clamp_min(_LIFT_FLOOR)
+    lifts = (safe_cond / safe_mean.unsqueeze(0)).log()
+    seen_in_meta = seen_mask * (mean_copies > 0.0).to(dtype=torch.float32).unsqueeze(0)
+    k_meta = seen_in_meta.sum(dim=-1, keepdim=True)
+    lift_est = safe_mean.unsqueeze(0) * ((seen_in_meta @ lifts) / k_meta.clamp_min(1.0).sqrt()).exp()
+    lift_est = torch.where(seen_in_meta > 0.0, lift_est.maximum(cond_copies.diagonal().unsqueeze(0)), lift_est)
+    lift_est = torch.where(mean_copies.unsqueeze(0) > 0.0, lift_est, torch.zeros_like(lift_est))
+    # Preserve total deck-size scale of the format prior when multiple cards lift together.
+    target_deck_size = mean_copies.sum().clamp_min(1.0)
+    cond_est = torch.where(
+        k_meta > 0.0,
+        lift_est * (target_deck_size / lift_est.sum(dim=-1, keepdim=True).clamp_min(_LIFT_FLOOR)),
+        mean_copies.unsqueeze(0).expand_as(revealed),
+    )
 
     unseen_card_mask = (mean_copies <= 0.0).to(dtype=torch.float32)
     unseen_share = (revealed * unseen_card_mask).sum(dim=-1, keepdim=True) / rev_total.clamp_min(1.0)

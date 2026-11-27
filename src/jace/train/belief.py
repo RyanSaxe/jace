@@ -232,8 +232,10 @@ def _train_belief_model(
     t0: float,
 ) -> tuple[BeliefNet, dict[str, object]]:
     torch.manual_seed(seed)
-    model = BeliefNet(signal_dim=GAMEPLAY_SIGNAL_DIM, hidden_dim=hidden_dim, embedding=card_table).to(device)
-    optimizer = torch.optim.AdamW(own_parameters(model, card_table), lr=lr, weight_decay=1e-4)
+    model = BeliefNet(signal_dim=GAMEPLAY_SIGNAL_DIM, hidden_dim=hidden_dim, embedding=card_table, dropout=0.2).to(
+        device
+    )
+    optimizer = torch.optim.AdamW(own_parameters(model, card_table), lr=lr, weight_decay=1e-2)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs))
     limits_dev = copy_limits.to(device=device) if copy_limits is not None else None
     n_rows = train_ds.revealed_counts.shape[0]
@@ -328,17 +330,21 @@ def _train_v0_model(
     seed: int,
 ) -> tuple[MatchupPredictor, dict[str, object]]:
     torch.manual_seed(seed)
-    predictor = MatchupPredictor(card_table, width=32, layers=2, heads=4).to(device)
+    predictor = MatchupPredictor(card_table, width=32, layers=2, heads=4, dropout=0.3).to(device)
     if train_ds.matchup_outcomes.numel() == 0:
         predictor.cpu().eval()
         return predictor, {"matchup_val": evaluate_v0_metrics(torch.empty(0), torch.empty(0))}
 
-    optimizer = torch.optim.AdamW(predictor.parameters(), lr=lr, weight_decay=1e-3)
+    optimizer = torch.optim.AdamW(own_parameters(predictor, card_table), lr=lr, weight_decay=5e-2)
     loss_fn = nn.BCEWithLogitsLoss()
     field_dev = prior.mean_copies.to(device=device, dtype=torch.float32)
     my_tr = train_ds.matchup_my_decks.to(device)
     opp_tr = train_ds.matchup_opp_decks.to(device)
     y_tr = train_ds.matchup_outcomes.to(device)
+    val_my = val_ds.matchup_my_decks.to(device)
+    val_opp = val_ds.matchup_opp_decks.to(device)
+    best_bce = math.inf
+    best_state = {k: v.detach().cpu().clone() for k, v in predictor.state_dict().items()}
 
     for _ in range(epochs):
         predictor.train()
@@ -348,11 +354,18 @@ def _train_v0_model(
         loss_field = loss_fn(predictor(my_tr, field_dev), y_tr)
         (loss_match + loss_field).backward()
         optimizer.step()
+        if val_my.shape[0] > 0:
+            predictor.eval()
+            with torch.no_grad():
+                val_p = predictor.predict_equity(val_my, val_opp).cpu()
+            cur_bce = evaluate_v0_metrics(val_p, val_ds.matchup_outcomes)["bce"]
+            if cur_bce < best_bce:
+                best_bce = cur_bce
+                best_state = {k: v.detach().cpu().clone() for k, v in predictor.state_dict().items()}
 
+    predictor.load_state_dict(best_state)
     predictor.eval()
     with torch.no_grad():
-        val_my = val_ds.matchup_my_decks.to(device)
-        val_opp = val_ds.matchup_opp_decks.to(device)
         val_match_p = predictor.predict_equity(val_my, val_opp).cpu() if val_my.shape[0] > 0 else torch.empty(0)
         val_field_p = predictor.predict_equity(val_my, field_dev).cpu() if val_my.shape[0] > 0 else torch.empty(0)
     predictor.cpu().eval()
