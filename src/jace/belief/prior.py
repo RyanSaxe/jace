@@ -89,10 +89,9 @@ class BayesianDeckPoolPrior:
             result = _apply_copy_limits(fallback, revealed=revealed_2d, copy_limits=prior.copy_limits)
             return result.squeeze(0) if was_1d else result
 
-        pool = prior.deck_pool.to(device=device, dtype=torch.float32)
         unseen_pool, has_cover = _hypergeometric_pool_posterior(
             revealed_2d,
-            pool=pool,
+            pool=prior.deck_pool,
             temperature=self.temperature,
         )
         booster = prior.booster_fallback.to(device=device, dtype=torch.float32).unsqueeze(0)
@@ -266,19 +265,42 @@ def _hypergeometric_pool_posterior(
     pool: Tensor,
     temperature: float,
 ) -> tuple[Tensor, Tensor]:
-    covers = (pool.unsqueeze(0) >= revealed.unsqueeze(1) - 1e-6).all(dim=-1)
-    has_cover = covers.any(dim=-1)
+    # Only the k << C nonzero revealed columns affect deck coverage and log-binomial weights,
+    # avoiding a dense (B, N_decks, C) allocation that would blow up RAM on 90k-deck pools.
+    batch, num_cards = revealed.shape
+    device = revealed.device
+    if batch == 0:
+        return torch.empty_like(revealed), torch.empty((0,), dtype=torch.bool, device=device)
 
-    pool_totals = pool.sum(dim=-1).unsqueeze(0)
-    rev_totals = revealed.sum(dim=-1, keepdim=True)
-    card_log_ways = _log_binom(pool.unsqueeze(0), revealed.unsqueeze(1)).sum(dim=-1)
-    total_log_ways = _log_binom(pool_totals, rev_totals)
-    log_lik = (card_log_ways - total_log_ways) / temperature
+    pool_totals = pool.sum(dim=-1, dtype=torch.float32).to(device=device)
+    pool_mean = (pool.sum(dim=0, dtype=torch.float32) / float(pool.shape[0])).to(device=device)
+    zero_row = torch.zeros((num_cards,), dtype=torch.float32, device=device)
 
-    masked_log_lik = torch.where(covers, log_lik, torch.full_like(log_lik, -torch.inf))
-    safe_log_lik = torch.where(has_cover.unsqueeze(-1), masked_log_lik, torch.zeros_like(log_lik))
-    weights = torch.softmax(safe_log_lik, dim=-1)
-    expected_full = weights @ pool
+    expected_rows: list[Tensor] = []
+    has_cover = torch.zeros((batch,), dtype=torch.bool, device=device)
+    for i in range(batch):
+        rev = revealed[i]
+        nz = (rev > 0.0).nonzero(as_tuple=False).squeeze(-1)
+        if nz.numel() == 0:
+            has_cover[i] = True
+            expected_rows.append(pool_mean)
+            continue
+
+        sub_rev = rev[nz]
+        sub_pool = pool[:, nz.to(device=pool.device)].to(device=device, dtype=torch.float32)
+        cov_idx = (sub_pool >= sub_rev.unsqueeze(0) - 1e-6).all(dim=-1).nonzero(as_tuple=False).squeeze(-1)
+        if cov_idx.numel() == 0:
+            expected_rows.append(zero_row)
+            continue
+
+        has_cover[i] = True
+        card_log_ways = _log_binom(sub_pool[cov_idx], sub_rev.unsqueeze(0)).sum(dim=-1)
+        total_log_ways = _log_binom(pool_totals[cov_idx], sub_rev.sum())
+        weights = torch.softmax((card_log_ways - total_log_ways) / temperature, dim=-1)
+        cov_full = pool[cov_idx.to(device=pool.device)].to(device=device, dtype=torch.float32)
+        expected_rows.append(weights @ cov_full)
+
+    expected_full = torch.stack(expected_rows, dim=0)
     unseen = (expected_full - revealed).clamp_min(0.0)
     return unseen, has_cover
 

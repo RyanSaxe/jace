@@ -32,7 +32,7 @@ from jace.belief import (
     save_belief_net,
     save_format_prior,
 )
-from jace.cards import CardTable
+from jace.cards import CardTable, own_parameters
 from jace.collect.decks import load_human_deck_catalog
 from jace.eval.arena import SearchConfigSummary
 from jace.forks.arena import run_search_arena_match
@@ -193,10 +193,35 @@ def _predict_belief_batched(
     return torch.cat(decks_out, dim=0), torch.cat(hands_out, dim=0)
 
 
+def _log_phase(t0: float, msg: str) -> None:
+    sys.stderr.write(f"[belief +{time.perf_counter() - t0:6.1f}s] {msg}\n")
+    sys.stderr.flush()
+
+
+def _v2_meta_guess_baseline(
+    revealed: Tensor,
+    *,
+    prior: FormatPrior,
+    hand_sizes: Tensor,
+    lib_sizes: Tensor,
+) -> tuple[Tensor, Tensor]:
+    # Reproduces v1/v2-guess's sqrt(k) log-lift pairwise approximation for apples-to-apples comparison.
+    copies = prior.mean_copies.to(dtype=torch.float32).clamp_min(1e-4)
+    cond = prior.cond_copies.to(dtype=torch.float32).clamp_min(1e-4)
+    lifts = (cond / copies.unsqueeze(0)).log()
+    known = (revealed > 0.0).to(dtype=torch.float32)
+    lift = (known @ lifts) / known.sum(dim=-1, keepdim=True).clamp_min(1.0).sqrt()
+    expected = copies.unsqueeze(0) * lift.exp()
+    expected = torch.where(known > 0.0, expected.maximum(cond.diagonal().unsqueeze(0)), expected)
+    unseen_raw = (expected - revealed).clamp_min(1e-4)
+    return _scale_prior_baseline(unseen_raw, hand_sizes=hand_sizes, lib_sizes=lib_sizes)
+
+
 def _train_belief_model(
     *,
     train_ds: BeliefDataset,
     val_ds: BeliefDataset,
+    card_table: CardTable,
     copy_limits: Tensor | None,
     hidden_dim: int,
     epochs: int,
@@ -204,10 +229,11 @@ def _train_belief_model(
     lr: float,
     device: torch.device,
     seed: int,
+    t0: float,
 ) -> tuple[BeliefNet, dict[str, object]]:
     torch.manual_seed(seed)
-    model = BeliefNet(signal_dim=GAMEPLAY_SIGNAL_DIM, hidden_dim=hidden_dim).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    model = BeliefNet(signal_dim=GAMEPLAY_SIGNAL_DIM, hidden_dim=hidden_dim, embedding=card_table).to(device)
+    optimizer = torch.optim.AdamW(own_parameters(model, card_table), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs))
     limits_dev = copy_limits.to(device=device) if copy_limits is not None else None
     n_rows = train_ds.revealed_counts.shape[0]
@@ -250,6 +276,12 @@ def _train_belief_model(
             best_val_loss = val_losses["total_log_loss"]
             best_epoch = epoch
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        if epoch == 1 or epoch % 5 == 0 or epoch == epochs:
+            _log_phase(
+                t0,
+                f"BeliefNet epoch {epoch}/{epochs}: val deck={val_losses['deck_log_loss']:.4f} "
+                f"hand={val_losses['hand_log_loss']:.4f} total={val_losses['total_log_loss']:.4f}",
+            )
 
     model.load_state_dict(best_state)
     model.cpu().eval()
@@ -392,9 +424,15 @@ def run_belief_experiment(cfg: BeliefExperimentConfig) -> dict[str, object]:
     belief_dir.mkdir(parents=True, exist_ok=True)
 
     catalog = load_human_deck_catalog(cfg.decks_path)
+    _log_phase(
+        t0,
+        f"[1/5] Fitting FormatPrior on {catalog.train_decks.shape[0]} train decks ({len(catalog.card_names)} cards)",
+    )
     prior = fit_format_prior(cfg.format_id, catalog.card_names, catalog.train_decks)
     save_format_prior(belief_dir / "prior.pt", prior)
+    card_table = build_cooccurrence_card_table(catalog.train_decks)
 
+    _log_phase(t0, f"[2/5] Collecting {cfg.train_games} train + {cfg.val_games} held-out closed-decklist games")
     train_ds = collect_belief_dataset(
         catalog=catalog,
         prior=prior,
@@ -417,18 +455,24 @@ def run_belief_experiment(cfg: BeliefExperimentConfig) -> dict[str, object]:
         max_actions=cfg.max_actions,
         sample_stride=cfg.sample_stride,
     )
+    _log_phase(t0, f"Collected {train_ds.turns.numel()} train rows, {val_ds.turns.numel()} val rows")
 
     # Evaluate baselines vs trained BeliefNet on strictly unseen held-out decks.
     mean_prior_mat = prior.mean_copies.unsqueeze(0).expand(val_ds.revealed_counts.shape[0], -1)
     uncond_d, uncond_h = _scale_prior_baseline(
         mean_prior_mat, hand_sizes=val_ds.opp_hand_sizes, lib_sizes=val_ds.opp_library_sizes
     )
+    v2_meta_d, v2_meta_h = _v2_meta_guess_baseline(
+        val_ds.revealed_counts, prior=prior, hand_sizes=val_ds.opp_hand_sizes, lib_sizes=val_ds.opp_library_sizes
+    )
     bayes_d, bayes_h = _scale_prior_baseline(
         val_ds.deck_priors, hand_sizes=val_ds.opp_hand_sizes, lib_sizes=val_ds.opp_library_sizes
     )
+    _log_phase(t0, f"[3/5] Training BeliefNet (hidden={cfg.hidden_dim}, epochs={cfg.epochs}) on {device}")
     belief_net, train_info = _train_belief_model(
         train_ds=train_ds,
         val_ds=val_ds,
+        card_table=card_table,
         copy_limits=prior.copy_limits,
         hidden_dim=cfg.hidden_dim,
         epochs=cfg.epochs,
@@ -436,13 +480,14 @@ def run_belief_experiment(cfg: BeliefExperimentConfig) -> dict[str, object]:
         lr=cfg.lr,
         device=device,
         seed=cfg.seed,
+        t0=t0,
     )
     save_belief_net(belief_dir / "belief_net.pt", belief_net)
     net_d, net_h = _predict_belief_batched(
         belief_net, val_ds, copy_limits=prior.copy_limits, device=torch.device("cpu")
     )
 
-    card_table = build_cooccurrence_card_table(catalog.train_decks)
+    _log_phase(t0, f"[4/5] Training Turn-0 MatchupPredictor V_0 ({cfg.v0_epochs} epochs) on {device}")
     v0_model, v0_metrics = _train_v0_model(
         train_ds=train_ds,
         val_ds=val_ds,
@@ -455,6 +500,7 @@ def run_belief_experiment(cfg: BeliefExperimentConfig) -> dict[str, object]:
     )
     torch.save({"card_table": card_table.state_dict(), "state_dict": v0_model.state_dict()}, belief_dir / "v0.pt")
 
+    _log_phase(t0, f"[5/5] Arena H2H ({cfg.arena_deals} deals)")
     arena_records = _run_arena_h2h(cfg, belief_dir=belief_dir, device=device)
     summary: dict[str, object] = {
         "format_id": cfg.format_id,
@@ -467,6 +513,7 @@ def run_belief_experiment(cfg: BeliefExperimentConfig) -> dict[str, object]:
         "belief_train": train_info,
         "belief_val": {
             "unconditioned_mean_prior": evaluate_belief_metrics(uncond_d, uncond_h, dataset=val_ds),
+            "v2_guess_log_lift_prior": evaluate_belief_metrics(v2_meta_d, v2_meta_h, dataset=val_ds),
             "bayesian_pool_prior": evaluate_belief_metrics(bayes_d, bayes_h, dataset=val_ds),
             "trained_belief_net": evaluate_belief_metrics(net_d, net_h, dataset=val_ds),
         },

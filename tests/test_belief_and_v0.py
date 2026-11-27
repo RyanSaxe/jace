@@ -423,6 +423,31 @@ def test_belief_net_masks_copy_limit_exhausted_cards_and_roundtrips_checkpoint(t
     reloaded = load_belief_net(ckpt_path)
     assert reloaded.hidden_dim == 24
     assert reloaded.signal_dim == GAMEPLAY_SIGNAL_DIM
+    assert reloaded.embedding is None
+
+    emb_model = BeliefNet(signal_dim=GAMEPLAY_SIGNAL_DIM, hidden_dim=24, embedding=_card_table())
+    emb_path = tmp_path / "belief_net_emb.pt"
+    save_belief_net(emb_path, emb_model)
+    reloaded_emb = load_belief_net(emb_path)
+    assert isinstance(reloaded_emb.embedding, CardTable)
+    assert reloaded_emb.embedding.width == 8
+    emb_state_a = infer_belief_state(
+        emb_model,
+        prior=prior,
+        revealed_counts=revealed,
+        gameplay_signals=torch.zeros(GAMEPLAY_SIGNAL_DIM),
+        opp_hand_size=4,
+        opp_library_size=16,
+    )
+    emb_state_b = infer_belief_state(
+        reloaded_emb,
+        prior=prior,
+        revealed_counts=revealed,
+        gameplay_signals=torch.zeros(GAMEPLAY_SIGNAL_DIM),
+        opp_hand_size=4,
+        opp_library_size=16,
+    )
+    assert torch.allclose(emb_state_a.hand_probs, emb_state_b.hand_probs, atol=1e-6)
 
 
 def test_matchup_predictor_handles_all_zero_rows_gracefully() -> None:

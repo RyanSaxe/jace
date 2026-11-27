@@ -17,7 +17,7 @@ from torch import Tensor, nn
 from jace.belief.prior import BayesianDeckPoolPrior, PriorBackend, SetTransformerPrior
 from jace.belief.project import project_belief_overrides
 from jace.belief.types import BeliefState, FormatPrior, PriorBackendName
-from jace.cards import CardVectors, own_parameters
+from jace.cards import CardTable, CardVectors, own_parameters
 
 __all__ = (
     "GAMEPLAY_SIGNAL_DIM",
@@ -243,9 +243,11 @@ def infer_belief_state(
 
 def save_belief_net(path: Path, model: BeliefNet) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+    card_table = model.embedding.table.detach().cpu() if isinstance(model.embedding, CardTable) else None
+    payload: dict[str, object] = {
         "signal_dim": model.signal_dim,
         "hidden_dim": model.hidden_dim,
+        "card_table": card_table,
         "state_dict": model.state_dict(),
     }
     tmp_path = path.with_suffix(f"{path.suffix}.tmp")
@@ -260,8 +262,10 @@ def load_belief_net(path: Path) -> BeliefNet:
         raise TypeError(msg)
     signal_dim = int(payload.get("signal_dim", GAMEPLAY_SIGNAL_DIM))
     hidden_dim = int(payload.get("hidden_dim", 64))
+    raw_table = payload.get("card_table")
+    embedding = CardTable(raw_table) if isinstance(raw_table, Tensor) else None
     state_dict = payload.get("state_dict", payload)
-    model = BeliefNet(signal_dim=signal_dim, hidden_dim=hidden_dim)
+    model = BeliefNet(signal_dim=signal_dim, hidden_dim=hidden_dim, embedding=embedding)
     model.load_state_dict(state_dict)
     model.eval()
     return model
