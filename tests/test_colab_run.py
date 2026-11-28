@@ -12,6 +12,7 @@ than mocked subprocesses.
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -310,3 +311,47 @@ def test_stall_watchdog_restarts_with_shifted_seed_and_stops_on_exhaustion(tmp_p
     )
     assert run_colab_training(exhaust_cfg, runner=exhaust_runner, clock=fake_clock) == 124
     assert exhaust_runner.subcommands()[-2:] == ["stop", "usage"]
+
+
+def test_chunked_upload_sends_keepalive_and_prefers_newer_backup_resume(tmp_path: Path) -> None:
+    decks = _make_decks(tmp_path)
+    stale_dir = tmp_path / "stale-resume"
+    backup_dir = tmp_path / "backup-newer"
+    (stale_dir / "checkpoints").mkdir(parents=True)
+    (backup_dir / "checkpoints").mkdir(parents=True)
+
+    stale_bytes = b"A" * 65  # 7 chunks at chunk_bytes=10
+    newer_bytes = b"B" * 65  # 7 chunks -> triggers keepalive at idx=5
+    stale_file = stale_dir / "checkpoints" / "resume-state.pt"
+    newer_file = backup_dir / "checkpoints" / "resume-state.pt"
+    stale_file.write_bytes(stale_bytes)
+    newer_file.write_bytes(newer_bytes)
+    os.utime(stale_file, (1_000_000, 1_000_000))
+    os.utime(newer_file, (2_000_000, 2_000_000))
+
+    runner = _RecordingRunner(
+        exec_responses=[
+            CommandResult(0, "upload-keepalive\n"),
+            CommandResult(0, "ALIVE=False EXIT=0\n"),
+        ]
+    )
+    cfg = ColabRunConfig(
+        session="keepalive-resume",
+        decks_path=decks,
+        backup_dir=backup_dir,
+        run_id="r-keepalive",
+        resume_from=stale_dir,
+        poll_interval_s=0,
+        sync_interval_s=0,
+        upload_chunk_bytes=10,
+    )
+    assert run_colab_training(cfg, runner=runner) == 0
+
+    keepalive_calls = [
+        call for call in runner.calls if call[0][4] == "exec" and call[2] == "print('upload-keepalive')\n"
+    ]
+    assert len(keepalive_calls) == 1
+
+    expected_sha = hashlib.sha256(newer_bytes).hexdigest()
+    ssh_cmds = [cmd[-1] for cmd, _, _, _ in runner.calls if cmd[4] == "ssh"]
+    assert any(expected_sha in script for script in ssh_cmds)
