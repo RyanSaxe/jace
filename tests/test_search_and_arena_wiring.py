@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import managym
 import pytest
@@ -23,6 +24,7 @@ from jace.forks.search import (
     SearchConfig,
     build_belief_from_obs,
     extract_public_belief_inputs,
+    extract_revealed_hand_cards,
     run_local_search,
     sample_opponent_worlds,
 )
@@ -315,3 +317,27 @@ def test_fit_format_prior_roundtrip_smoke() -> None:
     decks = torch.tensor([[4.0, 2.0, 10.0], [1.0, 4.0, 10.0]], dtype=torch.float32)
     prior = fit_format_prior("smoke", ("Card A", "Card B", "Forest"), decks)
     assert prior.card_names == ("Card A", "Card B", "Forest")
+
+
+def test_extract_revealed_hand_cards_and_auto_pin_in_build_belief() -> None:
+    deal = build_deals(elemental_decks()[:2], count=1, seed=11, decklists="closed")[0]
+    _env, obs = _advance_to_branchable_priority(deal)
+    hero_seat = int(obs.agent.player_index)
+    prior = fit_arena_format_prior(format_id="elemental-test")
+    assert extract_revealed_hand_cards(obs, hero_seat=hero_seat) == {}
+
+    known_card = prior.card_names[0]
+    fake_revealed_card = SimpleNamespace(
+        is_token=False,
+        zone=int(ZoneEnum.HAND),
+        characteristics=SimpleNamespace(name=known_card),
+    )
+    proxy_obs = SimpleNamespace(
+        agent=obs.agent,
+        agent_cards=obs.agent_cards,
+        opponent_cards=[*obs.opponent_cards, fake_revealed_card],
+    )
+    assert extract_revealed_hand_cards(proxy_obs, hero_seat=hero_seat) == {known_card: 1}
+    belief, revealed = build_belief_from_obs(obs, prior=prior, hero_seat=hero_seat, prior_only=True)
+    assert float(belief.hand_probs.sum().item()) == pytest.approx(float(belief.opp_hand_size), abs=1e-4)
+    assert revealed.shape == (len(prior.card_names),)

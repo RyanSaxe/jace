@@ -8,10 +8,10 @@ Engine boundary (`managym 0.2.6`): `env.determinize()` rejects closed-decklist
 environments and `scenario_force_card_in_hand()` moves existing copies from the
 opponent's instantiated library (or graveyard) without creating absent card
 definitions. `_materialize_world` strictly guards the opponent's public
-graveyard (never pulling graveyard cards into hand), fills hidden hand slots
-using belief-weighted sampling over available library copies, and surfaces
-explicit warnings whenever a pinned counterfactual card cannot be materialized
-in the current instantiated decklist.
+graveyard (never pulling graveyard cards into hand), auto-pins any publicly
+revealed opponent hand cards at 100% probability before sampling remaining hidden
+slots over available library copies, and surfaces explicit warnings whenever a
+pinned counterfactual card cannot be materialized in the instantiated decklist.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import math
 import random
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import torch
 from managym.enums import ZoneEnum
@@ -62,6 +62,7 @@ __all__ = (
     "SearchResult",
     "build_belief_from_obs",
     "extract_public_belief_inputs",
+    "extract_revealed_hand_cards",
     "run_local_search",
     "sample_opponent_worlds",
 )
@@ -180,6 +181,48 @@ def _prior_only_belief(
     return BeliefState(card_names, deck, deck * (float(hand_sz) / float(unseen)), hand_sz, lib_sz, backend_name)
 
 
+class _HandCardObs(Protocol):
+    @property
+    def agent(self) -> object: ...
+    @property
+    def agent_cards(self) -> Sequence[object]: ...
+    @property
+    def opponent_cards(self) -> Sequence[object]: ...
+
+
+def extract_revealed_hand_cards(obs: _HandCardObs, *, hero_seat: int) -> dict[str, int]:
+    agent_idx = int(getattr(obs.agent, "player_index", -1))
+    cards = obs.opponent_cards if agent_idx == hero_seat else obs.agent_cards
+    hand_zone = int(ZoneEnum.HAND)
+    counts: dict[str, int] = {}
+    for card in cards:
+        if not bool(getattr(card, "is_token", False)) and int(getattr(card, "zone", -1)) == hand_zone:
+            chars = getattr(card, "characteristics", None)
+            name = str(getattr(chars, "name", ""))
+            if name:
+                counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _merge_revealed_hand_override(
+    obs: managym.Observation, *, hero_seat: int, overrides: BeliefOverride | None
+) -> BeliefOverride | None:
+    known_hand = extract_revealed_hand_cards(obs, hero_seat=hero_seat)
+    if not known_hand:
+        return overrides
+    if overrides is None:
+        return BeliefOverride(pinned_in_hand=known_hand)
+    merged_pins = dict(overrides.pinned_in_hand)
+    for name, count in known_hand.items():
+        merged_pins[name] = max(merged_pins.get(name, 0), count)
+    excluded = frozenset(name for name in overrides.excluded_cards if name not in known_hand)
+    return BeliefOverride(
+        pinned_in_hand=merged_pins,
+        excluded_cards=excluded,
+        copy_multipliers=dict(overrides.copy_multipliers),
+    )
+
+
 def build_belief_from_obs(
     obs: managym.Observation,
     *,
@@ -206,14 +249,24 @@ def build_belief_from_obs(
             prior_backend=backend,
             history=history,
         )
-        return state, revealed
-    state = _prior_only_belief(
-        backend.posterior_deck(revealed, prior),
-        card_names=prior.card_names,
-        hand_sz=hand_sz,
-        lib_sz=lib_sz,
-        backend_name=name,
-    )
+    else:
+        state = _prior_only_belief(
+            backend.posterior_deck(revealed, prior),
+            card_names=prior.card_names,
+            hand_sz=hand_sz,
+            lib_sz=lib_sz,
+            backend_name=name,
+        )
+    known_hand = {
+        k: v for k, v in extract_revealed_hand_cards(obs, hero_seat=hero_seat).items() if k in prior.card_names
+    }
+    if known_hand and sum(known_hand.values()) <= hand_sz:
+        state = project_belief_overrides(
+            state,
+            (BeliefOverride(pinned_in_hand=known_hand),),
+            revealed_counts=revealed,
+            copy_limits=prior.copy_limits,
+        )
     return state, revealed
 
 
@@ -498,6 +551,8 @@ def run_local_search(
             best_prior, (0.5,) * n_act, ((0.0, 1.0),) * n_act, tuple(priors), 0, config.horizon_plies, ms
         )
     hero, opp = int(obs.agent.player_index), int(obs.opponent.player_index)
+    known_hand = extract_revealed_hand_cards(obs, hero_seat=hero)
+    eff_overrides = _merge_revealed_hand_override(obs, hero_seat=hero, overrides=overrides)
     unmaterialized_pins: set[str] = set()
     worlds = sample_opponent_worlds(
         env,
@@ -507,8 +562,8 @@ def run_local_search(
         seed=seed,
         revealed_counts=revealed_counts,
         copy_limits=copy_limits,
-        overrides=overrides,
-        already_projected=already_projected,
+        overrides=eff_overrides,
+        already_projected=already_projected and not known_hand,
         unmaterialized_pins=unmaterialized_pins,
     )
     branches = _spawn_branches(worlds, num_actions=n_act, hero_idx=hero, seed=seed)
