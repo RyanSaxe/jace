@@ -4,6 +4,16 @@ This package operates exclusively on PyTorch tensors and `jace.cards.CardVectors
 with no engine (`managym`/`manabot`) dependencies.
 """
 
+from jace.belief.aux_head import PolicyBeliefAuxHead
+from jace.belief.history import (
+    HISTORY_EVENT_DIM,
+    MAX_EARLIER_BELIEFS,
+    MAX_HISTORY_STEPS,
+    BeliefHistoryBatch,
+    BeliefHistoryBuffer,
+    age_encoding,
+    pack_history_batches,
+)
 from jace.belief.model import (
     GAMEPLAY_SIGNAL_DIM,
     BeliefNet,
@@ -28,15 +38,22 @@ from jace.belief.v0 import MatchupPredictor, evaluate_opening_hand_vs_v0, score_
 
 __all__ = (
     "GAMEPLAY_SIGNAL_DIM",
+    "HISTORY_EVENT_DIM",
+    "MAX_EARLIER_BELIEFS",
+    "MAX_HISTORY_STEPS",
     "BayesianDeckPoolPrior",
+    "BeliefHistoryBatch",
+    "BeliefHistoryBuffer",
     "BeliefNet",
     "BeliefOverride",
     "BeliefState",
     "FormatPrior",
     "MatchupPredictor",
+    "PolicyBeliefAuxHead",
     "PriorBackend",
     "PriorBackendName",
     "SetTransformerPrior",
+    "age_encoding",
     "belief_loss",
     "evaluate_belief_log_loss",
     "evaluate_opening_hand_vs_v0",
@@ -44,6 +61,7 @@ __all__ = (
     "infer_belief_state",
     "load_belief_net",
     "load_format_prior",
+    "pack_history_batches",
     "project_belief_overrides",
     "save_belief_net",
     "save_format_prior",

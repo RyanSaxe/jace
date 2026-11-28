@@ -180,6 +180,8 @@ def _predict_belief_batched(
     with torch.no_grad():
         for start in range(0, dataset.revealed_counts.shape[0], batch_size):
             end = start + batch_size
+            idx_slice = torch.arange(start, min(end, dataset.revealed_counts.shape[0]))
+            hist_batch = None if dataset.history is None else dataset.history.slice_rows(idx_slice).to(device)
             pd, ph = model(
                 dataset.deck_priors[start:end].to(device),
                 dataset.revealed_counts[start:end].to(device),
@@ -187,6 +189,7 @@ def _predict_belief_batched(
                 dataset.opp_hand_sizes[start:end].to(device),
                 dataset.opp_library_sizes[start:end].to(device),
                 copy_limits=limits_dev,
+                history=hist_batch,
             )
             decks_out.append(pd.cpu())
             hands_out.append(ph.cpu())
@@ -250,6 +253,7 @@ def _train_belief_model(
         perm = torch.randperm(n_rows, generator=gen)
         for start in range(0, n_rows, batch_size):
             idx = perm[start : start + batch_size]
+            hist_batch = None if train_ds.history is None else train_ds.history.slice_rows(idx).to(device)
             optimizer.zero_grad(set_to_none=True)
             pd, ph = model(
                 train_ds.deck_priors[idx].to(device),
@@ -258,6 +262,7 @@ def _train_belief_model(
                 train_ds.opp_hand_sizes[idx].to(device),
                 train_ds.opp_library_sizes[idx].to(device),
                 copy_limits=limits_dev,
+                history=hist_batch,
             )
             loss = belief_loss(
                 pd,

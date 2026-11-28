@@ -6,6 +6,8 @@ import torch
 
 from jace.collect.decks import elemental_decks
 from jace.train.belief import BeliefExperimentConfig, run_belief_experiment
+from jace.train.belief_stream import BeliefStreamSpec
+from jace.train.full_data import FullDataConfig, run_full_data_training
 
 
 def _write_tiny_deck_catalog(path: Path) -> None:
@@ -60,3 +62,51 @@ def test_run_belief_experiment_trains_and_saves_artifacts(tmp_path: Path) -> Non
     belief_val = summary["belief_val"]
     assert isinstance(belief_val, dict)
     assert {"unconditioned_mean_prior", "bayesian_pool_prior", "trained_belief_net"} <= set(belief_val)
+
+
+def test_full_data_live_belief_stream_and_policy_aux_memory(tmp_path: Path) -> None:
+    decks_path = tmp_path / "tiny_decks.pt"
+    _write_tiny_deck_catalog(decks_path)
+    layout = run_full_data_training(
+        FullDataConfig(
+            runs_dir=tmp_path / "runs",
+            experiment="test-belief-stream",
+            run_id="smoke-aux",
+            decks_path=decks_path,
+            updates=2,
+            num_envs=4,
+            steps_per_env=8,
+            minibatch_size=16,
+            hidden_dim=16,
+            attention_layers=1,
+            decision_memory="none",
+            collect_workers=0,
+            collect_device="cpu",
+            learn_device="cpu",
+            eval_every=2,
+            eval_deals=1,
+            eval_workers=1,
+            forensics_deals=1,
+            probe_count=2,
+            record_train_fraction=1.0,
+            snapshot_fraction=0.0,
+            dense_early_checkpoints=False,
+            belief_stream=BeliefStreamSpec(
+                enabled=True,
+                every=1,
+                steps_per_update=2,
+                batch_size=16,
+                hidden_dim=16,
+                eval_games=2,
+                policy_aux_weight=0.1,
+                policy_aux_batch_size=8,
+            ),
+            seed=23,
+        )
+    )
+    belief_dir = layout.root / "belief"
+    assert (belief_dir / "prior.pt").is_file()
+    assert (belief_dir / "belief_net.pt").is_file()
+    assert (belief_dir / "v0.pt").is_file()
+    metrics_lines = layout.metrics_path.read_text(encoding="utf-8").splitlines()
+    assert any('"kind": "belief_eval"' in line for line in metrics_lines)

@@ -2,8 +2,9 @@
 
 Plays real closed-decklist games on `train` or `held_out` deck splits using a
 policy checkpoint (or `heuristic`), recording exact public belief inputs,
-ground-truth hidden opponent hand and unseen deck targets, and game outcomes
-for supervised training and held-out evaluation.
+rolling multi-turn event and earlier-belief histories, ground-truth hidden
+opponent hand and unseen deck targets, and game outcomes for supervised
+training and held-out evaluation.
 """
 
 from __future__ import annotations
@@ -19,7 +20,13 @@ import torch
 from manabot.backends.torch.checkpoint import load_checkpoint
 from managym.enums import ZoneEnum
 
-from jace.belief import BayesianDeckPoolPrior, FormatPrior
+from jace.belief import (
+    BayesianDeckPoolPrior,
+    BeliefHistoryBatch,
+    BeliefHistoryBuffer,
+    FormatPrior,
+    pack_history_batches,
+)
 from jace.collect.decks import HumanDeckCatalog, load_human_deck_catalog
 from jace.eval.deals import Deal, PlayerFn, PolicyPlayer, build_human_deals, heuristic_player
 from jace.forks.batch import _engine_error_types
@@ -40,6 +47,9 @@ __all__ = (
 _LOGGER = logging.getLogger(__name__)
 _PRIOR_CHUNK = 256
 
+type _HistorySnap = tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]
+type _GameRow = tuple[Tensor, Tensor, int, int, int, Tensor, Tensor, _HistorySnap]
+
 
 @dataclass(frozen=True, slots=True)
 class BeliefDataset:
@@ -54,6 +64,7 @@ class BeliefDataset:
     matchup_my_decks: Tensor
     matchup_opp_decks: Tensor
     matchup_outcomes: Tensor
+    history: BeliefHistoryBatch | None = None
 
 
 def deck_count_vector(deck: Mapping[str, int], *, name_to_idx: Mapping[str, int]) -> Tensor:
@@ -73,13 +84,14 @@ def _collect_game_rows(
     max_actions: int,
     sample_stride: int,
     use_mem: bool,
-) -> tuple[list[tuple[Tensor, Tensor, int, int, int, Tensor, Tensor]], tuple[Tensor, Tensor, float] | None]:
+) -> tuple[list[_GameRow], tuple[Tensor, Tensor, float] | None]:
     env = managym.Env(seed=deal.seed, skip_trivial=True, decision_memory=use_mem)
     deck_vecs = (
         deck_count_vector(deal.deck_a, name_to_idx=name_to_idx),
         deck_count_vector(deal.deck_b, name_to_idx=name_to_idx),
     )
-    rows: list[tuple[Tensor, Tensor, int, int, int, Tensor, Tensor]] = []
+    buffers = (BeliefHistoryBuffer(len(card_names)), BeliefHistoryBuffer(len(card_names)))
+    rows: list[_GameRow] = []
     outcome_pair: tuple[Tensor, Tensor, float] | None = None
     try:
         obs, _ = env.reset(deal.game_setup(swapped=False))
@@ -88,15 +100,24 @@ def _collect_game_rows(
         while not term and not trunc and step_idx < max_actions:
             acting = int(obs.agent.player_index)
             opp = 1 - acting
+            revealed, signals, hand_sz, lib_sz = extract_public_belief_inputs(
+                obs, card_names=card_names, hero_seat=acting
+            )
+            buffers[acting].record_step(
+                revealed_counts=revealed,
+                gameplay_signals=signals,
+                opp_hand_size=hand_sz,
+                opp_library_size=lib_sz,
+            )
             opp_hand_sz = int(obs.opponent.zone_counts[int(ZoneEnum.HAND)])
             if opp_hand_sz > 0 and step_idx % sample_stride == 0:
-                revealed, signals, hand_sz, lib_sz = extract_public_belief_inputs(
-                    obs, card_names=card_names, hero_seat=acting
-                )
                 hand_snap = env.hand_snapshot(opp).cards
                 target_hand = deck_count_vector(hand_snap, name_to_idx=name_to_idx)
                 target_deck = (deck_vecs[opp] - revealed).clamp_min(0.0)
-                rows.append((revealed, signals, hand_sz, lib_sz, int(obs.turn.turn_number), target_deck, target_hand))
+                hist_snap = buffers[acting].snapshot_tensors()
+                rows.append(
+                    (revealed, signals, hand_sz, lib_sz, int(obs.turn.turn_number), target_deck, target_hand, hist_snap)
+                )
             action = int(player(obs))
             obs, _, term, trunc, _ = env.step(action)
             step_idx += 1
@@ -110,12 +131,12 @@ def _collect_game_rows(
 
 def _worker_collect(
     args: tuple[Path | None, list[Deal], tuple[str, ...], int, int, int, bool],
-) -> tuple[list[tuple[Tensor, Tensor, int, int, int, Tensor, Tensor]], list[tuple[Tensor, Tensor, float]]]:
+) -> tuple[list[_GameRow], list[tuple[Tensor, Tensor, float]]]:
     ckpt_path, deals, card_names, seed, max_actions, sample_stride, deterministic = args
     logging.getLogger("manabot").setLevel(logging.WARNING)
     torch.set_num_threads(1)
     name_to_idx = {name: i for i, name in enumerate(card_names)}
-    rows_all: list[tuple[Tensor, Tensor, int, int, int, Tensor, Tensor]] = []
+    rows_all: list[_GameRow] = []
     outcomes_all: list[tuple[Tensor, Tensor, float]] = []
 
     if ckpt_path is None:
@@ -166,7 +187,7 @@ def _compute_bayesian_priors(revealed_counts: Tensor, prior: FormatPrior) -> Ten
 
 
 def _pack_dataset(
-    rows: Sequence[tuple[Tensor, Tensor, int, int, int, Tensor, Tensor]],
+    rows: Sequence[_GameRow],
     outcomes: Sequence[tuple[Tensor, Tensor, float]],
     *,
     prior: FormatPrior,
@@ -182,6 +203,7 @@ def _pack_dataset(
     turns = torch.tensor([r[4] for r in rows], dtype=torch.int64)
     target_deck = torch.stack([r[5] for r in rows])
     target_hand = torch.stack([r[6] for r in rows])
+    history = pack_history_batches([r[7] for r in rows])
     deck_priors = _compute_bayesian_priors(revealed, prior)
 
     if outcomes:
@@ -212,6 +234,7 @@ def _pack_dataset(
         matchup_my_decks=my_decks,
         matchup_opp_decks=opp_decks,
         matchup_outcomes=matchup_outcomes,
+        history=history,
     )
 
 
@@ -237,7 +260,7 @@ def collect_belief_dataset(
         for r, shard in enumerate(shards)
         if shard
     ]
-    rows: list[tuple[Tensor, Tensor, int, int, int, Tensor, Tensor]] = []
+    rows: list[_GameRow] = []
     outcomes: list[tuple[Tensor, Tensor, float]] = []
     if len(tasks) == 1:
         r_part, o_part = _worker_collect(tasks[0])

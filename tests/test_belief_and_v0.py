@@ -11,11 +11,14 @@ from torch import Tensor
 from jace.belief import (
     GAMEPLAY_SIGNAL_DIM,
     BayesianDeckPoolPrior,
+    BeliefHistoryBuffer,
     BeliefNet,
     BeliefOverride,
     BeliefState,
     MatchupPredictor,
+    PolicyBeliefAuxHead,
     SetTransformerPrior,
+    belief_loss,
     evaluate_belief_log_loss,
     evaluate_opening_hand_vs_v0,
     fit_format_prior,
@@ -458,3 +461,80 @@ def test_matchup_predictor_handles_all_zero_rows_gracefully() -> None:
     logits = predictor(decks, opp)
     assert logits.shape == (2,)
     assert torch.isfinite(logits).all()
+
+
+def test_history_belief_net_and_policy_aux_head_gradients(tmp_path: Path) -> None:
+    embedding = _card_table()
+    prior = fit_format_prior("TEST", CARD_NAMES, _sample_meta_decks())
+    model = BeliefNet(
+        signal_dim=GAMEPLAY_SIGNAL_DIM,
+        hidden_dim=16,
+        embedding=embedding,
+        use_history=True,
+        history_layers=1,
+        history_heads=2,
+    )
+    buf = BeliefHistoryBuffer(len(CARD_NAMES))
+    rev1 = torch.tensor([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    sig1 = torch.zeros(GAMEPLAY_SIGNAL_DIM)
+    sig1[6] = 0.05
+    buf.record_step(revealed_counts=rev1, gameplay_signals=sig1, opp_hand_size=6, opp_library_size=26)
+    s1 = infer_belief_state(
+        model,
+        prior=prior,
+        revealed_counts=rev1,
+        gameplay_signals=sig1,
+        opp_hand_size=6,
+        opp_library_size=26,
+        history=buf.to_batch(),
+    )
+    buf.record_belief(deck_copies=s1.deck_copies, hand_probs=s1.hand_probs)
+
+    rev2 = torch.tensor([2.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    sig2 = torch.zeros(GAMEPLAY_SIGNAL_DIM)
+    sig2[6] = 0.15
+    sig2[12] = 1.0
+    buf.record_step(revealed_counts=rev2, gameplay_signals=sig2, opp_hand_size=4, opp_library_size=24)
+    hist_batch = buf.to_batch()
+    s2 = infer_belief_state(
+        model,
+        prior=prior,
+        revealed_counts=rev2,
+        gameplay_signals=sig2,
+        opp_hand_size=4,
+        opp_library_size=24,
+        history=hist_batch,
+    )
+    assert torch.isclose(s2.hand_probs.sum(), torch.tensor(4.0), atol=1e-3)
+    assert torch.isclose(s2.deck_copies.sum(), torch.tensor(28.0), atol=1e-3)
+
+    # Save/load preserves history architecture and produces identical outputs.
+    ckpt = tmp_path / "hist_belief.pt"
+    save_belief_net(ckpt, model)
+    loaded = load_belief_net(ckpt)
+    assert loaded.use_history is True
+    s2_reloaded = infer_belief_state(
+        loaded,
+        prior=prior,
+        revealed_counts=rev2,
+        gameplay_signals=sig2,
+        opp_hand_size=4,
+        opp_library_size=24,
+        history=hist_batch,
+    )
+    assert torch.allclose(s2.hand_probs, s2_reloaded.hand_probs, atol=1e-6)
+
+    # PolicyBeliefAuxHead preserves conservation and flows gradients into memory summaries.
+    aux_head = PolicyBeliefAuxHead(memory_dim=16, embedding=embedding, hidden_dim=16)
+    mem = torch.randn((2, 4, 16), requires_grad=True)
+    deck_p = torch.stack((prior.mean_copies, prior.mean_copies))
+    rev_b = torch.stack((rev1, rev2))
+    h_sz = torch.tensor([6, 4], dtype=torch.int64)
+    l_sz = torch.tensor([26, 24], dtype=torch.int64)
+    pd, ph = aux_head(mem, deck_prior=deck_p, revealed_counts=rev_b, opp_hand_size=h_sz, opp_library_size=l_sz)
+    assert torch.allclose(ph.sum(dim=-1), h_sz.float(), atol=1e-3)
+    assert torch.allclose(pd.sum(dim=-1), (h_sz + l_sz).float(), atol=1e-3)
+    loss = belief_loss(pd, ph, target_deck=deck_p, target_hand=deck_p * 0.2)
+    loss.backward()
+    assert mem.grad is not None
+    assert bool(torch.isfinite(mem.grad).all())

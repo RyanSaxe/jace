@@ -26,6 +26,7 @@ from manabot.backends.torch.checkpoint import load_checkpoint
 
 from jace.belief import (
     BayesianDeckPoolPrior,
+    BeliefHistoryBuffer,
     BeliefNet,
     FormatPrior,
     fit_format_prior,
@@ -37,7 +38,13 @@ from jace.eval.arena import ArenaMatchRecord, SearchConfigSummary, run_arena_mat
 from jace.eval.deals import Deal, EnsemblePolicyPlayer, PlayerFn, PolicyPlayer
 from jace.eval.parallel import PairedDealResult, PlayerSpec, _open_spec_player
 from jace.forks.batch import _engine_error_types
-from jace.forks.search import SearchConfig, SearchResult, build_belief_from_obs, run_local_search
+from jace.forks.search import (
+    SearchConfig,
+    SearchResult,
+    build_belief_from_obs,
+    extract_public_belief_inputs,
+    run_local_search,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -87,6 +94,9 @@ class SearchPlayer:
         self._agent, self._obs_space, self._prior = agent, obs_space, prior
         self._config, self._belief_net, self._backend = config, belief_net, BayesianDeckPoolPrior()
         self._seed, self._step, self._scope = seed, 0, None
+        self._history = BeliefHistoryBuffer(len(prior.card_names))
+        self._last_turn = -1
+        self._last_env_id = -1
 
     def __enter__(self) -> Self:
         self._agent.eval()
@@ -107,14 +117,31 @@ class SearchPlayer:
         if self._scope is None:
             msg = "SearchPlayer must be entered as a context manager before choose()"
             raise RuntimeError(msg)
+        cur_turn = int(obs.turn.turn_number)
+        if id(env) != self._last_env_id or cur_turn < self._last_turn:
+            self._history.reset()
+        self._last_env_id = id(env)
+        self._last_turn = cur_turn
+        hero_seat = int(obs.agent.player_index)
+        rev_step, sig_step, h_sz, l_sz = extract_public_belief_inputs(
+            obs, card_names=self._prior.card_names, hero_seat=hero_seat
+        )
+        self._history.record_step(
+            revealed_counts=rev_step,
+            gameplay_signals=sig_step,
+            opp_hand_size=h_sz,
+            opp_library_size=l_sz,
+        )
         belief, rev = build_belief_from_obs(
             obs,
             prior=self._prior,
-            hero_seat=int(obs.agent.player_index),
+            hero_seat=hero_seat,
             belief_net=self._belief_net,
             prior_only=self._config.prior_only,
             prior_backend=self._backend,
+            history=self._history.to_batch(),
         )
+        self._history.record_belief(deck_copies=belief.deck_copies, hand_probs=belief.hand_probs)
         d_seed, self._step = self._seed + self._step * 1009, self._step + 1
         res = run_local_search(
             env,

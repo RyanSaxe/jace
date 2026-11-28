@@ -29,6 +29,7 @@ from managym.enums import ZoneEnum
 from jace.belief import (
     GAMEPLAY_SIGNAL_DIM,
     BayesianDeckPoolPrior,
+    BeliefHistoryBatch,
     BeliefNet,
     BeliefOverride,
     BeliefState,
@@ -187,6 +188,7 @@ def build_belief_from_obs(
     belief_net: BeliefNet | None = None,
     prior_only: bool = False,
     prior_backend: BayesianDeckPoolPrior | None = None,
+    history: BeliefHistoryBatch | None = None,
 ) -> tuple[BeliefState, Tensor]:
     revealed, signals, hand_sz, lib_sz = extract_public_belief_inputs(
         obs, card_names=prior.card_names, hero_seat=hero_seat
@@ -202,6 +204,7 @@ def build_belief_from_obs(
             opp_hand_size=hand_sz,
             opp_library_size=lib_sz,
             prior_backend=backend,
+            history=history,
         )
         return state, revealed
     state = _prior_only_belief(
