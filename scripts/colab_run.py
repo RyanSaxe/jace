@@ -77,6 +77,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _EXEC_TIMEOUT_S = 90.0
 _REMOTE_EXEC_TIMEOUT_S = 45
+_UPLOAD_KEEPALIVE_EVERY = 5
 _PROVISION_TIMEOUT_S = 420.0
 _TRANSFER_TIMEOUT_S = 600.0
 _SETUP_TIMEOUT_S = 900.0
@@ -373,6 +374,14 @@ def _upload_file(
         tmp_root = Path(tmp_dir)
         chunk_size = cfg.upload_chunk_bytes
         for idx, offset in enumerate(range(0, len(payload), chunk_size)):
+            if idx > 0 and idx % _UPLOAD_KEEPALIVE_EVERY == 0:
+                # Keep the Colab kernel active during multi-GB uploads so the ~20m idle reaper never fires.
+                runner(
+                    (*_COLAB_CMD, "exec", "-s", cfg.session, "--timeout", "30"),
+                    check=False,
+                    input_text="print('upload-keepalive')\n",
+                    timeout=60.0,
+                )
             part_path = tmp_root / f"part-{idx:04d}"
             part_path.write_bytes(payload[offset : offset + chunk_size])
             runner(
@@ -435,12 +444,33 @@ def _sync_once(
             _LOGGER.debug("sync skipped %s (exit %d)", remote_path, result.returncode)
 
 
-def _upload_resume_files(cfg: ColabRunConfig, *, remote_run_dir: str, runner: CommandRunner) -> None:
+def _resolve_resume_dir(cfg: ColabRunConfig) -> Path | None:
     if cfg.resume_from is None:
+        return None
+    backup_resume = cfg.backup_dir / "checkpoints" / _RESUME_FILENAME
+    source_resume = cfg.resume_from / "checkpoints" / _RESUME_FILENAME
+    if (
+        cfg.backup_dir.resolve() != cfg.resume_from.resolve()
+        and backup_resume.is_file()
+        and source_resume.is_file()
+        and backup_resume.stat().st_mtime > source_resume.stat().st_mtime
+    ):
+        _LOGGER.info(
+            "preferring newer backup resume-state.pt in %s over stale %s",
+            cfg.backup_dir,
+            cfg.resume_from,
+        )
+        return cfg.backup_dir
+    return cfg.resume_from
+
+
+def _upload_resume_files(cfg: ColabRunConfig, *, remote_run_dir: str, runner: CommandRunner) -> None:
+    resume_dir = _resolve_resume_dir(cfg)
+    if resume_dir is None:
         return
     # Jupyter's Contents API requires parent folders to exist before PUT uploads.
     runner(_prepare_resume_dirs_command(cfg.session, remote_run_dir=remote_run_dir), check=True, timeout=60.0)
-    for local_path, remote_path in _resume_uploads(cfg.resume_from, remote_run_dir=remote_run_dir):
+    for local_path, remote_path in _resume_uploads(resume_dir, remote_run_dir=remote_run_dir):
         _upload_file(cfg, local_path=local_path, remote_path=remote_path, runner=runner)
 
 

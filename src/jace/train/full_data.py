@@ -77,12 +77,21 @@ from jace.storage.gameplay import (
     save_weight_snapshot,
     should_save_weight_snapshot,
 )
+from jace.train.belief_stream import (
+    BeliefStreamSpec,
+    add_belief_stream_cli_args,
+    compose_prepare_aux,
+    open_belief_stream_trainer,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from manabot.backends.torch.policy import ActorCritic
     from manabot.env.observation import ObservationSpace
+
+    from jace.rl.loop import CollectFn, UpdateCallback
+    from jace.train.belief_stream import BeliefStreamTrainer
 
 __all__ = (
     "FullDataConfig",
@@ -174,6 +183,7 @@ class FullDataConfig:
     dense_early_checkpoints: bool = True
     preflight: bool = False
     fork: BatchedForkSpec = field(default_factory=BatchedForkSpec)
+    belief_stream: BeliefStreamSpec = field(default_factory=BeliefStreamSpec)
     seed: int = 1
 
 
@@ -353,6 +363,132 @@ def _init_training_state(
     return 1
 
 
+def _open_collector_for_session(
+    stack: ExitStack,
+    cfg: FullDataConfig,
+    *,
+    catalog: HumanDeckCatalog,
+    obs_space: ObservationSpace,
+    agent: ActorCritic,
+    layout: RunLayout,
+    collect_precision: PrecisionKind,
+    curriculum_pools: tuple[tuple[int, int, frozenset[str]], ...],
+    start_update: int,
+    record_fraction: float,
+) -> CollectFn:
+    if cfg.collect_workers > 0:
+        return stack.enter_context(
+            MultiProcessCollector(
+                WorkerPoolConfig(
+                    num_workers=cfg.collect_workers,
+                    envs_per_worker=max(1, cfg.num_envs // cfg.collect_workers),
+                    steps_per_env=cfg.steps_per_env,
+                    hidden_dim=cfg.hidden_dim,
+                    attention_layers=cfg.attention_layers,
+                    decision_memory=cfg.decision_memory,
+                    stream_norm=cfg.stream_norm,
+                    focus_film=cfg.focus_film,
+                    seed=cfg.seed,
+                    games_path=layout.train_games_path(),
+                    record_fraction=record_fraction,
+                    enable_snapshots=cfg.snapshot_fraction > 0.0,
+                    human_decks_path=cfg.decks_path,
+                    shard_size=cfg.shard_size,
+                    shard_refresh_every=cfg.shard_refresh_every,
+                    card_pool_size=cfg.card_pool_size,
+                    curriculum_pools=curriculum_pools,
+                    curriculum_blend_updates=cfg.curriculum_blend_updates,
+                    start_update=start_update,
+                )
+            )
+        ).collect
+    return stack.enter_context(
+        LocalShardedCollector(
+            LocalCollectorConfig(
+                num_envs=cfg.num_envs,
+                steps_per_env=cfg.steps_per_env,
+                collect_device=cfg.collect_device,
+                precision=collect_precision,
+                native_workers=cfg.native_workers,
+                seed=cfg.seed,
+                games_path=layout.train_games_path(),
+                record_fraction=record_fraction,
+                enable_snapshots=cfg.snapshot_fraction > 0.0,
+                shard_size=cfg.shard_size,
+                shard_refresh_every=cfg.shard_refresh_every,
+                card_pool_size=cfg.card_pool_size,
+                curriculum_pools=curriculum_pools,
+                curriculum_blend_updates=cfg.curriculum_blend_updates,
+                start_update=start_update,
+            ),
+            catalog=catalog,
+            obs_space=obs_space,
+            template_agent=agent,
+        )
+    ).collect
+
+
+def _handle_eval_or_resume(
+    update: int,
+    *,
+    cfg: FullDataConfig,
+    layout: RunLayout,
+    agent: ActorCritic,
+    optimizer: torch.optim.Optimizer,
+    pool: SnapshotPool | None,
+    ema_weights: EmaWeights | None,
+    run_eval: partial[dict[str, object]],
+    belief_trainer: BeliefStreamTrainer | None,
+) -> None:
+    if update % cfg.eval_every == 0 or update == cfg.updates:
+        run_eval(iteration=update, record_games=True)
+        if belief_trainer is not None:
+            belief_trainer.evaluate_and_save(update)
+    elif cfg.resume_save_every > 0 and update % cfg.resume_save_every == 0:
+        save_resume_state(
+            layout,
+            iteration=update,
+            optimizer=optimizer,
+            snapshot_pool=pool,
+            agent=agent,
+            ema=ema_weights,
+        )
+
+
+def _make_update_callback(
+    *,
+    cfg: FullDataConfig,
+    layout: RunLayout,
+    agent: ActorCritic,
+    optimizer: torch.optim.Optimizer,
+    pool: SnapshotPool | None,
+    ema_weights: EmaWeights | None,
+    records: list[StepRecord],
+    run_eval: partial[dict[str, object]],
+    belief_trainer: BeliefStreamTrainer | None,
+) -> UpdateCallback:
+    def on_update(record: StepRecord) -> None:
+        append_train_metric(layout, record)
+        records.append(record)
+        if belief_trainer is not None:
+            belief_trainer.step_after_update(record.update)
+        if should_save_weight_snapshot(record.update, dense_early=cfg.dense_early_checkpoints):
+            save_weight_snapshot(layout, iteration=record.update, agent=agent, ema=ema_weights)
+        _handle_eval_or_resume(
+            record.update,
+            cfg=cfg,
+            layout=layout,
+            agent=agent,
+            optimizer=optimizer,
+            pool=pool,
+            ema_weights=ema_weights,
+            run_eval=run_eval,
+            belief_trainer=belief_trainer,
+        )
+
+    return on_update
+
+
 def _run_training_session(cfg: FullDataConfig) -> _TrainingSession:
     logging.getLogger("manabot").setLevel(logging.WARNING)
     torch.manual_seed(cfg.seed)
@@ -426,22 +562,28 @@ def _run_training_session(cfg: FullDataConfig) -> _TrainingSession:
     if start_update == 1:
         run_eval(iteration=0, record_games=False)
 
-    def on_update(record: StepRecord) -> None:
-        append_train_metric(layout, record)
-        records.append(record)
-        if should_save_weight_snapshot(record.update, dense_early=cfg.dense_early_checkpoints):
-            save_weight_snapshot(layout, iteration=record.update, agent=agent, ema=ema_weights)
-        if record.update % cfg.eval_every == 0 or record.update == cfg.updates:
-            run_eval(iteration=record.update, record_games=True)
-        elif cfg.resume_save_every > 0 and record.update % cfg.resume_save_every == 0:
-            save_resume_state(
-                layout,
-                iteration=record.update,
-                optimizer=optimizer,
-                snapshot_pool=pool,
-                agent=agent,
-                ema=ema_weights,
-            )
+    belief_trainer = open_belief_stream_trainer(
+        cfg.belief_stream,
+        catalog=catalog,
+        obs_space=obs_space,
+        agent=agent,
+        layout=layout,
+        device=cfg.learn_device,
+        seed=cfg.seed,
+    )
+    effective_record_fraction = max(cfg.record_train_fraction, 0.25 if belief_trainer is not None else 0.0)
+
+    on_update = _make_update_callback(
+        cfg=cfg,
+        layout=layout,
+        agent=agent,
+        optimizer=optimizer,
+        pool=pool,
+        ema_weights=ema_weights,
+        records=records,
+        run_eval=run_eval,
+        belief_trainer=belief_trainer,
+    )
 
     train_cfg = TrainConfig(
         updates=cfg.updates,
@@ -462,7 +604,7 @@ def _run_training_session(cfg: FullDataConfig) -> _TrainingSession:
             precision=learn_precision,
         ),
         games_path=layout.train_games_path(),
-        record_fraction=cfg.record_train_fraction,
+        record_fraction=effective_record_fraction,
         snapshot_fraction=cfg.snapshot_fraction,
         snapshot_every=cfg.snapshot_every,
         snapshot_pool_size=cfg.snapshot_pool_size,
@@ -472,59 +614,19 @@ def _run_training_session(cfg: FullDataConfig) -> _TrainingSession:
         ema=cfg.ema,
     )
     with ExitStack() as stack:
-        collect_fn = (
-            stack.enter_context(
-                MultiProcessCollector(
-                    WorkerPoolConfig(
-                        num_workers=cfg.collect_workers,
-                        envs_per_worker=max(1, cfg.num_envs // cfg.collect_workers),
-                        steps_per_env=cfg.steps_per_env,
-                        hidden_dim=cfg.hidden_dim,
-                        attention_layers=cfg.attention_layers,
-                        decision_memory=cfg.decision_memory,
-                        stream_norm=cfg.stream_norm,
-                        focus_film=cfg.focus_film,
-                        seed=cfg.seed,
-                        games_path=layout.train_games_path(),
-                        record_fraction=cfg.record_train_fraction,
-                        enable_snapshots=cfg.snapshot_fraction > 0.0,
-                        human_decks_path=cfg.decks_path,
-                        shard_size=cfg.shard_size,
-                        shard_refresh_every=cfg.shard_refresh_every,
-                        card_pool_size=cfg.card_pool_size,
-                        curriculum_pools=curriculum_pools,
-                        curriculum_blend_updates=cfg.curriculum_blend_updates,
-                        start_update=start_update,
-                    )
-                )
-            ).collect
-            if cfg.collect_workers > 0
-            else stack.enter_context(
-                LocalShardedCollector(
-                    LocalCollectorConfig(
-                        num_envs=cfg.num_envs,
-                        steps_per_env=cfg.steps_per_env,
-                        collect_device=cfg.collect_device,
-                        precision=collect_precision,
-                        native_workers=cfg.native_workers,
-                        seed=cfg.seed,
-                        games_path=layout.train_games_path(),
-                        record_fraction=cfg.record_train_fraction,
-                        enable_snapshots=cfg.snapshot_fraction > 0.0,
-                        shard_size=cfg.shard_size,
-                        shard_refresh_every=cfg.shard_refresh_every,
-                        card_pool_size=cfg.card_pool_size,
-                        curriculum_pools=curriculum_pools,
-                        curriculum_blend_updates=cfg.curriculum_blend_updates,
-                        start_update=start_update,
-                    ),
-                    catalog=catalog,
-                    obs_space=obs_space,
-                    template_agent=agent,
-                )
-            ).collect
+        collect_fn = _open_collector_for_session(
+            stack,
+            cfg,
+            catalog=catalog,
+            obs_space=obs_space,
+            agent=agent,
+            layout=layout,
+            collect_precision=collect_precision,
+            curriculum_pools=curriculum_pools,
+            start_update=start_update,
+            record_fraction=effective_record_fraction,
         )
-        prepare_aux = open_batched_fork_hook(
+        fork_prepare_aux = open_batched_fork_hook(
             stack,
             cfg.fork,
             hidden_dim=cfg.hidden_dim,
@@ -536,6 +638,10 @@ def _run_training_session(cfg: FullDataConfig) -> _TrainingSession:
             learn_device=cfg.learn_device,
             seed=cfg.seed + 50_000,
             layout=layout,
+        )
+        prepare_aux = compose_prepare_aux(
+            fork_prepare_aux,
+            None if belief_trainer is None else belief_trainer.prepare_policy_belief_aux,
         )
         train_self_play(
             agent,
@@ -789,11 +895,13 @@ def _parse_args(argv: Sequence[str] | None) -> FullDataConfig:
     parser.add_argument("--dense-early-checkpoints", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--preflight", action="store_true", default=False)
     add_fork_cli_args(parser)
+    add_belief_stream_cli_args(parser)
     parser.add_argument("--seed", type=int, default=1)
     ns = parser.parse_args(argv)
     fork_spec = BatchedForkSpec.from_namespace(ns)
-    raw = {key: val for key, val in vars(ns).items() if not key.startswith("fork")}
-    return FullDataConfig(**raw, fork=fork_spec)
+    belief_spec = BeliefStreamSpec.from_namespace(ns)
+    raw = {key: val for key, val in vars(ns).items() if not key.startswith(("fork", "belief_"))}
+    return FullDataConfig(**raw, fork=fork_spec, belief_stream=belief_spec)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

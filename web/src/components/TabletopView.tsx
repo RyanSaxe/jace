@@ -1,10 +1,23 @@
-/** Desktop Tabletop Option A (Analysis Board), Direct-on-Board Edit Mode, Policy Matrix, and 390px 100dvh Mobile Tabletop. */
+/** Desktop Tabletop Analysis Board, Direct-on-Board Edit Mode, Belief & Search inspection, Policy Matrix, and 390px 100dvh Mobile Tabletop. */
 
-import { ChevronLeft, ChevronRight, LayoutGrid, Pencil, SlidersHorizontal } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  LayoutGrid,
+  Pencil,
+  Sliders,
+  SlidersHorizontal,
+  X,
+} from "lucide-react";
 import { type ReactNode, useCallback, useMemo, useRef, useState } from "react";
 import { PinPositionPopover, PolicyMatrixModal } from "@/components/PolicyMatrixModal";
 import {
-  MobilePolicySheet,
+  BeliefEditorDrawer,
+  type BeliefEditorDrawerProps,
+  countActiveOverrides,
+  useBeliefSearchState,
+} from "@/components/belief";
+import {
   type ReadyPayload,
   TabletopDock,
   type TabletopDockProps,
@@ -181,6 +194,43 @@ function requestPolicyMatrix(args: {
     });
 }
 
+function MobilePolicySheet(props: {
+  open: boolean;
+  onClose: () => void;
+  dockProps: TabletopDockProps;
+}): ReactNode {
+  if (!props.open) return null;
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col justify-end lg:hidden">
+      <button
+        type="button"
+        aria-label="Dismiss policy sheet"
+        onClick={props.onClose}
+        className="flex-1 bg-black/45 border-0"
+      />
+      <div className="h-[74dvh] max-h-[620px] rounded-t-[14px] border-t border-[var(--border-strong)] bg-[var(--surface)] shadow-[var(--shadow-lg)] flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between px-3 py-1.5 border-b border-[var(--border)] shrink-0">
+          <span className="text-[11px] font-bold text-[var(--text-2)]">Decision Analysis</span>
+          <button
+            type="button"
+            onClick={props.onClose}
+            aria-label="Close policy sheet"
+            className="p-1 rounded text-[var(--text-2)] hover:bg-[var(--surface-2)] cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <TabletopDock
+            {...props.dockProps}
+            className="w-full h-full flex flex-col min-h-0 overflow-hidden bg-[var(--surface)]"
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ReadyWorkspace(props: {
   target: GameTarget;
   active: ReadyPayload;
@@ -190,19 +240,21 @@ function ReadyWorkspace(props: {
   overview: OverviewInfo;
   playmatCtrl: PlaymatController;
   dockProps: TabletopDockProps;
+  beliefDrawerProps: BeliefEditorDrawerProps;
   matrix: MatrixUiState;
   onToggleEdit: () => void;
   onPinSave: (p: { label: string; note: string; tag: string }) => void;
   onLoadMatrix: (models: string[]) => void;
   onCloseMatrix: () => void;
 }): ReactNode {
-  const { active, playmatCtrl: ctrl, dockProps, target, matrix } = props;
+  const { active, playmatCtrl: ctrl, dockProps, target, matrix, beliefDrawerProps } = props;
   const upperStep = Math.max(
     0,
     Math.min(Math.max(0, active.board.total_steps - 1), props.overview.maxPlayableStep),
   );
   const btnCls =
     "min-h-[34px] h-[34px] px-2 rounded-md border border-[var(--border)] bg-[var(--surface-2)] text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer disabled:opacity-40";
+  const beliefCount = countActiveOverrides(beliefDrawerProps.override);
   return (
     <>
       {ctrl.overlay === "pin" ? (
@@ -223,6 +275,7 @@ function ReadyWorkspace(props: {
           overview={props.overview}
           ctrl={ctrl}
         />
+        <BeliefEditorDrawer {...beliefDrawerProps} />
         <div className="hidden lg:flex lg:w-[340px] shrink-0 h-full min-h-0">
           <TabletopDock {...dockProps} />
         </div>
@@ -264,6 +317,18 @@ function ReadyWorkspace(props: {
             }
           >
             <SlidersHorizontal className="w-3 h-3" /> Policy ({active.board.legal_actions.length})
+          </button>
+          <button
+            type="button"
+            onClick={dockProps.belief?.onToggleEditor}
+            className={
+              beliefDrawerProps.open || beliefCount > 0
+                ? `${btnCls} !bg-[var(--fork-soft)] !text-[var(--fork)] !border-[var(--fork)]`
+                : btnCls
+            }
+          >
+            <Sliders className="w-3 h-3" /> Belief
+            {beliefCount > 0 ? ` (${beliefCount})` : ""}
           </button>
           <button
             type="button"
@@ -376,6 +441,7 @@ function LoadedTabletop(
     enabled: hasMutations,
   });
   const overviewInfo = resolveOverviewInfo(overview, data?.replay_warning);
+  const beliefControllers = useBeliefSearchState(target, effectiveA);
 
   const clearFork = useCallback((): void => {
     setForkEdits([]);
@@ -559,7 +625,9 @@ function LoadedTabletop(
             onSelectStep: selectStep,
             onHoverActionFocus: setActionFocusIds,
             onOpenPolicyMatrix: openMatrix,
+            belief: beliefControllers.dock,
           }}
+          beliefDrawerProps={beliefControllers.drawer}
         />
       ) : (
         <div className="flex-1 flex items-center justify-center text-xs text-[var(--text-3)]">

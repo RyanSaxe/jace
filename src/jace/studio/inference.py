@@ -28,6 +28,7 @@ from jace.studio.replay import engine_step_errors, non_permanent_card_names, ser
 from jace.studio.runs import resolve_run_dir
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from manabot.backends.torch.policy import ActorCritic, PolicyInference
@@ -467,6 +468,18 @@ class InferenceEngine:
             _, evicted = self._cache.popitem(last=False)
             evicted.scope.__exit__(None, None, None)
         return model
+
+    def run_with_checkpoint[T](
+        self,
+        *,
+        run_id: str,
+        checkpoint_name: str,
+        fn: Callable[[PolicyInference, ObservationSpace], T],
+    ) -> T:
+        ckpt_path = self._resolve_checkpoint(run_id, checkpoint_name)
+        with self._lock:
+            cached = self._get_or_load_locked(ckpt_path)
+            return fn(cached.scope, cached.obs_space)
 
     def evaluate_batch_full(
         self,

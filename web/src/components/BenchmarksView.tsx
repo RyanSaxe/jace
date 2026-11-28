@@ -386,11 +386,11 @@ function ArenaEmptyState(props: { format: string }): ReactNode {
     <div className="rounded-lg border border-dashed border-[var(--border-strong)] bg-[var(--surface)] p-8 text-center max-w-2xl mx-auto my-6 flex flex-col items-center gap-3">
       <div className="text-sm font-semibold text-[var(--text)]">No Arena matches recorded yet</div>
       <div className="text-xs text-[var(--text-2)]">
-        Run a mirrored Arena match or backfill historical results to populate the Bradley-Terry
+        Run a mirrored Arena match or import external match summaries to populate the Bradley-Terry
         leaderboard:
       </div>
       <pre className="w-full overflow-x-auto rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-left text-[11px] text-[var(--text)] tabular">
-        {`uv run python -m jace.eval.arena backfill --runs-dir <runs-dir> --format ${fmt}`}
+        {`uv run python -m jace.eval.arena match --runs-dir <runs-dir> --format ${fmt} --model-a <checkpoint> --model-b heuristic`}
       </pre>
     </div>
   );
@@ -706,11 +706,7 @@ function resolveDefaultPuzzleModels(
   routeState: BenchmarksRouteState,
   checkpoints: GlobalCheckpointOption[],
 ): { modelA: string; modelB: string } {
-  const ranked = checkpoints.toSorted((a, b) => {
-    const aFlag = /flagship|stage2|s2b/i.test(a.run_name) ? 1 : 0;
-    const bFlag = /flagship|stage2|s2b/i.test(b.run_name) ? 1 : 0;
-    return bFlag - aFlag || b.iteration - a.iteration;
-  });
+  const ranked = checkpoints.toSorted((a, b) => b.iteration - a.iteration);
   return {
     modelA: resolvePuzzleSlot(routeState.modelA, ranked[0]?.ref ?? ""),
     modelB: resolvePuzzleSlot(routeState.modelB, "heuristic"),

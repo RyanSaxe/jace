@@ -451,8 +451,7 @@ def _init_panel(canvas: _PlotCanvas, frame: _PlotFrame, *, title: str, y_fmt: st
 
 
 def _short_tick_label(player_id: str) -> str:
-    compact = player_id.replace("Flagship-", "FS-").replace("Stage2B-", "S2B-")
-    return compact[:11]
+    return player_id[:11]
 
 
 def _render_elo_figure(ratings: Sequence[BradleyTerryRating], out_path: Path, *, format_id: str) -> bool:

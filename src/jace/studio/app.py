@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from jace.studio.analysis import compare_checkpoints, run_action_playouts
+from jace.studio.belief_api import register_belief_and_search_routes
 from jace.studio.benchmarks import BenchmarkService
 from jace.studio.index import GameQuery, StudioIndex
 from jace.studio.inference import ForkEdit, InferenceEngine, apply_fork_and_branch
@@ -713,6 +714,7 @@ def create_app(config: StudioConfig) -> FastAPI:
     _register_asset_routes(app, scryfall)
     _register_watchlist_routes(app, watchlist)
     _register_benchmark_routes(app, benchmarks=benchmarks, watchlist=watchlist)
+    register_belief_and_search_routes(app, runs_dir=runs_dir, replays=replays, inference=inference, index=index)
     web_dist = config.web_dist if config.web_dist is not None else _DEFAULT_WEB_DIST
     if web_dist.is_dir():
         app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="studio-web")
