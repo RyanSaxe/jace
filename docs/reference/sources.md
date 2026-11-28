@@ -19,10 +19,27 @@ what jace does instead.
   AlphaZero updates this network continually, where AlphaGo Zero let a new
   network play only once it beat the best one by a 55% margin.
 
-  jace has no search yet. A search added to jace would have this shape, with one
-  tree for each dealt world: one deal of the hidden cards, searched as if those
-  cards were known. The continual updating is one reason the learning deck score
-  trains from the first iteration.
+  In jace, `jace.forks.search` implements belief-conditioned multi-world rollout
+  search over `K` sampled opponent hands with truncated value-head leaves
+  (`horizon_plies=24`) and shared world RNG across root actions. Current
+  `managym 0.2.6` world materialization (`scenario_force_card_in_hand`)
+  auto-pins publicly revealed opponent hand cards at 100% and samples hidden
+  hand slots from the opponent's instantiated library (open-decklist hidden-hand
+  search); true zero-leakage closed-decklist search requires a
+  library-replacement engine primitive. The continual updating is one reason the
+  learning deck score trains from the first iteration.
+
+- [Accelerating Self-Play Learning in Go](https://arxiv.org/abs/1902.10565).
+  Wu, 2019. KataGo decouples value-head throughput from policy-target depth via
+  playout cap randomization: most self-play moves run a cheap fast search
+  (generating fast terminal outcomes for value training) while a random minority
+  (~25%) run a full search and supply the only policy training targets, cutting
+  total compute dramatically.
+
+  In jace, this motivates selective search distillation and adaptive search
+  budgets at critical junctions (gating world count by policy top-2 gap,
+  entropy, or predicted stakes rather than paying full search cost on every
+  trivial decision).
 
 - [Thinking Fast and Slow with Deep Learning and Tree Search](https://arxiv.org/abs/1705.08439).
   Anthony, Tian and Barber, 2017. In expert iteration a search guided by the
@@ -94,10 +111,12 @@ what jace does instead.
   with dual reverse-KL pulls (`collection_kl` toward the behavior policy and
   `magnet_kl` toward `reference_probs`), paired with
   `jace.rl.select.top_fraction` advantage filtering and
-  `jace.rl.schedules.DampedSchedule` (Table S7 curves). An earlier separate
-  guess model was replaced by closed-decklist `v11` observations on the
-  `ActorCritic` backbone. Batched counterfactual forks (`jace.forks.batch`)
-  follow the short playout + regularized step pattern.
+  `jace.rl.schedules.DampedSchedule` (Table S7 curves). `jace.belief.BeliefNet`
+  (`use_history=True`) and `jace.train.belief_stream` follow the history-aware
+  belief network trained on true hidden opponent cards from live closed-decklist
+  self-play games while keeping `FormatPrior` frozen on human decks. Batched
+  counterfactual forks (`jace.forks.batch`) follow the short playout +
+  regularized step pattern.
 
 - [The Update-Equivalence Framework for Decision-Time Planning](https://arxiv.org/abs/2304.13138).
   Sokota et al., 2023. Planning at decision time can sample histories from a
