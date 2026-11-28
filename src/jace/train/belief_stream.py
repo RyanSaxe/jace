@@ -297,9 +297,10 @@ class BeliefStreamTrainer:
         self._rng = random.Random(seed + 42_001)
         self._name_to_idx = {name: i for i, name in enumerate(catalog.card_names)}
         self._prior_backend = BayesianDeckPoolPrior()
-        self._file_offset = 0
+        self._file_offsets: dict[Path, int] = {}
         self._games_ingested = 0
         self._aux_grad_pending = False
+        self._last_aux_loss: float | None = None
 
         # FormatPrior and CardTable stay strictly frozen on human train_decks (zero builder-deck drift).
         self.prior: FormatPrior = fit_format_prior(
@@ -349,9 +350,20 @@ class BeliefStreamTrainer:
         belief_dir.mkdir(parents=True, exist_ok=True)
         save_format_prior(belief_dir / "prior.pt", self.prior)
 
+    def _recorded_game_paths(self, jsonl_path: Path | None) -> list[Path]:
+        if jsonl_path is not None:
+            return [jsonl_path] if jsonl_path.is_file() else []
+        base = self._layout.train_games_path()
+        candidates = [base, *sorted(base.parent.glob(f"{base.stem}-*{base.suffix}"))]
+        return [p for p in candidates if p.is_file()]
+
     def ingest_recorded_games(self, jsonl_path: Path | None = None) -> int:
-        path = self._layout.train_games_path() if jsonl_path is None else jsonl_path
-        games, self._file_offset = _read_new_games(path, self._file_offset)
+        games: list[dict[str, object]] = []
+        for path in self._recorded_game_paths(jsonl_path):
+            prev_offset = self._file_offsets.get(path, 0)
+            new_games, new_offset = _read_new_games(path, prev_offset)
+            self._file_offsets[path] = new_offset
+            games.extend(new_games)
         if not games:
             return 0
         trimmed = games[-self.spec.max_games_per_ingest :]
@@ -468,12 +480,14 @@ class BeliefStreamTrainer:
             b_losses.append(float(loss.item()))
 
         v0_loss_val = self._train_v0_steps()
-        metrics = {
+        metrics: dict[str, float] = {
             "belief_stream_games": float(self._games_ingested),
             "belief_stream_rows": float(len(self._rows)),
             "belief_stream_train_loss": round(sum(b_losses) / len(b_losses), 4),
             "v0_stream_train_loss": round(v0_loss_val, 4),
         }
+        if self._last_aux_loss is not None:
+            metrics["belief_policy_aux_loss"] = round(self._last_aux_loss, 4)
         append_metric(self._layout, {"kind": "belief_stream", "update": update_idx, **metrics})
         return metrics
 
@@ -528,16 +542,19 @@ class BeliefStreamTrainer:
             aux_head.train()
             aux_opt.zero_grad(set_to_none=True)
             summaries = _extract_policy_belief_features(agent, prepared)
-            pd, ph = aux_head(
-                summaries,
-                deck_prior=deck_p,
-                revealed_counts=rev,
-                opp_hand_size=h_sz,
-                opp_library_size=l_sz,
-                copy_limits=limits_dev,
-            )
+            with torch.amp.autocast(device_type=self._device.type, enabled=False):
+                pd, ph = aux_head(
+                    summaries.float(),
+                    deck_prior=deck_p,
+                    revealed_counts=rev,
+                    opp_hand_size=h_sz,
+                    opp_library_size=l_sz,
+                    copy_limits=limits_dev,
+                )
+                raw_loss = belief_loss(pd, ph, target_deck=t_deck, target_hand=t_hand)
             self._aux_grad_pending = True
-            return weight * belief_loss(pd, ph, target_deck=t_deck, target_hand=t_hand)
+            self._last_aux_loss = float(raw_loss.detach().item())
+            return weight * raw_loss
 
         return _aux_loss
 

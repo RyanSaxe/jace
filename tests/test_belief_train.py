@@ -81,6 +81,7 @@ def test_full_data_live_belief_stream_and_policy_aux_memory(tmp_path: Path) -> N
             attention_layers=1,
             decision_memory="none",
             collect_workers=0,
+            native_workers=2,
             collect_device="cpu",
             learn_device="cpu",
             eval_every=2,
@@ -109,4 +110,6 @@ def test_full_data_live_belief_stream_and_policy_aux_memory(tmp_path: Path) -> N
     assert (belief_dir / "belief_net.pt").is_file()
     assert (belief_dir / "v0.pt").is_file()
     metrics_lines = layout.metrics_path.read_text(encoding="utf-8").splitlines()
+    assert any('"kind": "belief_stream"' in line for line in metrics_lines)
+    assert any('"belief_policy_aux_loss"' in line for line in metrics_lines)
     assert any('"kind": "belief_eval"' in line for line in metrics_lines)
